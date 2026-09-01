@@ -47,6 +47,8 @@ type RobotState struct {
 	Weapon         string         `json:"weapon,omitempty"`
 	Effects        []StatusEffect `json:"effects,omitempty"`
 	Shield         int            `json:"shield,omitempty"`
+	DashCharges    int            `json:"dashCharges,omitempty"`
+	MineCharges    int            `json:"mineCharges,omitempty"`
 	Kills          int            `json:"kills"`
 	Deaths         int            `json:"deaths"`
 	DamageDealt    int            `json:"damageDealt"`
@@ -144,18 +146,18 @@ type Snapshot struct {
 }
 
 type Arena struct {
-	MatchID       string
-	TickNumber    int
-	MaxTicks      int
-	Robots        []RobotState
-	Projectiles   []Projectile
-	Items         []Item
-	Config        Config
+	MatchID     string
+	TickNumber  int
+	MaxTicks    int
+	Robots      []RobotState
+	Projectiles []Projectile
+	Items       []Item
+	Config      Config
 	// singleTeam is set when the roster fielded exactly one team (solo lobby
 	// without bots). Such matches must not end at tick 0 through the
 	// last-team-standing rule; they end only when everyone dies or ticks out.
-	singleTeam  string
-	controllers map[string]Controller
+	singleTeam    string
+	controllers   map[string]Controller
 	withdrawals   chan string
 	winner        string
 	finished      bool
@@ -363,7 +365,15 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 }
 
 func (a *Arena) fire(r *RobotState) []Event {
+	if r.Weapon == "mine_layer" {
+		// Mines deploy through the deploy intent, not the fire phase; the
+		// cooldown keeps a held trigger from retrying every tick.
+		r.Cooldown = 20
+		return nil
+	}
 	w := WeaponByName(r.Weapon)
+	// Firing breaks cloak before the shot resolves.
+	breakCloak(r)
 	cd := w.Cooldown
 	if effectActive(*r, "rapid_fire") {
 		cd = max(1, cd/2)
@@ -373,12 +383,23 @@ func (a *Arena) fire(r *RobotState) []Event {
 	if a.overtime() {
 		damage *= 2
 	}
-	angle := r.Heading
-	if w.Spread > 0 {
-		angle += (a.rng.Float64()*2 - 1) * w.Spread
+	if effectActive(*r, "berserk") {
+		damage = int(math.Round(float64(damage) * 1.5))
 	}
+	angle := r.Heading
 	rad := angle * math.Pi / 180
 	e := []Event{a.event(Event{Type: "shot_fired", RobotID: r.RobotID, Message: w.Name})}
+	if w.Pellets > 1 {
+		for range w.Pellets {
+			pellet := angle + (a.rng.Float64()*2-1)*w.Spread
+			a.Projectiles = append(a.Projectiles, a.projectile(r, w, pellet*math.Pi/180, damage))
+		}
+		return e
+	}
+	if w.Spread > 0 {
+		angle += (a.rng.Float64()*2 - 1) * w.Spread
+		rad = angle * math.Pi / 180
+	}
 	if w.Hitscan {
 		target, d := a.firstTargetOnRay(*r, rad, w.Range)
 		if target != nil {
@@ -387,8 +408,14 @@ func (a *Arena) fire(r *RobotState) []Event {
 		}
 		return e
 	}
-	a.Projectiles = append(a.Projectiles, Projectile{ProjectileID: fmt.Sprintf("%s-%d-%d", r.RobotID, a.TickNumber, len(a.Projectiles)), OwnerID: r.RobotID, Team: r.Team, Kind: w.Name, X: r.X + math.Cos(rad)*(RobotRadius+ProjectileRadius+1), Y: r.Y + math.Sin(rad)*(RobotRadius+ProjectileRadius+1), VX: math.Cos(rad) * w.ProjectileSpeed, VY: math.Sin(rad) * w.ProjectileSpeed, Damage: damage, TTL: max(1, int(w.Range/w.ProjectileSpeed)), Knockback: w.Knockback, BurnTicks: w.BurnTicks, SlowTicks: w.SlowTicks, EMPTicks: w.EMPTicks})
+	a.Projectiles = append(a.Projectiles, a.projectile(r, w, rad, damage))
 	return e
+}
+
+// projectile builds one fired projectile. The ID embeds the live projectile
+// count so multi-pellet shots in the same tick stay unique.
+func (a *Arena) projectile(r *RobotState, w Weapon, rad float64, damage int) Projectile {
+	return Projectile{ProjectileID: fmt.Sprintf("%s-%d-%d", r.RobotID, a.TickNumber, len(a.Projectiles)), OwnerID: r.RobotID, Team: r.Team, Kind: w.Name, X: r.X + math.Cos(rad)*(RobotRadius+ProjectileRadius+1), Y: r.Y + math.Sin(rad)*(RobotRadius+ProjectileRadius+1), VX: math.Cos(rad) * w.ProjectileSpeed, VY: math.Sin(rad) * w.ProjectileSpeed, Damage: damage, TTL: max(1, int(w.Range/w.ProjectileSpeed)), Knockback: w.Knockback, BurnTicks: w.BurnTicks, SlowTicks: w.SlowTicks, EMPTicks: w.EMPTicks}
 }
 func (a *Arena) advanceProjectiles() []Event {
 	e := []Event{}
@@ -403,6 +430,7 @@ func (a *Arena) advanceProjectiles() []Event {
 			if blocked {
 				e = append(e, a.event(Event{Type: "projectile_blocked", RobotID: p.OwnerID, X: p.X, Y: p.Y}))
 			}
+			e = append(e, a.explode(p)...)
 			continue
 		}
 		hit := false
@@ -415,8 +443,14 @@ func (a *Arena) advanceProjectiles() []Event {
 				continue
 			}
 			w := WeaponByName(p.Kind)
-			w.Knockback, w.BurnTicks, w.SlowTicks, w.EMPTicks = p.Knockback, p.BurnTicks, p.SlowTicks, p.EMPTicks
-			e = append(e, a.damage(a.robot(p.OwnerID), t, p.Damage, w)...)
+			if w.BlastRadius > 0 {
+				// Blast weapons trade the direct hit for the explosion, which
+				// already covers the struck robot.
+				e = append(e, a.explode(p)...)
+			} else {
+				w.Knockback, w.BurnTicks, w.SlowTicks, w.EMPTicks = p.Knockback, p.BurnTicks, p.SlowTicks, p.EMPTicks
+				e = append(e, a.damage(a.robot(p.OwnerID), t, p.Damage, w)...)
+			}
 			hit = true
 			break
 		}
@@ -427,13 +461,57 @@ func (a *Arena) advanceProjectiles() []Event {
 	a.Projectiles = active
 	return e
 }
+
+// explode applies a blast weapon's area damage at the projectile's final
+// position: full BlastDamage inside half the radius, half (min 1) out to the
+// edge. The owner is immune and friendly-fire rules are honored.
+func (a *Arena) explode(p Projectile) []Event {
+	w := WeaponByName(p.Kind)
+	if w.BlastRadius <= 0 {
+		return nil
+	}
+	e := []Event{a.event(Event{Type: "explosion", RobotID: p.OwnerID, X: p.X, Y: p.Y, Value: w.BlastDamage})}
+	owner := a.robot(p.OwnerID)
+	for i := range a.Robots {
+		t := &a.Robots[i]
+		if !t.Alive || t.RobotID == p.OwnerID || (!a.Config.FriendlyFire && t.Team == p.Team) {
+			continue
+		}
+		distance := math.Hypot(t.X-p.X, t.Y-p.Y)
+		if distance > w.BlastRadius {
+			continue
+		}
+		amount := w.BlastDamage
+		if distance > w.BlastRadius*0.5 {
+			amount = max(1, amount/2)
+		}
+		e = append(e, a.damage(owner, t, amount, w)...)
+	}
+	return e
+}
 func (a *Arena) damage(source, target *RobotState, amount int, w Weapon) []Event {
 	if target == nil || !target.Alive {
 		return nil
 	}
+	breakCloak(target)
+	// Criticals apply to weapon hits only. Burn ticks, ramming, and hazards
+	// pass a zero-value Weapon, so their steady pressure never spikes.
+	crit := false
+	if w.Damage > 0 && a.Config.CriticalChance > 0 && a.rng.IntN(100) < a.Config.CriticalChance {
+		crit = true
+		amount = amount * 3 / 2
+	}
 	absorbed := min(target.Shield, amount)
 	target.Shield -= absorbed
 	actual := amount - absorbed
+	if actual > 0 {
+		// Armor scales the post-shield remainder but never fully negates a
+		// landed hit; berserk robots take 25% extra on top of that.
+		actual = max(1, int(float64(actual)*effectMultiplier(*target, "armor", 1)))
+		if effectActive(*target, "berserk") {
+			actual = max(1, int(float64(actual)*1.25))
+		}
+	}
 	target.HP -= actual
 	target.DamageTaken += actual
 	target.LastDamageTick = a.TickNumber
@@ -441,6 +519,15 @@ func (a *Arena) damage(source, target *RobotState, amount int, w Weapon) []Event
 		source.DamageDealt += actual
 	}
 	e := []Event{a.event(Event{Type: "hit", RobotID: robotID(source), TargetID: target.RobotID, Damage: actual, Value: absorbed})}
+	if crit {
+		e = append(e, a.event(Event{Type: "critical_hit", RobotID: robotID(source), TargetID: target.RobotID, Damage: actual, Message: "critical hit"}))
+	}
+	if source != nil && source.Alive && actual > 0 && effectActive(*source, "vampiric") {
+		if healed := min(source.MaxHP-source.HP, actual/4); healed > 0 {
+			source.HP += healed
+			e = append(e, a.event(Event{Type: "vampiric_heal", RobotID: source.RobotID, Value: healed}))
+		}
+	}
 	if w.Knockback > 0 && source != nil {
 		dx, dy := target.X-source.X, target.Y-source.Y
 		d := math.Hypot(dx, dy)
@@ -497,6 +584,15 @@ func (a *Arena) applyEffects(r *RobotState, events *[]Event) {
 			*events = append(*events, a.damage(a.robot(effect.SourceID), r, max(1, int(effect.Magnitude)), Weapon{})...)
 			if !r.Alive {
 				break
+			}
+		}
+		// Regen is healing, not damage: it bypasses the damage pipeline
+		// (no shields, crits, or counters) and tops up every 10 ticks.
+		if effect.Type == "regen" && effect.Ticks%10 == 0 && r.HP < r.MaxHP {
+			healed := min(r.MaxHP-r.HP, int(math.Round(effect.Magnitude)))
+			if healed > 0 {
+				r.HP += healed
+				*events = append(*events, a.event(Event{Type: "regen_tick", TargetID: r.RobotID, Value: healed}))
 			}
 		}
 		effect.Ticks--

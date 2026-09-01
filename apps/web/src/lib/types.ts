@@ -1,11 +1,15 @@
 export type Team = 'red' | 'blue';
 export type MatchStatus = 'lobby' | 'queued' | 'running' | 'finished' | 'failed';
 
+// Solo free-for-all matches assign every robot its own team (solo-01,
+// solo-02, ...), so stored team fields are wider than the red|blue picker.
+export type ArenaTeam = Team | (string & {});
+
 export interface RobotSubmission {
   robotId: string;
   ownerBoxId?: string;
   displayName: string;
-  team: Team;
+  team: ArenaTeam;
   startCommand: string;
   runtime: string;
   submittedAt: string;
@@ -14,7 +18,7 @@ export interface RobotSubmission {
 export interface RobotSummary {
   robotId: string;
   name: string;
-  team: Team;
+  team: ArenaTeam;
   hp: number;
   alive: boolean;
   failed: boolean;
@@ -33,7 +37,7 @@ export interface Match {
   seed: number;
   tickRate: number;
   robots: RobotSubmission[];
-  winnerTeam?: Team | 'draw';
+  winnerTeam?: string;
   robotSummaries?: RobotSummary[];
   error?: string;
   createdAt: string;
@@ -91,7 +95,7 @@ export interface AdminStatus {
 export interface RobotState {
   robotId: string;
   name: string;
-  team: Team;
+  team: ArenaTeam;
   x: number;
   y: number;
   heading: number;
@@ -150,7 +154,7 @@ export interface ArenaItem {
 export interface Projectile {
   projectileId: string;
   ownerId: string;
-  team: Team;
+  team: ArenaTeam;
   kind: string;
   x: number;
   y: number;
@@ -167,7 +171,7 @@ export interface Snapshot {
   sequence: number;
   tick: number;
   status: 'running' | 'finished';
-  winnerTeam?: Team | 'draw';
+  winnerTeam?: string;
   robots: RobotState[];
   projectiles: Projectile[];
   events?: ArenaEvent[];

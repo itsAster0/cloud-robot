@@ -82,19 +82,22 @@ func (s *Server) joinQueue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userID := robotauth.UserID(r.Context())
-	box, err := s.boxes.Status(r.Context(), boxes.IDForUser(userID))
+	boxID := boxes.IDForUser(userID)
+	box, err := s.boxes.Status(r.Context(), boxID)
 	if err != nil || box.Status != "running" || box.KeyFingerprint == "" {
 		writeError(w, http.StatusConflict, "provision a running SSH box with a public key before queueing")
 		return
 	}
+	// Same rule as registration: the store decides whether the box is truly
+	// bound, because the supervisor copy of the markers (agent.json) never
+	// clears on its own. A marker whose match is gone, over, or no longer
+	// lists this box's robot is stale and must not block queueing.
+	s.overlayBoxMatchState(r.Context(), userID, &box)
 	if box.ActiveMatchID != "" {
-		active, activeErr := s.store.GetMatch(r.Context(), box.ActiveMatchID)
-		if activeErr == nil && active.Status != model.MatchFinished && active.Status != model.MatchFailed {
+		if active, activeErr := s.store.GetMatch(r.Context(), box.ActiveMatchID); activeErr == nil && boxOwnsRobot(active, boxID) {
 			writeError(w, http.StatusConflict, "box already has an active robot")
 			return
 		}
-		// The marker references a finished, failed, or missing match; clear it
-		// so one stale registration never blocks the player from queueing.
 		box.ActiveRobotID, box.ActiveMatchID = "", ""
 		_ = s.store.PutBox(r.Context(), userID, box)
 	}

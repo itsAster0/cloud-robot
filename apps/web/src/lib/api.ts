@@ -58,4 +58,5 @@ export const api = {
   restoreScriptVersion: (versionId: string) => request<{ versionId: string; source: string }>(`/api/me/box/scripts/${encodeURIComponent(versionId)}/restore`, { method: 'POST' }),
   setBoxKey: (publicKey: string) => request<RobotBox>('/api/me/box/ssh-key', { method: 'PUT', body: JSON.stringify({ publicKey }) }),
   restartBox: () => request<RobotBox>('/api/me/box/restart', { method: 'POST' }),
+  releaseBox: () => request<{ status: string }>('/api/me/box/release', { method: 'POST' }),
 };

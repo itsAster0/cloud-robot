@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/scripts", s.listScripts)
 	mux.Handle("PUT /api/me/box/ssh-key", s.requireUser(http.HandlerFunc(s.setBoxKey)))
 	mux.Handle("POST /api/me/box/restart", s.requireUser(http.HandlerFunc(s.restartBox)))
+	mux.Handle("POST /api/me/box/release", s.requireUser(http.HandlerFunc(s.releaseBox)))
 	mux.Handle("POST /api/matches", s.requireUser(s.rateLimit("create-match", http.HandlerFunc(s.createMatch))))
 	mux.HandleFunc("GET /api/matches", s.listMatches)
 	mux.HandleFunc("GET /api/matches/{matchID}", s.getMatch)
@@ -340,14 +341,17 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "add an SSH public key before registering a robot")
 		return
 	}
+	// The supervisor copy of the markers (agent.json) never clears on its
+	// own, so the store decides whether the box is truly bound. A marker
+	// whose match is gone, already over, or that no longer lists this box's
+	// robot is stale and must not block registration; ConfigureAgent below
+	// rewrites agent.json with the new match either way.
+	s.overlayBoxMatchState(r.Context(), userID, &box)
 	if box.ActiveMatchID != "" {
-		active, activeErr := s.store.GetMatch(r.Context(), box.ActiveMatchID)
-		if activeErr == nil && active.Status != model.MatchFinished && active.Status != model.MatchFailed {
+		if active, activeErr := s.store.GetMatch(r.Context(), box.ActiveMatchID); activeErr == nil && boxOwnsRobot(active, boxID) {
 			writeError(w, http.StatusConflict, "box already has an active robot")
 			return
 		}
-		// The marker references a finished, failed, or missing match; clear it
-		// so the box console stops reporting a robot that no longer exists.
 		box.ActiveRobotID, box.ActiveMatchID = "", ""
 		_ = s.store.PutBox(r.Context(), userID, box)
 	}
@@ -360,19 +364,15 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "match is not accepting robots")
 		return
 	}
-	rosterCap := 8
-	if match.Mode == "squad" {
-		rosterCap = 10
-	}
-	if len(match.Robots) >= rosterCap {
-		writeError(w, http.StatusConflict, "match roster is full")
-		return
-	}
 	for _, robot := range match.Robots {
 		if robot.OwnerBoxID == boxID {
 			writeError(w, http.StatusConflict, "user already registered a robot in this match")
 			return
 		}
+	}
+	rosterCap := 8
+	if match.Mode == "squad" {
+		rosterCap = 10
 	}
 	var displacedBot *model.RobotSubmission
 	switch match.Mode {
@@ -404,6 +404,13 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "team must be red or blue")
 			return
 		}
+	}
+	// Squad displacement already made room, so the cap is checked after mode
+	// handling: a 10-robot squad roster still accepts a player who replaces a
+	// bot, but not one who would exceed the ten-robot arena.
+	if len(match.Robots) >= rosterCap {
+		writeError(w, http.StatusConflict, "match roster is full")
+		return
 	}
 	source, err := s.boxes.ReadMain(r.Context(), boxID)
 	if err != nil {
@@ -463,6 +470,18 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 
 type sshKeyRequest struct {
 	PublicKey string `json:"publicKey"`
+}
+
+// boxOwnsRobot reports whether the box still owns a registration in the match.
+// A live match marker without a matching roster entry is stale supervisor
+// state, not a real commitment.
+func boxOwnsRobot(match model.Match, boxID string) bool {
+	for _, robot := range match.Robots {
+		if robot.OwnerBoxID == boxID {
+			return true
+		}
+	}
+	return false
 }
 
 func countTeamRobots(robots []model.RobotSubmission, team string) int {
@@ -567,6 +586,71 @@ func (s *Server) withdrawFromMatch(w http.ResponseWriter, r *http.Request) {
 	}
 	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "withdrawing", "robotId": robotID})
+}
+
+// releaseBox unbinds the caller's box from its active match so queueing and
+// registration work again. It backs the "exit active match" action offered
+// when the arena answers "box already has an active robot": a lobby
+// registration is dropped, a running match is conceded through the live
+// engine, and a binding referencing a vanished or ended match is stale, so
+// clearing the markers is the whole release.
+func (s *Server) releaseBox(w http.ResponseWriter, r *http.Request) {
+	userID := robotauth.UserID(r.Context())
+	boxID := boxes.IDForUser(userID)
+	box, err := s.boxes.Status(r.Context(), boxID)
+	if err != nil || box.Status != "running" {
+		writeError(w, http.StatusConflict, "provision a running SSH box before releasing a robot")
+		return
+	}
+	s.overlayBoxMatchState(r.Context(), userID, &box)
+	_ = s.store.PutBox(r.Context(), userID, box)
+	if box.ActiveMatchID == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "idle"})
+		return
+	}
+	match, matchErr := s.store.GetMatch(r.Context(), box.ActiveMatchID)
+	if matchErr != nil || (match.Status != model.MatchLobby && match.Status != model.MatchRunning) {
+		box.ActiveRobotID, box.ActiveMatchID = "", ""
+		_ = s.store.PutBox(r.Context(), userID, box)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+		return
+	}
+	if match.Status == model.MatchLobby {
+		for index, robot := range match.Robots {
+			if robot.OwnerBoxID != boxID {
+				continue
+			}
+			match.Robots = append(match.Robots[:index], match.Robots[index+1:]...)
+			if err := s.store.PutMatch(r.Context(), match); err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+			break
+		}
+		box.ActiveRobotID, box.ActiveMatchID = "", ""
+		_ = s.store.PutBox(r.Context(), userID, box)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+		return
+	}
+	// Running match: the concession applies at the next engine tick and the
+	// binding clears when the match resolves by normal elimination rules.
+	s.mu.Lock()
+	arena := s.arenas[match.MatchID]
+	s.mu.Unlock()
+	if arena == nil {
+		// The worker never picked the match up or died mid-run (stack
+		// restart), so it can never resolve on its own. Failing it frees the
+		// box instead of blocking the player forever.
+		s.failMatch(r.Context(), match, errors.New("match worker unavailable"))
+		writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+		return
+	}
+	if !arena.RequestWithdraw(box.ActiveRobotID) {
+		writeError(w, http.StatusConflict, "match is not accepting withdrawals")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "withdrawing", "matchId": match.MatchID})
 }
 
 func (s *Server) ensureBox(w http.ResponseWriter, r *http.Request) {

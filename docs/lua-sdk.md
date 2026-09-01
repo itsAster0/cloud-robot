@@ -44,7 +44,7 @@ Map-aware matches also include:
 
 - `arenaWidth`, `arenaHeight`, and `mapId`
 - `obstacles`, with `kind`, position, and circle radius or rectangle dimensions
-- `items`, with ID, type, position, active state, respawn time, and effect time
+- `items`, with ID, type, position, active state, respawn time, and effect time. Types include `heal`, `repair-core`, `shield`, `overdrive`, `rapid_fire`, and `weapon_*` drops (`weapon_railgun` is the rarest). Spawner loot is randomized per match seed and occasionally bursts as a `supply_drop` event
 - map hazards; some maps (for example Crater) deal periodic `hazard_damage`
   while a robot stands inside the zone
 - match status flags such as zone closing or overtime when enabled
