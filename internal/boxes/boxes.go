@@ -1,0 +1,221 @@
+package boxes
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/kryxen/cloud-robot/internal/model"
+)
+
+const (
+	MaxPublicKeyBytes   = 8 * 1024
+	MaxAgentCommandSize = 256
+	DefaultStorageBytes = 1 << 30
+)
+
+type AgentConfig struct {
+	RobotID      string `json:"robotId"`
+	MatchID      string `json:"matchId"`
+	URL          string `json:"url"`
+	Token        string `json:"token"`
+	StartCommand string `json:"startCommand"`
+}
+
+// ValidateAgentConfig rejects incomplete supervisor payloads before they reach
+// a box. The provisioner validates once more, but the root-owned supervisor is
+// the enforcement point.
+func ValidateAgentConfig(config AgentConfig) error {
+	switch {
+	case config.RobotID == "":
+		return errors.New("agent configuration requires robotId")
+	case config.MatchID == "":
+		return errors.New("agent configuration requires matchId")
+	case config.URL == "":
+		return errors.New("agent configuration requires url")
+	case config.Token == "":
+		return errors.New("agent configuration requires token")
+	case config.StartCommand == "":
+		return errors.New("agent configuration requires startCommand")
+	case len(config.StartCommand) > MaxAgentCommandSize:
+		return fmt.Errorf("agent startCommand exceeds %d characters", MaxAgentCommandSize)
+	case strings.ContainsAny(config.StartCommand, "\n\r"):
+		return errors.New("agent startCommand must be one line")
+	}
+	return nil
+}
+
+type Provisioner interface {
+	Ensure(context.Context, string) (model.BoxRecord, error)
+	Status(context.Context, string) (model.BoxRecord, error)
+	SetKey(context.Context, string, string) (model.BoxRecord, error)
+	ConfigureAgent(context.Context, string, AgentConfig) (model.BoxRecord, error)
+	Restart(context.Context, string) (model.BoxRecord, error)
+	ReadMain(context.Context, string) (string, error)
+	WriteMain(context.Context, string, string) (string, error)
+}
+
+func IDForUser(userID string) string {
+	sum := sha256.Sum256([]byte(userID))
+	return "robot-box-" + hex.EncodeToString(sum[:8])
+}
+
+func ValidatePublicKey(value string) (string, string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > MaxPublicKeyBytes || strings.ContainsAny(value, "\r\n") {
+		return "", "", errors.New("SSH public key must be one line and at most 8 KiB")
+	}
+	fields := strings.Fields(value)
+	if len(fields) < 2 || (fields[0] != "ssh-ed25519" && fields[0] != "ssh-rsa" && !strings.HasPrefix(fields[0], "ecdsa-sha2-")) {
+		return "", "", errors.New("SSH public key must use Ed25519, RSA, or ECDSA OpenSSH format")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil || len(decoded) < 16 {
+		return "", "", errors.New("SSH public key payload is invalid")
+	}
+	fingerprint := sha256.Sum256(decoded)
+	return value, "SHA256:" + base64.RawStdEncoding.EncodeToString(fingerprint[:]), nil
+}
+
+// ParseSSHHostPorts extracts host ports mapped to container port 22 from a
+// `docker ps --format '{{.Ports}}'` listing.
+func ParseSSHHostPorts(listing string) map[int]bool {
+	used := map[int]bool{}
+	pattern := regexp.MustCompile(`(?:127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d+)->22/tcp`)
+	for _, match := range pattern.FindAllStringSubmatch(listing, -1) {
+		if port, err := strconv.Atoi(match[1]); err == nil {
+			used[port] = true
+		}
+	}
+	return used
+}
+
+// NextSSHPort returns the first free port inside the configured range. It is a
+// pure function so the allocation policy stays testable without Docker.
+func NextSSHPort(used map[int]bool, start, end int) (int, error) {
+	if start <= 0 || end < start {
+		return 0, fmt.Errorf("invalid SSH port range %d-%d", start, end)
+	}
+	for port := start; port <= end; port++ {
+		if !used[port] {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no SSH ports available in range %d-%d", start, end)
+}
+
+// WorkspaceUsage sums regular file sizes under root. Box quota checks use it;
+// evaluation errors are reported so monitoring sees unreadable workspaces.
+func WorkspaceUsage(root string) (int64, error) {
+	var size int64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() {
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
+}
+
+// QuotaBreached reports whether usage crossed the configured workspace quota.
+func QuotaBreached(usage, quota int64) bool { return quota > 0 && usage > quota }
+
+type Client struct {
+	baseURL string
+	token   string
+	http    *http.Client
+}
+
+func NewClient(baseURL, token string) *Client {
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, http: &http.Client{Timeout: 15 * time.Second}}
+}
+
+func (c *Client) Ensure(ctx context.Context, boxID string) (model.BoxRecord, error) {
+	var result model.BoxRecord
+	return result, c.do(ctx, http.MethodPut, "/v1/boxes/"+boxID, nil, &result)
+}
+
+func (c *Client) Status(ctx context.Context, boxID string) (model.BoxRecord, error) {
+	var result model.BoxRecord
+	return result, c.do(ctx, http.MethodGet, "/v1/boxes/"+boxID, nil, &result)
+}
+
+func (c *Client) SetKey(ctx context.Context, boxID, publicKey string) (model.BoxRecord, error) {
+	var result model.BoxRecord
+	return result, c.do(ctx, http.MethodPut, "/v1/boxes/"+boxID+"/ssh-key", map[string]string{"publicKey": publicKey}, &result)
+}
+
+func (c *Client) ConfigureAgent(ctx context.Context, boxID string, config AgentConfig) (model.BoxRecord, error) {
+	var result model.BoxRecord
+	return result, c.do(ctx, http.MethodPut, "/v1/boxes/"+boxID+"/agent", config, &result)
+}
+
+func (c *Client) Restart(ctx context.Context, boxID string) (model.BoxRecord, error) {
+	var result model.BoxRecord
+	return result, c.do(ctx, http.MethodPost, "/v1/boxes/"+boxID+"/restart", nil, &result)
+}
+
+func (c *Client) ReadMain(ctx context.Context, boxID string) (string, error) {
+	var result struct {
+		Source string `json:"source"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/boxes/"+boxID+"/main.lua", nil, &result)
+	return result.Source, err
+}
+
+// WriteMain deploys Lua source to a box and returns the file as read back,
+// so callers can show exactly what persisted.
+func (c *Client) WriteMain(ctx context.Context, boxID, source string) (string, error) {
+	var result struct {
+		Source string `json:"source"`
+	}
+	err := c.do(ctx, http.MethodPut, "/v1/boxes/"+boxID+"/main.lua", map[string]string{"source": source}, &result)
+	return result.Source, err
+}
+
+func (c *Client) do(ctx context.Context, method, path string, input, output any) error {
+	var body io.Reader
+	if input != nil {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return err
+		}
+		body = strings.NewReader(string(encoded))
+	}
+	request, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+c.token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("box provisioner unavailable: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 300 {
+		message, _ := bufio.NewReader(io.LimitReader(response.Body, 4096)).ReadString('\n')
+		return fmt.Errorf("box provisioner: %s", strings.TrimSpace(message))
+	}
+	return json.NewDecoder(response.Body).Decode(output)
+}

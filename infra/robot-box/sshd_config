@@ -1,0 +1,12 @@
+Port 22
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile /var/lib/robot-box/authorized_keys
+AllowUsers developer
+UsePAM no
+X11Forwarding no
+AllowTcpForwarding no
+PermitTunnel no
+Subsystem sftp internal-sftp
