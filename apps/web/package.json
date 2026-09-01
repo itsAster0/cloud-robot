@@ -1,0 +1,25 @@
+{
+  "name": "@robot-arena/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "latest",
+    "@tsconfig/svelte": "latest",
+    "svelte": "latest",
+    "svelte-check": "latest",
+    "typescript": "~6.0.0",
+    "vite": "latest",
+    "vitest": "latest"
+  },
+  "dependencies": {
+    "@workos-inc/authkit-js": "^0.20.2"
+  }
+}

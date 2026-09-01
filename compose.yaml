@@ -1,0 +1,71 @@
+services:
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"
+    volumes:
+      - floci-data:/app/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    environment:
+      API_ADDR: ":8080"
+      AWS_ENDPOINT_URL: "http://floci:4566"
+      AWS_REGION: "us-east-1"
+      AWS_ACCESS_KEY_ID: "test"
+      AWS_SECRET_ACCESS_KEY: "test"
+      S3_SCRIPTS_BUCKET: "robot-arena-artifacts"
+      DYNAMODB_MATCHES_TABLE: "robot-arena-matches"
+      SQS_MATCH_JOBS_QUEUE: "robot-arena-match-jobs"
+      BOX_PROVISIONER_URL: "http://provisioner:8090"
+      PROVISIONER_TOKEN: "${PROVISIONER_TOKEN:-local-review-token-change-me}"
+      ROBOT_AGENT_BASE_URL: "ws://host.docker.internal:8080"
+      WORKOS_CLIENT_ID: "${WORKOS_CLIENT_ID:-client_01M1EN6565YSSYPRPKA8A5R5MX}"
+      WORKOS_ISSUER: "${WORKOS_ISSUER}"
+      WORKOS_API_KEY: "${WORKOS_API_KEY}"
+      AUTH_REQUIRED: "${AUTH_REQUIRED:-true}"
+    depends_on:
+      - floci
+      - provisioner
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  provisioner:
+    build:
+      context: .
+      dockerfile: infra/docker/provisioner.Dockerfile
+    environment:
+      PROVISIONER_ADDR: ":8090"
+      PROVISIONER_TOKEN: "${PROVISIONER_TOKEN:-local-review-token-change-me}"
+      ROBOT_BOX_IMAGE: "${ROBOT_BOX_IMAGE:-cloud-robot-box:local}"
+      SSH_PUBLIC_HOST: "${SSH_PUBLIC_HOST:-localhost}"
+      SSH_PORT_START: "${SSH_PORT_START:-22000}"
+      SSH_PORT_END: "${SSH_PORT_END:-22999}"
+      BOX_CPUS: "${BOX_CPUS:-1}"
+      BOX_MEMORY_MB: "${BOX_MEMORY_MB:-512}"
+      BOX_PIDS: "${BOX_PIDS:-128}"
+      BOX_STORAGE_BYTES: "${BOX_STORAGE_BYTES:-1073741824}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "127.0.0.1:8090:8090"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        VITE_WORKOS_CLIENT_ID: "${VITE_WORKOS_CLIENT_ID:-client_01M1EN6565YSSYPRPKA8A5R5MX}"
+    depends_on:
+      - api
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+volumes:
+  floci-data:

@@ -1,0 +1,88 @@
+[tools]
+go = "1.26.7"
+node = "26.8.1"
+pnpm = "11.24.0"
+
+[env]
+GOCACHE = "/private/tmp/cloud-robot-go-cache"
+AWS_REGION = "us-east-1"
+AWS_ACCESS_KEY_ID = "test"
+AWS_SECRET_ACCESS_KEY = "test"
+AWS_ENDPOINT_URL = "http://localhost:4566"
+S3_SCRIPTS_BUCKET = "robot-arena-scripts"
+DYNAMODB_MATCHES_TABLE = "robot-arena-matches"
+SQS_MATCH_JOBS_QUEUE = "robot-arena-match-jobs"
+WORKOS_CLIENT_ID = "client_01M1EN6565YSSYPRPKA8A5R5MX"
+VITE_WORKOS_CLIENT_ID = "client_01M1EN6565YSSYPRPKA8A5R5MX"
+AUTH_REQUIRED = "true"
+API_ADDR = ":8080"
+BOX_PROVISIONER_URL = "http://localhost:8090"
+PROVISIONER_TOKEN = "local-review-token-change-me"
+ROBOT_AGENT_BASE_URL = "ws://host.docker.internal:8080"
+
+[tasks.install]
+description = "Install frontend dependencies"
+run = "pnpm install"
+
+[tasks."dev:cloud"]
+description = "Start Floci"
+run = "docker compose up -d floci"
+
+[tasks."dev:api"]
+description = "Run Go API and match worker"
+run = "go run ./cmd/server"
+
+[tasks."dev:web"]
+description = "Run Svelte development server"
+run = "pnpm --dir apps/web dev"
+
+[tasks.check]
+description = "Run all static checks"
+run = [
+  "pnpm --dir apps/web check",
+  "go vet ./...",
+]
+
+[tasks.test]
+description = "Run all tests"
+run = [
+  "pnpm --dir apps/web test",
+  "go test ./...",
+]
+
+[tasks.build]
+description = "Build frontend and backend"
+run = [
+  "pnpm --dir apps/web build",
+  "go build -o bin/robot-arena ./cmd/server",
+]
+
+[tasks.demo]
+description = "Build and start complete review stack"
+run = [
+  "docker build -f infra/robot-box/Dockerfile -t cloud-robot-box:local .",
+  "docker compose up --build",
+]
+
+[tasks."demo:stop"]
+description = "Stop stack and robot boxes; volumes and workspaces are kept"
+run = [
+  "sh -c 'ids=$(docker ps -q --filter label=robot-arena.box=true); [ -n \"$ids\" ] && docker stop $ids || true'",
+  "docker compose down",
+]
+
+[tasks."demo:start"]
+description = "Restart stack; boxes are rediscovered on next sign-in"
+run = "docker compose up -d"
+
+[tasks."box:build"]
+description = "Build dynamic SSH robot box image"
+run = "docker build -f infra/robot-box/Dockerfile -t cloud-robot-box:local ."
+
+[tasks."box:stop"]
+description = "Stop running robot boxes without deleting workspaces"
+run = "sh -c 'ids=$(docker ps -q --filter label=robot-arena.box=true); [ -n \"$ids\" ] && docker stop $ids || true'"
+
+[tasks."vps:doctor"]
+description = "Run read-only VPS capability checks over SSH"
+run = "./scripts/remote-doctor.sh"
