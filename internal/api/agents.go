@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,23 +31,35 @@ type agentObservation struct {
 	Hazards     []engine.Hazard     `json:"hazards"`
 	Zone        *engine.ZoneState   `json:"zone,omitempty"`
 	Overtime    bool                `json:"overtime"`
+	Mines       []engine.MineState  `json:"mines,omitempty"`
+	// Convenience mirrors of the Self fields so v3 SDKs can read them
+	// without digging into the self object.
+	DashCharges int                `json:"dashCharges,omitempty"`
+	MineCharges int                `json:"mineCharges,omitempty"`
+	ScanResult  *engine.ScanReport `json:"scanResult,omitempty"`
+	Events      []engine.Event     `json:"events,omitempty"`
+	Messages    []string           `json:"messages,omitempty"`
 }
 
 type agentAction struct {
-	Type        string   `json:"type"`
-	RequestID   string   `json:"requestId"`
-	Move        float64  `json:"move"`
-	Turn        float64  `json:"turn"`
-	Fire        bool     `json:"fire"`
-	TargetX     *float64 `json:"targetX,omitempty"`
-	TargetY     *float64 `json:"targetY,omitempty"`
-	Logs        []string `json:"logs,omitempty"`
-	ComputeMS   float64  `json:"computeMs,omitempty"`
-	MemoryMB    float64  `json:"memoryMb,omitempty"`
-	Equipment   []string `json:"equipment,omitempty"`
-	SDKVersion  string   `json:"sdkVersion,omitempty"`
-	AutoPickup  *bool    `json:"autoPickup,omitempty"`
-	PickupTypes []string `json:"pickupTypes,omitempty"`
+	Type        string              `json:"type"`
+	RequestID   string              `json:"requestId"`
+	Move        float64             `json:"move"`
+	Turn        float64             `json:"turn"`
+	Fire        bool                `json:"fire"`
+	TargetX     *float64            `json:"targetX,omitempty"`
+	TargetY     *float64            `json:"targetY,omitempty"`
+	Logs        []string            `json:"logs,omitempty"`
+	ComputeMS   float64             `json:"computeMs,omitempty"`
+	MemoryMB    float64             `json:"memoryMb,omitempty"`
+	Equipment   []string            `json:"equipment,omitempty"`
+	SDKVersion  string              `json:"sdkVersion,omitempty"`
+	AutoPickup  *bool               `json:"autoPickup,omitempty"`
+	PickupTypes []string            `json:"pickupTypes,omitempty"`
+	Dash        bool                `json:"dash"`
+	Deploy      string              `json:"deploy,omitempty"`
+	Scan        *engine.ScanRequest `json:"scan,omitempty"`
+	Message     string              `json:"message,omitempty"`
 }
 
 type AgentSession struct {
@@ -91,7 +104,7 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 	defer s.requestMu.Unlock()
 	requestID := uuid.NewString()
 	sent := time.Now()
-	observation := agentObservation{Type: "observation", Version: 2, RequestID: requestID, MatchID: s.matchID, SentAt: sent.UnixMilli(), Self: self, Robots: robots, Tick: world.Tick, MapID: world.MapID, ArenaWidth: world.Width, ArenaHeight: world.Height, Obstacles: world.Obstacles, Items: world.Items, Hazards: world.Hazards, Zone: world.Zone, Overtime: world.Overtime}
+	observation := agentObservation{Type: "observation", Version: 3, RequestID: requestID, MatchID: s.matchID, SentAt: sent.UnixMilli(), Self: self, Robots: robots, Tick: world.Tick, MapID: world.MapID, ArenaWidth: world.Width, ArenaHeight: world.Height, Obstacles: world.Obstacles, Items: world.Items, Hazards: world.Hazards, Zone: world.Zone, Overtime: world.Overtime, Mines: world.Mines, DashCharges: self.DashCharges, MineCharges: self.MineCharges, ScanResult: self.ScanResult, Events: self.RecentEvents, Messages: self.Messages}
 
 	writeCtx, cancelWrite := context.WithTimeout(ctx, 100*time.Millisecond)
 	s.writeMu.Lock()
@@ -125,11 +138,16 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 			} else if sdkVersionOlder(action.SDKVersion, "0.2.0") {
 				logs = append(logs, "SDK version "+action.SDKVersion+" is older than server protocol 0.2.0")
 			}
+			message := strings.TrimSpace(action.Message)
+			if len(message) > engine.MaxMessageBytes {
+				message = message[:engine.MaxMessageBytes]
+			}
 			intent := engine.Intent{
 				Move: action.Move, Turn: action.Turn, Fire: action.Fire, TargetX: action.TargetX, TargetY: action.TargetY,
 				Logs: logs, ResponseMS: float64(time.Since(sent).Microseconds()) / 1000,
 				ComputeMS: action.ComputeMS, MemoryMB: action.MemoryMB, Equipment: action.Equipment,
 				AutoPickup: action.AutoPickup, PickupTypes: action.PickupTypes,
+				Dash: action.Dash, Deploy: action.Deploy, Scan: action.Scan, Message: message,
 			}
 			s.last = intent
 			return intent, nil

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1336,6 +1337,50 @@ func TestWorkerCopiesMatchOptionsIntoEngineConfig(t *testing.T) {
 	}
 	if botPersonalityFor(model.Match{BotPersonality: "camper"}) != engine.PersonalityCamper {
 		t.Fatal("camper personality not mapped")
+	}
+	random := engineConfigFor(model.Match{MapID: "random-maze", ArenaWidth: 1200, ArenaHeight: 700, Seed: 4242})
+	again := engineConfigFor(model.Match{MapID: "random-maze", ArenaWidth: 1200, ArenaHeight: 700, Seed: 4242})
+	if random.Map.ID != "random-maze" || len(random.Map.Obstacles) == 0 {
+		t.Fatalf("procedural map not generated into engine config: %+v", random.Map)
+	}
+	if random.Map.Width != 1200 || random.Map.Height != 700 {
+		t.Fatalf("procedural map must use the match arena dims: %+v", random.Map)
+	}
+	if !reflect.DeepEqual(random.Map, again.Map) {
+		t.Fatal("same match seed must rebuild an identical procedural map")
+	}
+	if handcrafted := engineConfigFor(model.Match{MapID: "crossing-fire", ArenaWidth: 1000, ArenaHeight: 600, Seed: 5}); handcrafted.Map.ID != "crossing-fire" {
+		t.Fatalf("handcrafted starter map not resolved: %+v", handcrafted.Map)
+	}
+}
+
+func TestCreateMatchAcceptsProceduralMapIDs(t *testing.T) {
+	for _, mapID := range []string{"random-maze", "random-rooms", "random-bunkers"} {
+		h := newHarness(t)
+		response, payload := h.request(t, http.MethodPost, "/api/matches", `{"mapId":"`+mapID+`"}`)
+		if response.StatusCode != http.StatusCreated {
+			t.Fatalf("%s rejected with %d: %v", mapID, response.StatusCode, payload)
+		}
+		stored := onlyStoredMatch(t, h.store)
+		if stored.MapID != mapID {
+			t.Fatalf("map id not stored as given: %+v", stored)
+		}
+		if stored.ArenaWidth != 900 || stored.ArenaHeight != 600 {
+			t.Fatalf("procedural map defaults wrong: %+v", stored)
+		}
+	}
+}
+
+func TestCreateMatchRejectsUnknownMapID(t *testing.T) {
+	for _, body := range []string{`{"mapId":"random-nope"}`, `{"mapId":"super-fort"}`} {
+		h := newHarness(t)
+		response, payload := h.request(t, http.MethodPost, "/api/matches", body)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("body %s accepted with status %d: %v", body, response.StatusCode, payload)
+		}
+		if payload["error"] == "" {
+			t.Fatalf("body %s rejected without useful error: %v", body, payload)
+		}
 	}
 }
 

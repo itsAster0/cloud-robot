@@ -200,8 +200,13 @@ func (s *Server) createMatch(w http.ResponseWriter, r *http.Request) {
 	}
 	selected, ok := engine.StarterMaps()[input.MapID]
 	if !ok {
-		writeError(w, http.StatusBadRequest, "unknown mapId")
-		return
+		if _, random := engine.ProceduralMapStyles[input.MapID]; !random {
+			writeError(w, http.StatusBadRequest, "unknown mapId")
+			return
+		}
+		// Procedural maps generate in the worker from the persisted match seed;
+		// only the default arena size is needed here.
+		selected = engine.DefaultMap(900, 600)
 	}
 	if input.ArenaWidth == 0 {
 		input.ArenaWidth = selected.Width

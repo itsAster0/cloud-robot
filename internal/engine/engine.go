@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -24,6 +25,23 @@ const (
 	ProjectileRadius = 4.0
 	DefaultMaxTicks  = 1800
 	MaxHP            = 100
+	// Protocol additions: dash, deployable mines, and area scans. Mines are
+	// proximity bombs with an arming delay; dashes and scans run on charge or
+	// cooldown gates so agents cannot spam them every tick.
+	MineDamage        = 50
+	MineBlastRadius   = 70.0
+	MineTriggerRadius = RobotRadius + 10
+	MineArmTicks      = 30
+	MineLifetimeTicks = 600
+	MaxMines          = 20
+	DashDistance      = 40.0
+	DashCooldownTicks = 40
+	ScanCooldownTicks = 60
+	MinScanRadius     = 40.0
+	MaxScanRadius     = 400.0
+	MaxRecentEvents   = 8
+	MaxTeamMessages   = 5
+	MaxMessageBytes   = 128
 )
 
 type RobotState struct {
@@ -49,6 +67,11 @@ type RobotState struct {
 	Shield         int            `json:"shield,omitempty"`
 	DashCharges    int            `json:"dashCharges,omitempty"`
 	MineCharges    int            `json:"mineCharges,omitempty"`
+	DashReadyTick  int            `json:"-"`
+	ScanReadyTick  int            `json:"-"`
+	ScanResult     *ScanReport    `json:"scanResult,omitempty"`
+	Messages       []string       `json:"messages,omitempty"`
+	RecentEvents   []Event        `json:"events,omitempty"`
 	Kills          int            `json:"kills"`
 	Deaths         int            `json:"deaths"`
 	DamageDealt    int            `json:"damageDealt"`
@@ -73,6 +96,10 @@ type Intent struct {
 	Equipment   []string
 	AutoPickup  *bool
 	PickupTypes []string
+	Dash        bool
+	Deploy      string
+	Scan        *ScanRequest
+	Message     string
 }
 type Controller interface {
 	Tick(context.Context, RobotState, []RobotState) (Intent, error)
@@ -85,6 +112,7 @@ type WorldState struct {
 	Height    float64
 	Obstacles []Obstacle
 	Items     []Item
+	Mines     []MineState
 	Hazards   []Hazard
 	Zone      *ZoneState
 	Overtime  bool
@@ -124,25 +152,110 @@ type StatusEffect struct {
 	Magnitude float64 `json:"magnitude,omitempty"`
 	SourceID  string  `json:"sourceId,omitempty"`
 }
+
+// MineState is a deployable proximity bomb. It arms MineArmTicks after
+// SpawnTick, explodes once when a non-owner robot comes close, and is
+// removed entirely once its lifetime runs out; expired entries never appear
+// in snapshots or observations.
+type MineState struct {
+	MineID    string  `json:"mineId"`
+	OwnerID   string  `json:"ownerId"`
+	Team      string  `json:"team"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	SpawnTick int     `json:"spawnTick"`
+	ArmTick   int     `json:"armTick"`
+	Active    bool    `json:"active"`
+}
+
+// TurretState is declared for protocol v3 compatibility; turret logic lands
+// in a later wave, so snapshots keep this field nil.
+type TurretState struct {
+	TurretID string  `json:"turretId"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	HP       int     `json:"hp"`
+	MaxHP    int     `json:"maxHp"`
+	Alive    bool    `json:"alive"`
+}
+
+// ScanRequest is the agent intent payload for an area scan centered on X/Y.
+type ScanRequest struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Radius float64 `json:"radius"`
+}
+
+// ScanReport is the server-built result of one scan. It persists on the
+// scanning robot (snapshot robots[] and agent observations) until replaced.
+type ScanReport struct {
+	X       float64         `json:"x"`
+	Y       float64         `json:"y"`
+	Radius  float64         `json:"radius"`
+	Items   []ScannedItem   `json:"items"`
+	Enemies []ScannedRobot  `json:"enemies"`
+	Mines   []ScannedMine   `json:"mines"`
+	Hazards []ScannedHazard `json:"hazards"`
+}
+
+type ScannedItem struct {
+	ItemID   string  `json:"itemId"`
+	Type     string  `json:"type"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Distance float64 `json:"distance"`
+}
+
+type ScannedRobot struct {
+	RobotID  string  `json:"robotId"`
+	Team     string  `json:"team"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Heading  float64 `json:"heading"`
+	HP       int     `json:"hp"`
+	Distance float64 `json:"distance"`
+	Cloaked  bool    `json:"cloaked"`
+}
+
+type ScannedMine struct {
+	MineID   string  `json:"mineId"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Distance float64 `json:"distance"`
+	Armed    bool    `json:"armed"`
+}
+
+type ScannedHazard struct {
+	ID       string  `json:"id"`
+	Type     string  `json:"type"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Width    float64 `json:"width"`
+	Height   float64 `json:"height"`
+	Distance float64 `json:"distance"`
+}
+
 type Snapshot struct {
-	Type          string       `json:"type"`
-	Version       int          `json:"version"`
-	MatchID       string       `json:"matchId"`
-	Sequence      int          `json:"sequence"`
-	Tick          int          `json:"tick"`
-	Status        string       `json:"status"`
-	WinnerTeam    string       `json:"winnerTeam,omitempty"`
-	MapID         string       `json:"mapId"`
-	Width         float64      `json:"width"`
-	Height        float64      `json:"height"`
-	Robots        []RobotState `json:"robots"`
-	Projectiles   []Projectile `json:"projectiles"`
-	Items         []Item       `json:"items,omitempty"`
-	Obstacles     []Obstacle   `json:"obstacles,omitempty"`
-	Events        []Event      `json:"events,omitempty"`
-	Zone          *ZoneState   `json:"zone,omitempty"`
-	Announcements []string     `json:"announcements,omitempty"`
-	Overtime      bool         `json:"overtime"`
+	Type          string        `json:"type"`
+	Version       int           `json:"version"`
+	MatchID       string        `json:"matchId"`
+	Sequence      int           `json:"sequence"`
+	Tick          int           `json:"tick"`
+	Status        string        `json:"status"`
+	WinnerTeam    string        `json:"winnerTeam,omitempty"`
+	MapID         string        `json:"mapId"`
+	Width         float64       `json:"width"`
+	Height        float64       `json:"height"`
+	Robots        []RobotState  `json:"robots"`
+	Projectiles   []Projectile  `json:"projectiles"`
+	Items         []Item        `json:"items,omitempty"`
+	Mines         []MineState   `json:"mines,omitempty"`
+	Turrets       []TurretState `json:"turrets,omitempty"`
+	Obstacles     []Obstacle    `json:"obstacles,omitempty"`
+	Events        []Event       `json:"events,omitempty"`
+	Zone          *ZoneState    `json:"zone,omitempty"`
+	Announcements []string      `json:"announcements,omitempty"`
+	Overtime      bool          `json:"overtime"`
 }
 
 type Arena struct {
@@ -152,6 +265,7 @@ type Arena struct {
 	Robots      []RobotState
 	Projectiles []Projectile
 	Items       []Item
+	Mines       []MineState
 	Config      Config
 	// singleTeam is set when the roster fielded exactly one team (solo lobby
 	// without bots). Such matches must not end at tick 0 through the
@@ -163,11 +277,15 @@ type Arena struct {
 	finished      bool
 	rng           *rand.Rand
 	nextItem      int
+	nextMine      int
 	lastSpawnTick int
 	overtimeEnd   int
 	events        []Event
 	pairRam       map[string]int
 	pickupPrefs   map[string]Intent
+	// TeamMessages queues chat lines keyed by sender robot ID; they flush to
+	// the sender's teammates at the start of the next tick.
+	TeamMessages map[string][]string
 }
 
 func New(id string, robots []RobotState, controllers map[string]Controller) *Arena {
@@ -202,7 +320,7 @@ func NewWithConfig(id string, robots []RobotState, controllers map[string]Contro
 	if len(distinct) == 1 {
 		singleTeam = rs[0].Team
 	}
-	return &Arena{MatchID: id, Robots: rs, controllers: controllers, withdrawals: make(chan string, 8), MaxTicks: c.MaxTicks, Config: c, singleTeam: singleTeam, rng: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), pairRam: map[string]int{}, pickupPrefs: map[string]Intent{}}
+	return &Arena{MatchID: id, Robots: rs, controllers: controllers, withdrawals: make(chan string, 8), MaxTicks: c.MaxTicks, Config: c, singleTeam: singleTeam, rng: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), pairRam: map[string]int{}, pickupPrefs: map[string]Intent{}, TeamMessages: map[string][]string{}}
 }
 func (a *Arena) Close() {
 	for _, c := range a.controllers {
@@ -255,6 +373,7 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 	}
 	events := []Event{}
 	a.applyWithdrawals(&events)
+	a.deliverTeamMessages()
 	before := cloneRobots(a.Robots)
 	intents := map[string]Intent{}
 	type decision struct {
@@ -274,14 +393,15 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 			continue
 		}
 		if aware, ok := c.(WorldAwareController); ok {
-			aware.SetWorld(WorldState{Tick: a.TickNumber, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Items: append([]Item(nil), a.Items...), Hazards: append([]Hazard(nil), a.Config.Map.Hazards...), Zone: a.zoneState(), Overtime: a.overtime()})
+			aware.SetWorld(WorldState{Tick: a.TickNumber, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Items: append([]Item(nil), a.Items...), Mines: append([]MineState(nil), a.Mines...), Hazards: append([]Hazard(nil), a.Config.Map.Hazards...), Zone: a.zoneState(), Overtime: a.overtime()})
 		}
+		view := a.visibleRobots(before[i])
 		wg.Add(1)
-		go func(n int, c Controller) {
+		go func(n int, c Controller, view []RobotState) {
 			defer wg.Done()
-			v, e := c.Tick(ctx, before[n], before)
+			v, e := c.Tick(ctx, before[n], view)
 			ch <- decision{n, v, e}
-		}(i, c)
+		}(i, c, view)
 	}
 	wg.Wait()
 	close(ch)
@@ -300,6 +420,12 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 		}
 		intents[r.RobotID] = d.intent
 		a.pickupPrefs[r.RobotID] = d.intent
+		if message := strings.TrimSpace(d.intent.Message); message != "" {
+			if len(message) > MaxMessageBytes {
+				message = message[:MaxMessageBytes]
+			}
+			a.TeamMessages[r.RobotID] = append(a.TeamMessages[r.RobotID], message)
+		}
 	}
 	for i := range a.Robots {
 		r := &a.Robots[i]
@@ -334,6 +460,23 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 		} else if !collidesRobot(a.Config.Map.Obstacles, r.X, ny) {
 			r.Y = ny
 		}
+		// Dash rides the same slide pattern as a normal move but covers a
+		// flat burst distance, ignoring slow and overdrive. Gated on charge
+		// and cooldown so agents cannot chain bursts every tick.
+		if in.Dash && r.DashCharges > 0 && a.TickNumber >= r.DashReadyTick {
+			r.DashCharges--
+			r.DashReadyTick = a.TickNumber + DashCooldownTicks
+			rad := r.Heading * math.Pi / 180
+			dx, dy := clamp(r.X+math.Cos(rad)*DashDistance, RobotRadius, a.Config.Width-RobotRadius), clamp(r.Y+math.Sin(rad)*DashDistance, RobotRadius, a.Config.Height-RobotRadius)
+			if !collidesRobot(a.Config.Map.Obstacles, dx, dy) {
+				r.X, r.Y = dx, dy
+			} else if !collidesRobot(a.Config.Map.Obstacles, dx, r.Y) {
+				r.X = dx
+			} else if !collidesRobot(a.Config.Map.Obstacles, r.X, dy) {
+				r.Y = dy
+			}
+			events = append(events, a.event(Event{Type: "dash", RobotID: r.RobotID, X: r.X, Y: r.Y}))
+		}
 		updateTelemetry(r, in)
 		if r.Cooldown > 0 {
 			r.Cooldown--
@@ -346,6 +489,7 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 	if a.Config.RammingDamage {
 		events = append(events, a.resolveRamming(before)...)
 	}
+	events = append(events, a.advanceMines()...)
 	events = append(events, a.advanceProjectiles()...)
 	for i := range a.Robots {
 		r := &a.Robots[i]
@@ -354,6 +498,8 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 			events = append(events, a.fire(r)...)
 		}
 	}
+	events = append(events, a.applyDeploys(intents)...)
+	events = append(events, a.applyScans(intents)...)
 	events = append(events, a.spawnItems()...)
 	events = append(events, a.pickupItems()...)
 	events = append(events, a.applyZone()...)
@@ -361,6 +507,7 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 	a.TickNumber++
 	a.checkFinished()
 	a.events = append(a.events, events...)
+	a.attachRecentEvents(events)
 	return a.snapshot(events)
 }
 
@@ -489,6 +636,250 @@ func (a *Arena) explode(p Projectile) []Event {
 	}
 	return e
 }
+
+// advanceMines runs after movement so freshly-armed mines catch robots that
+// just drove over them. Mines resolve in slice order; the first non-owner
+// robot inside the trigger radius detonates the mine, which damages everyone
+// in the blast (owner always immune, teammates per friendly-fire), then the
+// loop continues with the next mine. Expired mines are dropped and the slice
+// is compacted preserving order.
+func (a *Arena) advanceMines() []Event {
+	events := []Event{}
+	for i := range a.Mines {
+		mine := &a.Mines[i]
+		if !mine.Active || a.TickNumber < mine.ArmTick {
+			continue
+		}
+		if victim := a.firstMineVictim(*mine); victim != nil {
+			events = append(events, a.explodeMine(mine, victim)...)
+			continue
+		}
+		if a.TickNumber >= mine.SpawnTick+MineLifetimeTicks {
+			mine.Active = false
+			events = append(events, a.event(Event{Type: "mine_expired", RobotID: mine.OwnerID, X: mine.X, Y: mine.Y}))
+		}
+	}
+	kept := a.Mines[:0]
+	for _, mine := range a.Mines {
+		if mine.Active {
+			kept = append(kept, mine)
+		}
+	}
+	a.Mines = kept
+	return events
+}
+
+// firstMineVictim finds the first alive robot (roster order) close enough to
+// set the mine off. The owner never triggers their own mine, even standing
+// on it; teammates can, though friendly-fire rules still guard the blast.
+func (a *Arena) firstMineVictim(mine MineState) *RobotState {
+	for i := range a.Robots {
+		r := &a.Robots[i]
+		if !r.Alive || r.RobotID == mine.OwnerID {
+			continue
+		}
+		if math.Hypot(r.X-mine.X, r.Y-mine.Y) <= MineTriggerRadius {
+			return r
+		}
+	}
+	return nil
+}
+
+// explodeMine deals flat MineDamage to every living robot in the blast radius
+// through the normal damage pipeline (shields and armor still apply). The
+// owner is exempt even under friendly fire; teammates follow the arena's
+// FriendlyFire setting.
+func (a *Arena) explodeMine(mine *MineState, victim *RobotState) []Event {
+	mine.Active = false
+	owner := a.robot(mine.OwnerID)
+	events := []Event{a.event(Event{Type: "mine_exploded", RobotID: mine.OwnerID, TargetID: victim.RobotID, X: mine.X, Y: mine.Y, Value: MineDamage})}
+	for i := range a.Robots {
+		r := &a.Robots[i]
+		if !r.Alive || r.RobotID == mine.OwnerID || (!a.Config.FriendlyFire && r.Team == mine.Team) {
+			continue
+		}
+		if math.Hypot(r.X-mine.X, r.Y-mine.Y) > MineBlastRadius {
+			continue
+		}
+		events = append(events, a.damage(owner, r, MineDamage, Weapon{})...)
+	}
+	return events
+}
+
+// applyDeploys places mines requested by the deploy intent, in roster order.
+// Charges gate the deploy, the arena-wide cap refuses silently when full, and
+// the landing spot is nudged out of obstacles so mines never spawn buried.
+func (a *Arena) applyDeploys(intents map[string]Intent) []Event {
+	events := []Event{}
+	for i := range a.Robots {
+		r := &a.Robots[i]
+		in := intents[r.RobotID]
+		if !r.Alive || in.Deploy != "mine" || r.MineCharges <= 0 {
+			continue
+		}
+		if a.activeMineCount() >= MaxMines {
+			continue
+		}
+		r.MineCharges--
+		a.nextMine++
+		x, y := a.safeDrop(r.X, r.Y)
+		a.Mines = append(a.Mines, MineState{MineID: fmt.Sprintf("mine-%s-%d", r.RobotID, a.nextMine), OwnerID: r.RobotID, Team: r.Team, X: x, Y: y, SpawnTick: a.TickNumber, ArmTick: a.TickNumber + MineArmTicks, Active: true})
+		events = append(events, a.event(Event{Type: "mine_deployed", RobotID: r.RobotID, X: x, Y: y, Message: "mine"}))
+	}
+	return events
+}
+
+func (a *Arena) activeMineCount() int {
+	n := 0
+	for _, mine := range a.Mines {
+		if mine.Active {
+			n++
+		}
+	}
+	return n
+}
+
+// applyScans resolves scan intents in roster order. The result persists on
+// the robot until the next scan; a scan on cooldown is ignored silently.
+func (a *Arena) applyScans(intents map[string]Intent) []Event {
+	events := []Event{}
+	for i := range a.Robots {
+		r := &a.Robots[i]
+		in := intents[r.RobotID]
+		if !r.Alive || in.Scan == nil || a.TickNumber < r.ScanReadyTick {
+			continue
+		}
+		r.ScanReadyTick = a.TickNumber + ScanCooldownTicks
+		r.ScanResult = a.buildScanReport(*r, *in.Scan)
+		events = append(events, a.event(Event{Type: "scan_performed", RobotID: r.RobotID, X: in.Scan.X, Y: in.Scan.Y, Value: int(r.ScanResult.Radius)}))
+	}
+	return events
+}
+
+// buildScanReport assembles everything inside the scan circle: active items,
+// living enemies (cloaked ones only for radar holders), active mines, and
+// hazards whose rectangle center falls in range. Every list is sorted by ID
+// so report bytes stay stable.
+func (a *Arena) buildScanReport(r RobotState, req ScanRequest) *ScanReport {
+	radius := clamp(req.Radius, MinScanRadius, MaxScanRadius)
+	report := &ScanReport{X: req.X, Y: req.Y, Radius: radius, Items: []ScannedItem{}, Enemies: []ScannedRobot{}, Mines: []ScannedMine{}, Hazards: []ScannedHazard{}}
+	radar := effectActive(r, "radar")
+	for i := range a.Items {
+		item := &a.Items[i]
+		if !item.Active {
+			continue
+		}
+		distance := math.Hypot(item.X-req.X, item.Y-req.Y)
+		if distance > radius {
+			continue
+		}
+		report.Items = append(report.Items, ScannedItem{ItemID: item.ItemID, Type: item.Type, X: item.X, Y: item.Y, Distance: distance})
+	}
+	sort.Slice(report.Items, func(i, j int) bool { return report.Items[i].ItemID < report.Items[j].ItemID })
+	for i := range a.Robots {
+		enemy := &a.Robots[i]
+		if !enemy.Alive || enemy.Team == r.Team {
+			continue
+		}
+		cloaked := isCloaked(*enemy)
+		if cloaked && !radar {
+			continue
+		}
+		distance := math.Hypot(enemy.X-req.X, enemy.Y-req.Y)
+		if distance > radius {
+			continue
+		}
+		report.Enemies = append(report.Enemies, ScannedRobot{RobotID: enemy.RobotID, Team: enemy.Team, X: enemy.X, Y: enemy.Y, Heading: enemy.Heading, HP: enemy.HP, Distance: distance, Cloaked: cloaked})
+	}
+	sort.Slice(report.Enemies, func(i, j int) bool { return report.Enemies[i].RobotID < report.Enemies[j].RobotID })
+	for i := range a.Mines {
+		mine := &a.Mines[i]
+		if !mine.Active {
+			continue
+		}
+		distance := math.Hypot(mine.X-req.X, mine.Y-req.Y)
+		if distance > radius {
+			continue
+		}
+		report.Mines = append(report.Mines, ScannedMine{MineID: mine.MineID, X: mine.X, Y: mine.Y, Distance: distance, Armed: a.TickNumber >= mine.ArmTick})
+	}
+	sort.Slice(report.Mines, func(i, j int) bool { return report.Mines[i].MineID < report.Mines[j].MineID })
+	for _, hazard := range a.Config.Map.Hazards {
+		distance := math.Hypot(hazard.X+hazard.Width/2-req.X, hazard.Y+hazard.Height/2-req.Y)
+		if distance > radius {
+			continue
+		}
+		report.Hazards = append(report.Hazards, ScannedHazard{ID: hazard.ID, Type: hazard.Type, X: hazard.X, Y: hazard.Y, Width: hazard.Width, Height: hazard.Height, Distance: distance})
+	}
+	sort.Slice(report.Hazards, func(i, j int) bool { return report.Hazards[i].ID < report.Hazards[j].ID })
+	return report
+}
+
+// visibleRobots is the per-robot view handed to controllers: every robot
+// stays listed except living cloaked enemies, which are hidden unless the
+// observer carries radar. Teammates and the observer are always visible.
+func (a *Arena) visibleRobots(observer RobotState) []RobotState {
+	view := make([]RobotState, 0, len(a.Robots))
+	radar := effectActive(observer, "radar")
+	for _, r := range a.Robots {
+		if r.Alive && r.RobotID != observer.RobotID && r.Team != observer.Team && isCloaked(r) && !radar {
+			continue
+		}
+		view = append(view, r)
+	}
+	return view
+}
+
+// deliverTeamMessages flushes chat queued during the previous tick onto the
+// sender's teammates, in roster order of the senders, at most
+// MaxTeamMessages lines per robot. Senders never receive their own lines.
+func (a *Arena) deliverTeamMessages() {
+	pending := a.TeamMessages
+	a.TeamMessages = map[string][]string{}
+	for i := range a.Robots {
+		a.Robots[i].Messages = nil
+	}
+	if len(pending) == 0 {
+		return
+	}
+	for i := range a.Robots {
+		receiver := &a.Robots[i]
+		for j := range a.Robots {
+			sender := &a.Robots[j]
+			if sender.RobotID == receiver.RobotID || sender.Team != receiver.Team {
+				continue
+			}
+			for _, message := range pending[sender.RobotID] {
+				if len(receiver.Messages) >= MaxTeamMessages {
+					break
+				}
+				receiver.Messages = append(receiver.Messages, message)
+			}
+			if len(receiver.Messages) >= MaxTeamMessages {
+				break
+			}
+		}
+	}
+}
+
+// attachRecentEvents gives each robot the events of the just-completed tick
+// where it was actor or target, capped at the most recent MaxRecentEvents,
+// oldest first. Cleared every tick by assigning nil first.
+func (a *Arena) attachRecentEvents(events []Event) {
+	for i := range a.Robots {
+		r := &a.Robots[i]
+		r.RecentEvents = nil
+		for _, e := range events {
+			if e.RobotID == r.RobotID || e.TargetID == r.RobotID {
+				r.RecentEvents = append(r.RecentEvents, e)
+			}
+		}
+		if len(r.RecentEvents) > MaxRecentEvents {
+			r.RecentEvents = append([]Event(nil), r.RecentEvents[len(r.RecentEvents)-MaxRecentEvents:]...)
+		}
+	}
+}
+
 func (a *Arena) damage(source, target *RobotState, amount int, w Weapon) []Event {
 	if target == nil || !target.Alive {
 		return nil
@@ -651,7 +1042,7 @@ func (a *Arena) snapshot(e []Event) Snapshot {
 	if zone != nil && zone.Active {
 		ann = append(ann, "ZONE CLOSING")
 	}
-	return Snapshot{Type: "snapshot", Version: 2, MatchID: a.MatchID, Sequence: a.TickNumber, Tick: a.TickNumber, Status: status, WinnerTeam: a.winner, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Robots: cloneRobots(a.Robots), Projectiles: append([]Projectile(nil), a.Projectiles...), Items: append([]Item(nil), a.Items...), Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Events: e, Zone: zone, Announcements: ann, Overtime: a.overtime()}
+	return Snapshot{Type: "snapshot", Version: 3, MatchID: a.MatchID, Sequence: a.TickNumber, Tick: a.TickNumber, Status: status, WinnerTeam: a.winner, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Robots: cloneRobots(a.Robots), Projectiles: append([]Projectile(nil), a.Projectiles...), Items: append([]Item(nil), a.Items...), Mines: append([]MineState(nil), a.Mines...), Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Events: e, Zone: zone, Announcements: ann, Overtime: a.overtime()}
 }
 func (a *Arena) event(e Event) Event { e.Tick = a.TickNumber; return e }
 func (a *Arena) robot(id string) *RobotState {
@@ -768,6 +1159,8 @@ func cloneRobots(rs []RobotState) []RobotState {
 		out[i].Logs = append([]string(nil), out[i].Logs...)
 		out[i].Equipment = append([]string(nil), out[i].Equipment...)
 		out[i].Effects = append([]StatusEffect(nil), out[i].Effects...)
+		out[i].Messages = append([]string(nil), out[i].Messages...)
+		out[i].RecentEvents = append([]Event(nil), out[i].RecentEvents...)
 	}
 	return out
 }

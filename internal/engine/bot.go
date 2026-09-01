@@ -142,7 +142,8 @@ func nearestVisibleEnemy(self RobotState, robots []RobotState, obstacles []Obsta
 	var best RobotState
 	distance := math.MaxFloat64
 	for _, r := range robots {
-		if !r.Alive || r.Team == self.Team {
+		// Bots carry no radar, so cloaked enemies are invisible to them.
+		if !r.Alive || r.Team == self.Team || isCloaked(r) {
 			continue
 		}
 		d := math.Hypot(r.X-self.X, r.Y-self.Y)
