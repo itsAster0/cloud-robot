@@ -25,7 +25,63 @@ const (
 	MaxPublicKeyBytes   = 8 * 1024
 	MaxAgentCommandSize = 256
 	DefaultStorageBytes = 1 << 30
+	DefaultSSHPortMin   = 22000
+	DefaultSSHPortCount = 1000
 )
+
+type SSHPortRange struct {
+	Start int
+	End   int
+}
+
+// ResolveSSHPortRange supports one-knob MIN+COUNT configuration while keeping
+// START+END as explicit overrides for existing deployments.
+func ResolveSSHPortRange(getenv func(string) string) (SSHPortRange, error) {
+	minimum, err := optionalPositiveInt(getenv("SSH_PORT_MIN"), DefaultSSHPortMin)
+	if err != nil {
+		return SSHPortRange{}, fmt.Errorf("SSH_PORT_MIN: %w", err)
+	}
+	count, err := optionalPositiveInt(getenv("SSH_PORT_COUNT"), DefaultSSHPortCount)
+	if err != nil {
+		return SSHPortRange{}, fmt.Errorf("SSH_PORT_COUNT: %w", err)
+	}
+	start, err := optionalPositiveInt(getenv("SSH_PORT_START"), minimum)
+	if err != nil {
+		return SSHPortRange{}, fmt.Errorf("SSH_PORT_START: %w", err)
+	}
+	endDefault := start + count - 1
+	end, err := optionalPositiveInt(getenv("SSH_PORT_END"), endDefault)
+	if err != nil {
+		return SSHPortRange{}, fmt.Errorf("SSH_PORT_END: %w", err)
+	}
+	expected, err := optionalPositiveInt(getenv("EXPECTED_BOX_COUNT"), 2)
+	if err != nil {
+		return SSHPortRange{}, fmt.Errorf("EXPECTED_BOX_COUNT: %w", err)
+	}
+	available := end - start + 1
+	switch {
+	case end < start:
+		return SSHPortRange{}, fmt.Errorf("SSH port range is inverted: %d-%d", start, end)
+	case start <= 22 && end >= 22:
+		return SSHPortRange{}, errors.New("SSH box port range overlaps host SSH port 22")
+	case start > 65535 || end > 65535:
+		return SSHPortRange{}, errors.New("SSH box ports must be at most 65535")
+	case available < expected:
+		return SSHPortRange{}, fmt.Errorf("SSH port range has %d ports, fewer than EXPECTED_BOX_COUNT=%d", available, expected)
+	}
+	return SSHPortRange{Start: start, End: end}, nil
+}
+
+func optionalPositiveInt(value string, fallback int) (int, error) {
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return 0, errors.New("must be a positive integer")
+	}
+	return parsed, nil
+}
 
 type AgentConfig struct {
 	RobotID      string `json:"robotId"`

@@ -14,6 +14,37 @@ func TestIDForUserStableAndOpaque(t *testing.T) {
 	}
 }
 
+func TestResolveSSHPortRange(t *testing.T) {
+	from := func(values map[string]string) func(string) string {
+		return func(key string) string { return values[key] }
+	}
+
+	defaults, err := ResolveSSHPortRange(from(nil))
+	if err != nil || defaults.Start != DefaultSSHPortMin || defaults.End != DefaultSSHPortMin+DefaultSSHPortCount-1 {
+		t.Fatalf("unexpected defaults: %+v, %v", defaults, err)
+	}
+	derived, err := ResolveSSHPortRange(from(map[string]string{"SSH_PORT_MIN": "31000", "SSH_PORT_COUNT": "20"}))
+	if err != nil || derived != (SSHPortRange{Start: 31000, End: 31019}) {
+		t.Fatalf("unexpected derived range: %+v, %v", derived, err)
+	}
+	overridden, err := ResolveSSHPortRange(from(map[string]string{"SSH_PORT_MIN": "31000", "SSH_PORT_COUNT": "20", "SSH_PORT_START": "32000", "SSH_PORT_END": "32009"}))
+	if err != nil || overridden != (SSHPortRange{Start: 32000, End: 32009}) {
+		t.Fatalf("unexpected override: %+v, %v", overridden, err)
+	}
+	for name, values := range map[string]map[string]string{
+		"inverted":  {"SSH_PORT_START": "300", "SSH_PORT_END": "200"},
+		"host ssh":  {"SSH_PORT_START": "20", "SSH_PORT_END": "30"},
+		"too small": {"SSH_PORT_START": "30000", "SSH_PORT_END": "30001", "EXPECTED_BOX_COUNT": "3"},
+		"overflow":  {"SSH_PORT_MIN": "65530", "SSH_PORT_COUNT": "20"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ResolveSSHPortRange(from(values)); err == nil {
+				t.Fatal("invalid range accepted")
+			}
+		})
+	}
+}
+
 func TestValidatePublicKey(t *testing.T) {
 	payload := "AAAAC3NzaC1lZDI1NTE5AAAAIGZha2UtYnV0LWxvbmctZW5vdWdoLWtleQ=="
 	key, fingerprint, err := ValidatePublicKey("ssh-ed25519 " + payload + " reviewer@example")

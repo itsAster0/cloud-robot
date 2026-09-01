@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	robotauth "github.com/kryxen/cloud-robot/internal/auth"
 	"github.com/kryxen/cloud-robot/internal/boxes"
 	"github.com/kryxen/cloud-robot/internal/cloud"
+	"github.com/kryxen/cloud-robot/internal/engine"
 	"github.com/kryxen/cloud-robot/internal/model"
 	"github.com/kryxen/cloud-robot/internal/scripts"
 )
@@ -30,6 +32,8 @@ type fakeStore struct {
 	queue       []string
 	readyErr    error
 	putMatchErr error
+	players     map[string]model.PlayerStats
+	replays     map[string][]model.MatchEvent
 }
 
 func newFakeStore() *fakeStore {
@@ -38,6 +42,8 @@ func newFakeStore() *fakeStore {
 		boxes:       map[string]model.BoxRecord{},
 		credentials: map[string]cloud.AgentCredential{},
 		scripts:     map[string]string{},
+		players:     map[string]model.PlayerStats{},
+		replays:     map[string][]model.MatchEvent{},
 	}
 }
 
@@ -57,13 +63,81 @@ func (f *fakeStore) GetMatch(_ context.Context, matchID string) (model.Match, er
 	}
 	return match, nil
 }
+func (f *fakeStore) ListMatches(_ context.Context, status model.MatchStatus, limit int) ([]model.Match, error) {
+	result := make([]model.Match, 0, len(f.matches))
+	for _, match := range f.matches {
+		if status == "" || match.Status == status {
+			result = append(result, match)
+		}
+	}
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+func (f *fakeStore) PutPlayerStats(_ context.Context, stats model.PlayerStats) error {
+	f.players[stats.PlayerID] = stats
+	return nil
+}
+func (f *fakeStore) GetPlayerStats(_ context.Context, playerID string) (model.PlayerStats, error) {
+	stats, ok := f.players[playerID]
+	if !ok {
+		return model.PlayerStats{}, errors.New("player not found")
+	}
+	return stats, nil
+}
+func (f *fakeStore) ListPlayerStats(_ context.Context, limit int) ([]model.PlayerStats, error) {
+	result := make([]model.PlayerStats, 0, len(f.players))
+	for _, player := range f.players {
+		result = append(result, player)
+	}
+	return result, nil
+}
+func (f *fakeStore) PutReplay(_ context.Context, key string, events []model.MatchEvent) error {
+	f.replays[key] = append([]model.MatchEvent(nil), events...)
+	return nil
+}
+func (f *fakeStore) GetReplay(_ context.Context, key string) ([]model.MatchEvent, error) {
+	events, ok := f.replays[key]
+	if !ok {
+		return nil, errors.New("replay not found")
+	}
+	return events, nil
+}
 func (f *fakeStore) PutBox(_ context.Context, userID string, box model.BoxRecord) error {
 	f.boxes[userID] = box
 	return nil
 }
+func (f *fakeStore) GetBox(_ context.Context, userID string) (model.BoxRecord, error) {
+	box, ok := f.boxes[userID]
+	if !ok {
+		return model.BoxRecord{}, errors.New("box not found")
+	}
+	return box, nil
+}
 func (f *fakeStore) PutScript(_ context.Context, key, source string) error {
 	f.scripts[key] = source
 	return nil
+}
+func (f *fakeStore) GetScript(_ context.Context, key string) (string, error) {
+	source, ok := f.scripts[key]
+	if !ok {
+		return "", errors.New("script not found")
+	}
+	return source, nil
+}
+func (f *fakeStore) ListScriptVersions(_ context.Context, boxID string, limit int) ([]model.ScriptVersion, error) {
+	prefix := "versions/" + boxID + "/"
+	result := []model.ScriptVersion{}
+	for key := range f.scripts {
+		if strings.HasPrefix(key, prefix) {
+			parts := strings.Split(strings.TrimPrefix(key, prefix), "/")
+			if len(parts) == 2 {
+				result = append(result, model.ScriptVersion{VersionID: parts[0], ObjectKey: key})
+			}
+		}
+	}
+	return result, nil
 }
 func (f *fakeStore) PutAgentCredential(_ context.Context, credential cloud.AgentCredential) error {
 	f.credentials[credential.RobotID] = credential
@@ -125,6 +199,8 @@ func (f *fakeProvisioner) ConfigureAgent(_ context.Context, _ string, config box
 	}
 	f.configured = append(f.configured, config)
 	f.box.AgentStatus = "starting"
+	// Mirror box-supervisor: configuring an agent sets the active markers.
+	f.box.ActiveRobotID, f.box.ActiveMatchID = config.RobotID, config.MatchID
 	return f.box, nil
 }
 func (f *fakeProvisioner) Restart(context.Context, string) (model.BoxRecord, error) {
@@ -151,11 +227,15 @@ func (f *fakeProvisioner) WriteMain(_ context.Context, _, source string) (string
 type fakeAuth struct{ required bool }
 
 func (f *fakeAuth) Verify(ctx context.Context, authorization string) (context.Context, error) {
-	if strings.TrimPrefix(authorization, "Bearer ") == "" {
+	token := strings.TrimPrefix(authorization, "Bearer ")
+	if token == "" {
 		if f.required {
 			return ctx, errors.New("sign in required")
 		}
 		return robotauth.WithUserID(ctx, "guest"), nil
+	}
+	if token == "alice-token" {
+		return robotauth.WithUserID(ctx, "alice"), nil
 	}
 	return robotauth.WithUserID(ctx, testUserID), nil
 }
@@ -163,15 +243,16 @@ func (f *fakeAuth) Verify(ctx context.Context, authorization string) (context.Co
 type harness struct {
 	store       *fakeStore
 	provisioner *fakeProvisioner
+	app         *Server
 	server      *httptest.Server
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{store: newFakeStore(), provisioner: &fakeProvisioner{}}
-	app := NewServer(h.store, h.provisioner)
-	app.auth = &fakeAuth{}
-	h.server = httptest.NewServer(app.Handler())
+	h.app = NewServer(h.store, h.provisioner)
+	h.app.auth = &fakeAuth{}
+	h.server = httptest.NewServer(h.app.Handler())
 	t.Cleanup(h.server.Close)
 	return h
 }
@@ -241,6 +322,64 @@ func TestGetBoxWithoutProvisioning(t *testing.T) {
 	response, _ := h.request(t, http.MethodGet, "/api/me/box", "")
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", response.StatusCode)
+	}
+}
+
+// Box markers must self-heal: a binding to a match the store no longer has (or
+// that already ended) would otherwise block queueing forever and offer a
+// withdraw button that always fails with "match not found".
+func TestGetBoxClearsStaleMatchMarker(t *testing.T) {
+	for name, status := range map[string]model.MatchStatus{"missing": "", "finished": "finished", "failed": "failed"} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.provisioner.box = readyBox()
+			stored := readyBox()
+			stored.ActiveRobotID, stored.ActiveMatchID = "r-old", "m-gone"
+			if err := h.store.PutBox(context.Background(), testUserID, stored); err != nil {
+				t.Fatal(err)
+			}
+			if status != "" {
+				if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m-gone", Status: status}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			response, payload := h.request(t, http.MethodGet, "/api/me/box", "")
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("get box failed: %d %v", response.StatusCode, payload)
+			}
+			if payload["activeMatchId"] != nil || payload["activeRobotId"] != nil {
+				t.Fatalf("stale marker not cleared: %v", payload)
+			}
+			cleared := h.store.boxes[testUserID]
+			if cleared.ActiveMatchID != "" || cleared.ActiveRobotID != "" {
+				t.Fatalf("stale marker not persisted: %+v", cleared)
+			}
+		})
+	}
+}
+
+func TestGetBoxKeepsLiveMatchMarker(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	stored := readyBox()
+	stored.ActiveRobotID, stored.ActiveMatchID = "r1", "m1"
+	if err := h.store.PutBox(context.Background(), testUserID, stored); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m1", Status: model.MatchRunning}); err != nil {
+		t.Fatal(err)
+	}
+
+	response, payload := h.request(t, http.MethodGet, "/api/me/box", "")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("get box failed: %d %v", response.StatusCode, payload)
+	}
+	if payload["activeMatchId"] != "m1" || payload["activeRobotId"] != "r1" {
+		t.Fatalf("live marker was cleared: %v", payload)
+	}
+	if h.store.boxes[testUserID].ActiveMatchID != "m1" {
+		t.Fatalf("live marker not persisted: %+v", h.store.boxes[testUserID])
 	}
 }
 
@@ -453,6 +592,10 @@ func TestSubmitRobotAllowsBoxAfterMatchFinishes(t *testing.T) {
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("expected reuse after finish, got %d %v", response.StatusCode, payload)
 	}
+	storedBox := h.store.boxes[testUserID]
+	if storedBox.ActiveMatchID != "m1" || storedBox.ActiveRobotID == "" {
+		t.Fatalf("stale markers not replaced with new registration: %+v", storedBox)
+	}
 }
 
 func TestSubmitRobotRevertsOnConfigureFailure(t *testing.T) {
@@ -615,6 +758,76 @@ func TestWithdrawRobotRejectsRunningMatch(t *testing.T) {
 	}
 }
 
+func TestWithdrawFromMatchConcedesRobot(t *testing.T) {
+	h := newHarness(t)
+	match := model.Match{MatchID: "m1", OwnerID: testUserID, Status: model.MatchRunning}
+	match.Robots = []model.RobotSubmission{
+		{RobotID: "r1", Team: "red", OwnerBoxID: testBoxID, PlayerID: testUserID},
+		{RobotID: "r2", Team: "blue", Bot: true},
+	}
+	if err := h.store.PutMatch(context.Background(), match); err != nil {
+		t.Fatal(err)
+	}
+	controller := func(id string) engine.Controller {
+		return engine.NewBotController(id, engine.BotDummy, engine.PersonalityAggressive, engine.DefaultConfig().Map)
+	}
+	states := engine.SpawnPositions([]engine.RobotState{
+		{RobotID: "r1", Name: "Player", Team: "red"},
+		{RobotID: "r2", Name: "Bot", Team: "blue"},
+	})
+	arena := engine.New("m1", states, map[string]engine.Controller{"r1": controller("r1"), "r2": controller("r2")})
+	h.app.registerActiveArena("m1", arena)
+	defer h.app.unregisterActiveArena("m1")
+
+	response, payload := h.request(t, http.MethodPost, "/api/matches/m1/withdraw", "")
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("withdraw failed: %d %v", response.StatusCode, payload)
+	}
+	if payload["status"] != "withdrawing" || payload["robotId"] != "r1" {
+		t.Fatalf("unexpected response: %v", payload)
+	}
+
+	// The next tick concedes the robot and resolves the match by elimination.
+	snapshot := arena.Step(context.Background())
+	if !arena.Finished() || arena.Winner() != "blue" {
+		t.Fatalf("opponent should win: finished=%v winner=%q", arena.Finished(), arena.Winner())
+	}
+	for _, robot := range snapshot.Robots {
+		if robot.RobotID != "r1" {
+			continue
+		}
+		if robot.Alive || robot.Failed || robot.HP != 0 {
+			t.Fatalf("withdrawn robot not eliminated: %+v", robot)
+		}
+	}
+}
+
+func TestWithdrawFromMatchRejectsLobby(t *testing.T) {
+	h := newHarness(t)
+	match := model.Match{MatchID: "m1", Status: model.MatchLobby}
+	match.Robots = []model.RobotSubmission{{RobotID: "r1", Team: "red", OwnerBoxID: testBoxID}}
+	if err := h.store.PutMatch(context.Background(), match); err != nil {
+		t.Fatal(err)
+	}
+	response, _ := h.request(t, http.MethodPost, "/api/matches/m1/withdraw", "")
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("expected conflict, got %d", response.StatusCode)
+	}
+}
+
+func TestWithdrawFromMatchWithoutRegistration(t *testing.T) {
+	h := newHarness(t)
+	match := model.Match{MatchID: "m1", Status: model.MatchRunning}
+	match.Robots = []model.RobotSubmission{{RobotID: "r1", Team: "red", OwnerBoxID: "someone-else"}}
+	if err := h.store.PutMatch(context.Background(), match); err != nil {
+		t.Fatal(err)
+	}
+	response, _ := h.request(t, http.MethodPost, "/api/matches/m1/withdraw", "")
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected not found, got %d", response.StatusCode)
+	}
+}
+
 func TestWithdrawRobotWithoutRegistration(t *testing.T) {
 	h := newHarness(t)
 	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m1", Status: model.MatchLobby}); err != nil {
@@ -695,5 +908,223 @@ func TestReadyReportsCloudFailure(t *testing.T) {
 	response, payload := h.request(t, http.MethodGet, "/readyz", "")
 	if response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestPublicMatchListAndProfile(t *testing.T) {
+	h := newHarness(t)
+	h.store.matches["m1"] = model.Match{MatchID: "m1", Status: model.MatchFinished}
+	h.store.players["reviewer"] = model.PlayerStats{PlayerID: "reviewer", Handle: "reviewer", Ratings: map[string]int{"duel": 1510}}
+	response, payload := h.requestAs(t, http.MethodGet, "/api/matches?status=finished", "", false)
+	if response.StatusCode != http.StatusOK || len(payload["matches"].([]any)) != 1 {
+		t.Fatalf("public matches failed: %d %v", response.StatusCode, payload)
+	}
+	response, payload = h.requestAs(t, http.MethodGet, "/api/profiles/reviewer", "", false)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("public profile failed: %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestQueueJoinStatusAndLeave(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	h.provisioner.readMain = "return arena.action({ move = 1 })"
+	body := `{"displayName":"Queue Bot","mode":"duel","runtime":"lua5.4","startCommand":"lua main.lua"}`
+	response, payload := h.request(t, http.MethodPost, "/api/queue", body)
+	if response.StatusCode != http.StatusAccepted || payload["status"] != "waiting" {
+		t.Fatalf("queue join failed: %d %v", response.StatusCode, payload)
+	}
+	response, payload = h.request(t, http.MethodGet, "/api/queue", "")
+	if response.StatusCode != http.StatusOK || payload["status"] != "waiting" {
+		t.Fatalf("queue status failed: %d %v", response.StatusCode, payload)
+	}
+	response, payload = h.request(t, http.MethodDelete, "/api/queue", "")
+	if response.StatusCode != http.StatusOK || payload["status"] != "idle" {
+		t.Fatalf("queue leave failed: %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestQueueJoinBlocksBoxWithActiveMatch(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m2", Status: model.MatchRunning}); err != nil {
+		t.Fatal(err)
+	}
+	h.provisioner.box = readyBox()
+	h.provisioner.box.ActiveMatchID = "m2"
+	h.provisioner.readMain = "return 1"
+	body := `{"displayName":"Ada","mode":"duel","runtime":"lua5.4","startCommand":"lua main.lua"}`
+	response, payload := h.request(t, http.MethodPost, "/api/queue", body)
+	if response.StatusCode != http.StatusConflict || payload["error"] != "box already has an active robot" {
+		t.Fatalf("expected conflict, got %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestQueueJoinClearsStaleActiveMatch(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m2", Status: model.MatchFinished}); err != nil {
+		t.Fatal(err)
+	}
+	h.provisioner.box = readyBox()
+	h.provisioner.box.ActiveRobotID, h.provisioner.box.ActiveMatchID = "r-old", "m2"
+	h.provisioner.readMain = "return 1"
+	body := `{"displayName":"Ada","mode":"duel","runtime":"lua5.4","startCommand":"lua main.lua"}`
+	response, payload := h.request(t, http.MethodPost, "/api/queue", body)
+	if response.StatusCode != http.StatusAccepted || payload["status"] != "waiting" {
+		t.Fatalf("expected queue join after stale release, got %d %v", response.StatusCode, payload)
+	}
+	stored := h.store.boxes[testUserID]
+	if stored.ActiveRobotID != "" || stored.ActiveMatchID != "" {
+		t.Fatalf("stale markers not cleared: %+v", stored)
+	}
+}
+
+func TestReleaseBoxesClearsActiveMarkersAfterMatchEnds(t *testing.T) {
+	store := newFakeStore()
+	app := NewServer(store, &fakeProvisioner{})
+	match := model.Match{MatchID: "m1", Status: model.MatchFinished, Robots: []model.RobotSubmission{
+		{RobotID: "r1", PlayerID: testUserID, OwnerBoxID: testBoxID},
+		{RobotID: "bot-1", Bot: true},
+	}}
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r1", "m1"
+	if err := store.PutBox(context.Background(), testUserID, box); err != nil {
+		t.Fatal(err)
+	}
+	app.releaseBoxes(context.Background(), match)
+	stored, err := store.GetBox(context.Background(), testUserID)
+	if err != nil || stored.ActiveRobotID != "" || stored.ActiveMatchID != "" {
+		t.Fatalf("box markers not released: %+v %v", stored, err)
+	}
+}
+
+func TestReplayFallsBackToEventSummary(t *testing.T) {
+	h := newHarness(t)
+	h.store.matches["m1"] = model.Match{MatchID: "m1", Status: model.MatchFinished, EventSummary: []model.MatchEvent{{Type: "hit", Damage: 25}}}
+	response, payload := h.requestAs(t, http.MethodGet, "/api/matches/m1/replay", "", false)
+	if response.StatusCode != http.StatusOK || payload["complete"] != false {
+		t.Fatalf("replay fallback failed: %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestUpdatePlayerStatsStoresResultAndDamage(t *testing.T) {
+	store := newFakeStore()
+	app := NewServer(store, &fakeProvisioner{})
+	match := model.Match{Mode: "duel", WinnerTeam: "red", Robots: []model.RobotSubmission{{RobotID: "r1", PlayerID: "alice", Team: "red"}, {RobotID: "r2", PlayerID: "bob", Team: "blue"}}, RobotSummaries: []model.RobotSummary{{RobotID: "r1", DamageDealt: 75, DamageTaken: 25}, {RobotID: "r2", DamageDealt: 25, DamageTaken: 75}}}
+	app.updatePlayerStats(context.Background(), match)
+	if store.players["alice"].Wins != 1 || store.players["alice"].Ratings["duel"] != 1516 || store.players["alice"].DamageDealt != 75 {
+		t.Fatalf("winner stats wrong: %+v", store.players["alice"])
+	}
+	if store.players["bob"].Losses != 1 || store.players["bob"].Ratings["duel"] != 1484 {
+		t.Fatalf("loser stats wrong: %+v", store.players["bob"])
+	}
+}
+
+func TestReconnectGraceReusesLastIntent(t *testing.T) {
+	manager := NewAgentManager()
+	manager.last["r1"] = engine.Intent{Move: 3}
+	manager.disconnectedAt["r1"] = time.Now()
+	intent, err := manager.Controller("r1").Tick(context.Background(), engine.RobotState{}, nil)
+	if err != nil || intent.Move != 3 {
+		t.Fatalf("reconnect fallback failed: %+v %v", intent, err)
+	}
+}
+
+func TestSDKVersionComparison(t *testing.T) {
+	if !sdkVersionOlder("0.1.9", "0.2.0") || sdkVersionOlder("0.2.0", "0.2.0") || sdkVersionOlder("1.0.0", "0.2.0") {
+		t.Fatal("SDK version comparison wrong")
+	}
+}
+
+func onlyStoredMatch(t *testing.T, store *fakeStore) model.Match {
+	t.Helper()
+	if len(store.matches) != 1 {
+		t.Fatalf("expected exactly one stored match, got %d", len(store.matches))
+	}
+	for _, match := range store.matches {
+		return match
+	}
+	return model.Match{}
+}
+
+func TestCreateMatchPersistsCombatOptionsAndPersonality(t *testing.T) {
+	h := newHarness(t)
+	body := `{"friendlyFire":true,"regenPerTick":2,"regenDelayTicks":120,"rammingDamage":true,"botPersonality":"camper"}`
+	response, payload := h.request(t, http.MethodPost, "/api/matches", body)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create match failed: %d %v", response.StatusCode, payload)
+	}
+	if payload["friendlyFire"] != true || payload["regenPerTick"] != float64(2) || payload["regenDelayTicks"] != float64(120) || payload["rammingDamage"] != true {
+		t.Fatalf("combat options missing from response: %v", payload)
+	}
+	if payload["botPersonality"] != "camper" {
+		t.Fatalf("botPersonality missing from response: %v", payload)
+	}
+	stored := onlyStoredMatch(t, h.store)
+	if !stored.FriendlyFire || stored.RegenPerTick != 2 || stored.RegenDelayTicks != 120 || !stored.RammingDamage || stored.BotPersonality != "camper" {
+		t.Fatalf("combat options not persisted: %+v", stored)
+	}
+}
+
+func TestCreateMatchDefaultsKeepStockBehavior(t *testing.T) {
+	h := newHarness(t)
+	response, payload := h.request(t, http.MethodPost, "/api/matches", `{}`)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create match failed: %d", response.StatusCode)
+	}
+	stored := onlyStoredMatch(t, h.store)
+	if stored.FriendlyFire || stored.RegenPerTick != 0 || stored.RegenDelayTicks != 0 || stored.RammingDamage {
+		t.Fatalf("defaults must keep stock combat behavior: %+v", stored)
+	}
+	if stored.BotPersonality != "aggressive" {
+		t.Fatalf("default bot personality must be aggressive: %+v", stored)
+	}
+	raw, _ := json.Marshal(payload)
+	for _, key := range []string{"friendlyFire", "regenPerTick", "regenDelayTicks", "rammingDamage"} {
+		if bytes.Contains(raw, []byte(key)) {
+			t.Fatalf("unset option %s should be omitted from response: %s", key, raw)
+		}
+	}
+}
+
+func TestCreateMatchRejectsInvalidCombatOptions(t *testing.T) {
+	for _, body := range []string{
+		`{"regenPerTick":-1}`,
+		`{"regenPerTick":11}`,
+		`{"regenDelayTicks":-5}`,
+		`{"regenDelayTicks":601}`,
+		`{"botPersonality":"sneaky"}`,
+	} {
+		h := newHarness(t)
+		response, payload := h.request(t, http.MethodPost, "/api/matches", body)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("body %s accepted with status %d: %v", body, response.StatusCode, payload)
+		}
+		if payload["error"] == "" {
+			t.Fatalf("body %s rejected without useful error: %v", body, payload)
+		}
+	}
+}
+
+func TestWorkerCopiesMatchOptionsIntoEngineConfig(t *testing.T) {
+	match := model.Match{MapID: "open-field", ArenaWidth: 800, ArenaHeight: 500, Seed: 42, FriendlyFire: true, RegenPerTick: 3, RegenDelayTicks: 90, RammingDamage: true, BotPersonality: "evasive"}
+	config := engineConfigFor(match)
+	if !config.FriendlyFire || config.RegenPerTick != 3 || config.RegenDelayTicks != 90 || !config.RammingDamage {
+		t.Fatalf("combat options not copied into engine config: %+v", config)
+	}
+	if config.Width != 800 || config.Height != 500 || config.Seed != 42 {
+		t.Fatalf("arena config wrong: %+v", config)
+	}
+	if botPersonalityFor(match) != engine.PersonalityEvasive {
+		t.Fatalf("evasive personality not mapped: %s", botPersonalityFor(match))
+	}
+	plain := engineConfigFor(model.Match{MapID: "open-field", ArenaWidth: 800, ArenaHeight: 500, Seed: 7})
+	if plain.FriendlyFire || plain.RegenPerTick != 0 || plain.RegenDelayTicks != 0 || plain.RammingDamage {
+		t.Fatalf("zero-value match must keep stock engine config: %+v", plain)
+	}
+	if botPersonalityFor(model.Match{}) != engine.PersonalityAggressive {
+		t.Fatal("empty personality must default to aggressive")
+	}
+	if botPersonalityFor(model.Match{BotPersonality: "camper"}) != engine.PersonalityCamper {
+		t.Fatal("camper personality not mapped")
 	}
 }

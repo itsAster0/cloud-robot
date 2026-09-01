@@ -3,35 +3,14 @@
   import type { User } from '@workos-inc/authkit-js';
   import Arena from './lib/Arena.svelte';
   import BoxConsole from './lib/BoxConsole.svelte';
+  import PortalPage from './lib/PortalPage.svelte';
+  import { parseRoute, type Route } from './lib/router';
   import { api, setTokenProvider } from './lib/api';
   import { accessToken, authConfigured, clearRedirectCallback, initializeAuth, redirectCallbackPending, signIn, signOut } from './lib/auth';
   import { isNewerSnapshot, type AgentEnrollment, type ArenaEvent, type CloudStatus, type Match, type RobotBox, type Snapshot, type Team } from './lib/types';
 
-  // Hash routes keep back/forward working without a router dependency.
-  type Route = 'arena' | 'box' | 'docs';
-  const ROUTES: readonly Route[] = ['arena', 'box', 'docs'];
-  function routeFromLocation(): Route {
-    const candidate = window.location.hash.replace(/^#\/?/, '');
-    return (ROUTES as readonly string[]).includes(candidate) ? (candidate as Route) : 'arena';
-  }
-  function go(route: Route) {
-    if (routeFromLocation() === route) return;
-    window.location.hash = `/${route}`;
-  }
-
-  const luaExample = `local arena = require "arena"
-
-arena.run({
-  url = assert(os.getenv("ROBOT_ARENA_URL")),
-  token = assert(os.getenv("ROBOT_TOKEN")),
-  decide = function(observation)
-    local enemy = arena.nearest_enemy(observation)
-    if enemy then
-      return arena.approach(observation, enemy, 8)
-    end
-    return arena.action({ turn = 12 })
-  end,
-})`;
+  function routeFromLocation() { return parseRoute(window.location.hash); }
+  function go(path: string) { window.location.hash = path; }
 
   let view = $state<Route>(routeFromLocation());
   let team = $state<Team>('red');
@@ -64,12 +43,87 @@ arena.run({
     text: string;
   }
 
+  interface StreakBanner {
+    robotId: string;
+    name: string;
+    streak: string;
+    kills: number;
+  }
+
   let hasRed = $derived(match?.robots.some((robot) => robot.team === 'red') ?? false);
   let hasBlue = $derived(match?.robots.some((robot) => robot.team === 'blue') ?? false);
   let allConnected = $derived(match?.robots.every((robot) => connectedAgents[robot.robotId]) ?? false);
   let canStart = $derived(match?.status === 'lobby' && hasRed && hasBlue && allConnected);
   let myRobot = $derived(match?.robots.find((robot) => robot.ownerBoxId === robotBox?.boxId) ?? null);
   let latestFeed = $derived(feed.slice(-14).reverse());
+  let announcements = $derived.by(() => {
+    const list = [...(snapshot?.announcements ?? [])];
+    if (snapshot?.overtime && !list.includes('OVERTIME')) list.push('OVERTIME');
+    return list;
+  });
+
+  let streakBanner = $state<StreakBanner | null>(null);
+  let streakTimer: ReturnType<typeof setTimeout> | null = null;
+  let streakMatchId = '';
+  let activeStreak: { robotId: string; streak: string } | null = null;
+  let seenStreakEvents = new Set<string>();
+  let dismissedStreaks = new Set<string>();
+
+  function streakPhrase(streak: string) {
+    return streak === 'UNSTOPPABLE' ? 'IS UNSTOPPABLE' : streak === 'LEGENDARY' ? 'HAS GONE LEGENDARY' : `IS ON A ${streak}`;
+  }
+
+  function streakRobotName(robotId: string) {
+    return snapshot?.robots.find((entry) => entry.robotId === robotId)?.name ?? robotName(robotId);
+  }
+
+  function clearStreakBanner() {
+    if (streakTimer) clearTimeout(streakTimer);
+    streakTimer = null;
+    streakBanner = null;
+  }
+
+  function showStreakBanner(matchId: string, robotId: string, streak: string, kills: number) {
+    if (streakTimer) clearTimeout(streakTimer);
+    activeStreak = { robotId, streak };
+    streakBanner = { robotId, name: streakRobotName(robotId), streak, kills };
+    streakTimer = setTimeout(() => {
+      streakTimer = null;
+      dismissedStreaks.add(`${matchId}:${robotId}:${streak}`);
+      streakBanner = null;
+    }, 4500);
+  }
+
+  $effect(() => {
+    const current = snapshot;
+    if (!current) return;
+    if (streakMatchId !== current.matchId) {
+      streakMatchId = current.matchId;
+      seenStreakEvents.clear();
+      dismissedStreaks.clear();
+      activeStreak = null;
+      clearStreakBanner();
+    }
+    (current.events ?? []).forEach((event, index) => {
+      if (event.type !== 'kill_streak' || !event.robotId) return;
+      const key = `${current.sequence}:${index}`;
+      if (seenStreakEvents.has(key)) return;
+      seenStreakEvents.add(key);
+      showStreakBanner(current.matchId, event.robotId, event.message ?? 'RAMPAGE', event.value ?? 0);
+    });
+    const streak = activeStreak;
+    if (streak) {
+      const robot = current.robots.find((entry) => entry.robotId === streak.robotId);
+      if (!robot || !robot.alive || robot.streakName !== streak.streak) {
+        activeStreak = null;
+        clearStreakBanner();
+      }
+    }
+    if (!streakBanner) {
+      const streaking = current.robots.find((entry) => entry.alive && !!entry.streakName && !dismissedStreaks.has(`${current.matchId}:${entry.robotId}:${entry.streakName}`));
+      if (streaking?.streakName) showStreakBanner(current.matchId, streaking.robotId, streaking.streakName, streaking.killStreak ?? 0);
+    }
+  });
 
   function robotName(robotId?: string) {
     return match?.robots.find((robot) => robot.robotId === robotId)?.displayName ?? robotId?.slice(0, 6) ?? '?';
@@ -77,22 +131,27 @@ arena.run({
 
   function feedEntry(seq: number, index: number, event: ArenaEvent): FeedEntry {
     const label = event.type.replace(/_/g, ' ').toUpperCase();
-    const fatal = event.type === 'robot_destroyed' || event.type === 'robot_failed';
+    const fatal = event.type === 'robot_destroyed' || event.type === 'robot_failed' || event.type === 'robot_withdrawn';
     let text = event.message ?? '';
     if (event.type === 'shot_fired') text = `${robotName(event.robotId)} fired`;
     else if (event.type === 'hit') text = `${robotName(event.robotId)} hit ${robotName(event.targetId)} for ${event.damage} dmg`;
     else if (event.type === 'robot_destroyed') text = `${robotName(event.robotId)} destroyed by ${robotName(event.targetId)}`;
     else if (event.type === 'robot_failed') text = `${robotName(event.robotId)} script failed`;
+    else if (event.type === 'robot_withdrawn') text = `${robotName(event.robotId)} withdrew from the match`;
+    else if (event.type === 'kill_streak' && event.message) text = `${robotName(event.robotId)} ${streakPhrase(event.message)}`;
+    else if (event.type === 'item_picked_up' || event.type === 'pickup') text = `${robotName(event.robotId)} picked up ${event.itemType ?? 'item'}`;
+    else if (event.type === 'agent_disconnected') text = `${robotName(event.robotId)} disconnected`;
     return { id: `${seq}:${index}:${label}`, tone: fatal ? 'bad' : 'ok', label, text };
   }
 
   onMount(() => {
-    const onHash = () => { view = routeFromLocation(); };
+    const onHash = () => { view = routeFromLocation(); void loadRouteMatch(); };
     window.addEventListener('hashchange', onHash);
     void initialize();
     return () => {
       window.removeEventListener('hashchange', onHash);
       socket?.close();
+      clearStreakBanner();
       if (boxPoll) clearInterval(boxPoll);
     };
   });
@@ -120,7 +179,7 @@ arena.run({
     }
     signingIn = redirectCallbackPending();
     try { cloud = await api.cloudStatus(); } catch (failure) { setError(failure); }
-    const matchId = new URL(window.location.href).searchParams.get('match');
+    const matchId = view.parameter && (view.name === 'match' || view.name === 'match-detail') ? view.parameter : new URL(window.location.href).searchParams.get('match');
     if (matchId) {
       try {
         match = await api.getMatch(matchId);
@@ -134,9 +193,15 @@ arena.run({
         const url = new URL(window.location.href);
         url.searchParams.delete('match');
         history.replaceState({}, '', url.toString());
-        setError('This match link is no longer valid — the match may have ended or the stack restarted. Create a new match to continue.');
+        setError('This match link is no longer valid. The match may have ended or the stack restarted. Create a new match to continue.');
       }
     }
+  }
+
+  async function loadRouteMatch() {
+    if (!view.parameter || (view.name !== 'match' && view.name !== 'match-detail') || view.parameter === match?.matchId) return;
+    try { match = await api.getMatch(view.parameter); if (view.name === 'match') connect(view.parameter); }
+    catch (failure) { setError(failure); }
   }
 
   async function handleSignIn() {
@@ -174,10 +239,7 @@ arena.run({
     busy = true; error = '';
     try {
       match = await api.createMatch();
-      const url = new URL(window.location.href);
-      url.searchParams.set('match', match.matchId);
-      url.hash = '/arena';
-      history.replaceState({}, '', url);
+      window.location.hash = `/match/${match.matchId}`;
       connect(match.matchId);
     } finally { busy = false; }
   });
@@ -207,6 +269,34 @@ arena.run({
     await refreshBox();
   });
 
+  // Mid-match concession: the server destroys the robot on the next tick and
+  // the match resolves by normal elimination rules.
+  const withdrawFromMatch = () => withPending('withdraw', async () => {
+    if (!match) return;
+    error = '';
+    await api.withdrawFromMatch(match.matchId);
+  });
+
+  // Box console escape hatch: release the box from whatever match binds it.
+  // A running match is conceded; a lobby match drops the registration. A
+  // marker referencing a vanished match is stale — the next box read clears
+  // it server-side, so refresh instead of surfacing a raw store error.
+  const withdrawFromBox = () => withPending('box-withdraw', async () => {
+    if (!robotBox?.activeMatchId) return;
+    error = '';
+    let target: Match;
+    try {
+      target = await api.getMatch(robotBox.activeMatchId);
+    } catch {
+      await refreshBox();
+      throw new Error('bound match no longer exists; box binding was stale and has been cleared');
+    }
+    if (target.status === 'running') await api.withdrawFromMatch(target.matchId);
+    else if (target.status === 'lobby') await api.withdrawRobot(target.matchId);
+    else throw new Error('match is no longer active; refresh the box');
+    await refreshBox();
+  });
+
   // Accepts a bare match ID or a pasted invite link; joining just loads the
   // lobby and opens the watcher socket, registration stays a separate step.
   const joinMatch = () => withPending('join', async () => {
@@ -217,10 +307,7 @@ arena.run({
     const found = await api.getMatch(code);
     joinCode = '';
     match = found;
-    const url = new URL(window.location.href);
-    url.searchParams.set('match', found.matchId);
-    url.hash = '/arena';
-    history.replaceState({}, '', url);
+    window.location.hash = `/match/${found.matchId}`;
     connect(found.matchId);
   });
 
@@ -263,20 +350,11 @@ arena.run({
     return copyFeedback('ssh', `ssh -p ${robotBox.sshPort} ${robotBox.sshUser}@${robotBox.sshHost}`);
   };
 
-  // Invite links always land on the arena view even if copied from another page.
   const copyInvite = () => {
     const url = new URL(window.location.href);
-    if (match) url.searchParams.set('match', match.matchId);
-    url.hash = '/arena';
+    if (match) url.hash = `/match/${match.matchId}`;
     return copyFeedback('link', url.toString());
   };
-
-  function jump(id: string) {
-    return (click: MouseEvent) => {
-      click.preventDefault();
-      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' });
-    };
-  }
 
   function bytes(value = 0) { return `${(value / (1024 * 1024)).toFixed(1)} MB`; }
 
@@ -307,11 +385,13 @@ arena.run({
 
 <main class="shell">
   <header class="topbar">
-    <button class="brand" onclick={() => go('arena')} aria-label="Go to arena"><span class="brand-mark" aria-hidden="true">RA</span><div><strong>ROBOT ARENA</strong><small>CONTINUOUS AGENT COMBAT</small></div></button>
+    <button class="brand" onclick={() => go('/')} aria-label="Go home"><span class="brand-mark" aria-hidden="true">RA</span><div><strong>ROBOT ARENA</strong><small>CONTINUOUS AGENT COMBAT</small></div></button>
     <nav class="main-nav" aria-label="Primary">
-      <button class:active={view === 'arena'} aria-current={view === 'arena' ? 'page' : undefined} onclick={() => go('arena')}><i class="nav-dot" class:ok={socketState === 'live'} aria-hidden="true"></i>ARENA</button>
-      <button class:active={view === 'box'} aria-current={view === 'box' ? 'page' : undefined} onclick={() => go('box')}><i class="nav-dot" class:ok={robotBox?.status === 'running'} class:bad={robotBox?.status === 'failed' || !!robotBox?.error} aria-hidden="true"></i>MY BOX</button>
-      <button class:active={view === 'docs'} aria-current={view === 'docs' ? 'page' : undefined} onclick={() => go('docs')}>SDK DOCS</button>
+      <button class:active={view.name === 'play' || view.name === 'match'} aria-current={view.name === 'play' || view.name === 'match' ? 'page' : undefined} onclick={() => go('/play')}><i class="nav-dot" class:ok={socketState === 'live'} aria-hidden="true"></i>PLAY</button>
+      <button class:active={view.name === 'spectate' || view.name === 'matches'} onclick={() => go('/spectate')}>WATCH</button>
+      <button class:active={view.name === 'leaderboard'} onclick={() => go('/leaderboard')}>RANKS</button>
+      <button class:active={view.name === 'box'} onclick={() => go('/box')}><i class="nav-dot" class:ok={robotBox?.status === 'running'} class:bad={robotBox?.status === 'failed' || !!robotBox?.error} aria-hidden="true"></i>MY BOX</button>
+      <button class:active={view.name === 'sdk'} onclick={() => go('/docs/sdk')}>DOCS</button>
     </nav>
     <div class="account">
       <div class="system-state" class:bad={cloud?.status !== 'ready'}><span></span>{cloud?.status === 'ready' ? 'FLOCI READY' : 'CLOUD CHECK'}</div>
@@ -321,17 +401,7 @@ arena.run({
 
   {#if error}<div class="error-banner" role="alert"><span>FAULT</span>{error}<button onclick={() => (error = '')}>DISMISS</button></div>{/if}
 
-  {#if view === 'docs'}
-    <section class="docs-page">
-      <aside><div class="eyebrow">LUA SDK // v0.1</div><h1>Build robot.<br /><em>Own runtime.</em></h1><p>Code stays inside assigned box. SDK keeps one outbound WebSocket alive and answers live observations.</p><a href="#/docs" onclick={jump('quickstart')}>01 Quickstart</a><a href="#/docs" onclick={jump('functions')}>02 Functions</a><a href="#/docs" onclick={jump('protocol')}>03 Protocol</a><a href="#/docs" onclick={jump('limits')}>04 Limits</a></aside>
-      <article>
-        <section id="quickstart"><div class="eyebrow">01 // QUICKSTART</div><h2>Continuous agent loop</h2><p>Save as <code>main.lua</code>. Start command: <code>lua main.lua</code>.</p><pre><code>{luaExample}</code></pre></section>
-        <section id="functions"><div class="eyebrow">02 // FUNCTIONS</div><h2>Decision helpers</h2><div class="function-grid"><div><code>arena.action(options)</code><p>Move, turn, fire, log, report equipment.</p></div><div><code>arena.nearest_enemy(obs)</code><p>Nearest live opponent and distance.</p></div><div><code>arena.approach(obs, target, speed)</code><p>Track, chase, and fire.</p></div><div><code>arena.strafe(obs, target, direction)</code><p>Circle opponent while firing.</p></div><div><code>arena.distance(a, b)</code><p>Euclidean distance between entities.</p></div><div><code>arena.bearing(a, b)</code><p>Target heading in degrees.</p></div></div></section>
-        <section id="protocol"><div class="eyebrow">03 // PROTOCOL</div><h2>Persistent WebSocket</h2><p>Server sends 10 observations each second. Agent returns latest movement, aim, fire state, logs, equipment, memory, and compute time. UI measures end-to-end response independently.</p></section>
-        <section id="limits"><div class="eyebrow">04 // LIMITS</div><h2>Fair play envelope</h2><ul><li>150 ms response deadline</li><li>8 movement units per update</li><li>18 degrees rotation per update</li><li>One credential per robot box</li><li>WSS required outside local development</li></ul></section>
-      </article>
-    </section>
-  {:else if view === 'box'}
+  {#if view.name === 'box'}
     <BoxConsole
       {user}
       box={robotBox}
@@ -345,8 +415,9 @@ arena.run({
       onRestart={restartBox}
       onCopySsh={copySSH}
       onLoadMain={() => void loadMain()}
+      onWithdrawMatch={withdrawFromBox}
     />
-  {:else}
+  {:else if view.name === 'match'}
     <section class="workspace">
       <aside class="mission-panel">
         <div class="eyebrow">MATCH // {match?.status?.toUpperCase() ?? 'NEW'}</div>
@@ -359,10 +430,18 @@ arena.run({
           <div class="box-strip">
             <div class="strip-line"><span class="eyebrow">YOUR BOX</span><strong>{robotBox.status.toUpperCase()} · {robotBox.agentStatus.toUpperCase()}</strong></div>
             <code>ssh -p {robotBox.sshPort} {robotBox.sshUser}@{robotBox.sshHost}</code>
-            <div class="quota"><span>{bytes(robotBox.usageBytes)} / {bytes(robotBox.limits.storageBytes)}</span><button onclick={() => go('box')}>MANAGE BOX →</button></div>
+            <div class="quota"><span>{bytes(robotBox.usageBytes)} / {bytes(robotBox.limits.storageBytes)}</span><button onclick={() => go('/box')}>MANAGE BOX →</button></div>
           </div>
         {:else}
           <div class="box-card"><div class="eyebrow">SSH BOX</div><strong>NOT PROVISIONED</strong><p>Open the box console to provision a persistent container for your account.</p><button class="save-key" onclick={provisionBox} disabled={busy || pending.provision}>{pending.provision ? 'PROVISIONING…' : 'PROVISION BOX'}</button></div>
+        {/if}
+
+        {#if user && robotBox?.activeMatchId && match}
+          {#if robotBox.activeMatchId === match.matchId}
+            <div class="box-match-note" data-tone="ok"><span>IN MATCH</span>Your box agent is committed to this match.</div>
+          {:else}
+            <div class="box-match-note" data-tone="bad"><span>BOX BUSY</span>Your box is already in <a href={`#/match/${robotBox.activeMatchId}`}>another match</a>. Registering here is blocked until it ends.</div>
+          {/if}
         {/if}
 
         {#if !match}
@@ -383,16 +462,28 @@ arena.run({
             <button class="start-match" onclick={startMatch} disabled={busy || pending.start || !canStart}>{working('start', 'STARTING…') ?? 'START NOW (AUTO WHEN READY)'}</button>
             {#if myRobot}<button class="withdraw" onclick={withdrawRobot} disabled={busy || pending.withdraw}>{working('withdraw', 'WITHDRAWING…') ?? 'WITHDRAW ROBOT'}</button>{/if}
           </div>
-        {:else}<div class="match-result" class:finished={match.status === 'finished'}><span>{match.status === 'finished' ? 'WINNER' : 'MATCH STATE'}</span><strong>{match.winnerTeam?.toUpperCase() ?? match.status.toUpperCase()}</strong></div>{/if}
+        {:else}<div class="match-result" class:finished={match.status === 'finished'}><span>{match.status === 'finished' ? 'WINNER' : 'MATCH STATE'}</span><strong>{match.winnerTeam?.toUpperCase() ?? match.status.toUpperCase()}</strong></div>
+          {#if match.status === 'running' && myRobot}<button class="withdraw" onclick={withdrawFromMatch} disabled={busy || pending.withdraw}>{working('withdraw', 'WITHDRAWING…') ?? 'WITHDRAW FROM MATCH'}</button>{/if}{/if}
       </aside>
 
       <section class="arena-panel">
         <div class="panel-head"><div><span class="status-dot"></span>ARENA // LIVE</div><span>{snapshot?.status.toUpperCase() ?? 'WAITING FOR AGENTS'}</span></div>
-        <div class="arena-stage"><Arena {snapshot} /></div>
+        <div class="arena-stage">
+          <Arena {snapshot} />
+          {#if announcements.length}
+            <div class="announcer-chips" role="status">{#each announcements as note (note)}<span class="announcer-chip" data-note={note}>{note}</span>{/each}</div>
+          {/if}
+          {#if streakBanner}
+            <div class="streak-banner" role="status"><b>{streakBanner.name}</b><span>{streakPhrase(streakBanner.streak)}</span>{#if streakBanner.kills > 0}<i>×{streakBanner.kills}</i>{/if}</div>
+          {/if}
+        </div>
         <div class="stats-strip">
           {#each snapshot?.robots ?? [] as robot}<div><span>{robot.name}</span><strong>{robot.hp}<small> HP</small></strong><i>{robot.avgResponseMs?.toFixed(1) ?? '0.0'} ms avg</i></div>{/each}
           {#if !snapshot}<div><span>RESPONSE</span><strong>--</strong><i>agent telemetry</i></div><div><span>HEALTH</span><strong>--</strong><i>waiting for match</i></div>{/if}
         </div>
+        {#if snapshot?.status === 'finished'}
+          <div class="arena-recap" role="status"><div><span>MATCH COMPLETE</span><h2>{snapshot.winnerTeam?.toUpperCase() ?? 'DRAW'} WINS</h2><p>{snapshot.tick} ticks · {snapshot.robots.filter((robot) => !robot.alive).length} destroyed · {snapshot.robots.reduce((sum, robot) => sum + (robot.itemsPickedUp ?? 0), 0)} items · {feed.filter((entry) => entry.label === 'HIT').reduce((sum, entry) => sum + Number(entry.text.match(/for (\d+)/)?.[1] ?? 0), 0)} damage</p></div><a href={`#/match/${match?.matchId}/detail`}>FULL RECAP</a></div>
+        {/if}
         {#if enrollment}
           <div class="enrollment-card"><div><div class="eyebrow">BOX AGENT // AUTOMATIC</div><h3>{enrollment.status}</h3><p>Server configured box supervisor. Agent reconnects without exposing token to browser.</p></div><button onclick={refreshBox} disabled={pending.refresh}>{working('refresh', 'REFRESHING…') ?? 'REFRESH STATUS'}</button></div>
         {:else}
@@ -409,7 +500,7 @@ arena.run({
         <div class="event-feed">
           <div class="eyebrow">LIVE FEED</div>
           {#if snapshot}
-            {#each latestFeed as entry (entry.id)}<div class="event-row" data-tone={entry.tone}><span>{entry.label}</span><p>{entry.text}</p></div>{:else}<p class="empty">No combat yet — fire opens the feed.</p>{/each}
+            {#each latestFeed as entry (entry.id)}<div class="event-row" data-tone={entry.tone}><span>{entry.label}</span><p>{entry.text}</p></div>{:else}<p class="empty">No combat yet. Firing opens the feed.</p>{/each}
           {:else}
             <p class="empty">Feed opens when the match starts.</p>
           {/if}
@@ -417,5 +508,7 @@ arena.run({
         <div class="cloud-stack"><div class="eyebrow">CONTROL PLANE</div><div class="cloud-row"><span>WS</span><strong>Agent gateway</strong><i>{socketState === 'live' ? 'LIVE' : '--'}</i></div><div class="cloud-row"><span>SQS</span><strong>Match jobs</strong><i>{cloud?.status === 'ready' ? 'READY' : '--'}</i></div><div class="cloud-row"><span>DDB</span><strong>State + results</strong><i>{cloud?.status === 'ready' ? 'READY' : '--'}</i></div><p>{cloud?.provider ?? 'Connecting to Floci…'} · WorkOS AuthKit login.</p></div>
       </aside>
     </section>
+  {:else}
+    <PortalPage route={view} {user} {match} {cloud} box={robotBox} onSignIn={handleSignIn} onCreateMatch={createMatch} />
   {/if}
 </main>

@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import type { User } from '@workos-inc/authkit-js';
   import { api } from './api';
-  import type { RobotBox, ScriptTemplate } from './types';
+  import type { RobotBox, ScriptTemplate, ScriptVersion } from './types';
 
   interface Props {
     user: User | null;
@@ -17,17 +17,21 @@
     onRestart: () => void;
     onCopySsh: () => void;
     onLoadMain: () => void;
+    onWithdrawMatch: () => void;
   }
 
-  let { user, box, sshKey = $bindable(''), pending, copiedSsh, authConfigured, mainSource, onProvision, onSaveKey, onRestart, onCopySsh, onLoadMain }: Props = $props();
+  let { user, box, sshKey = $bindable(''), pending, copiedSsh, authConfigured, mainSource, onProvision, onSaveKey, onRestart, onCopySsh, onLoadMain, onWithdrawMatch }: Props = $props();
 
   let scripts = $state<ScriptTemplate[]>([]);
   let scriptsLoaded = $state(false);
   let deploying = $state('');
   let scriptError = $state('');
+  let versions = $state<ScriptVersion[]>([]);
+  let restoring = $state('');
 
   onMount(() => {
     void loadScripts();
+    if (user && box) void loadVersions();
   });
 
   async function loadScripts() {
@@ -37,6 +41,31 @@
       // Templates are a convenience; SSH editing keeps working without them.
     } finally {
       scriptsLoaded = true;
+    }
+  }
+
+  async function loadVersions() {
+    try {
+      versions = (await api.listScriptVersions()).versions;
+    } catch (failure) {
+      scriptError = failure instanceof Error ? failure.message : String(failure);
+    }
+  }
+
+  async function restoreVersion(version: ScriptVersion) {
+    if (restoring) return;
+    const label = `${new Date(version.createdAt).toLocaleString()} (${version.versionId.slice(0, 8)})`;
+    if (!confirm(`Restore /workspace/main.lua from ${label}? The current file is overwritten.`)) return;
+    restoring = version.versionId;
+    scriptError = '';
+    try {
+      await api.restoreScriptVersion(version.versionId);
+      onLoadMain();
+      await loadVersions();
+    } catch (failure) {
+      scriptError = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      restoring = '';
     }
   }
 
@@ -106,6 +135,7 @@
       <div class="console-badges">
         <span class="pill" data-tone={statusTone(box.status)}>{box.status.toUpperCase()}</span>
         <span class="pill" data-tone={statusTone(box.agentStatus)}>{agentLabel(box.agentStatus)}</span>
+        {#if box.activeMatchId}<a class="pill pill-link" data-tone="ok" href={`#/match/${box.activeMatchId}`}>IN MATCH →</a>{/if}
       </div>
     </header>
 
@@ -140,9 +170,13 @@
         <div class="eyebrow">BOX AGENT</div>
         <div class="agent-state"><strong>{agentLabel(box.agentStatus)}</strong></div>
         <div class="limit-grid">
-          <div><span>ACTIVE ROBOT</span><strong>{box.activeRobotId ? box.activeRobotId.slice(0, 8) : '—'}</strong></div>
-          <div><span>ACTIVE MATCH</span><strong>{box.activeMatchId ? box.activeMatchId.slice(0, 8) : '—'}</strong></div>
+          <div><span>ACTIVE ROBOT</span><strong>{box.activeRobotId ? box.activeRobotId.slice(0, 8) : 'none'}</strong></div>
+          <div><span>ACTIVE MATCH</span><strong>{box.activeMatchId ? box.activeMatchId.slice(0, 8) : 'none'}</strong></div>
         </div>
+        {#if box.activeMatchId}
+          <p class="warn">Box is committed to <a class="warn-link" href={`#/match/${box.activeMatchId}`}>match {box.activeMatchId.slice(0, 8)}</a>. Queueing and new registrations stay blocked until that match ends.</p>
+          <div class="row-actions"><button class="console-action danger" onclick={onWithdrawMatch} disabled={pending['box-withdraw']}>{pending['box-withdraw'] ? 'WITHDRAWING…' : 'WITHDRAW FROM MATCH'}</button></div>
+        {/if}
         <p class="hint">Registration configures the agent automatically; it reconnects on network loss without any browser involvement.</p>
       </article>
 
@@ -152,7 +186,7 @@
           <p class="hint">Installed fingerprint</p>
           <code class="fingerprint">{box.keyFingerprint}</code>
         {:else}
-          <p class="warn">No key installed yet — SSH will reject until you add one.</p>
+          <p class="warn">No key installed. SSH will reject connections until you add one.</p>
         {/if}
         <label class="console-label" for="console-ssh-key">Replace or install public key</label>
         <textarea id="console-ssh-key" class="console-textarea" bind:value={sshKey} rows="3" placeholder="ssh-ed25519 AAAA… you@example.com"></textarea>
@@ -183,6 +217,18 @@
           <p class="hint">{scriptsLoaded ? 'No templates available.' : 'Loading templates…'}</p>
         {/each}
         <p class="hint">Deploy writes the template into your box workspace, the preview updates, and the next registration snapshots it. Editing over SSH still works.</p>
+      </article>
+
+      <article class="console-card scripts-card">
+        <div class="workspace-head"><div class="eyebrow">SCRIPT VERSION HISTORY</div><button class="console-action" onclick={loadVersions}>REFRESH</button></div>
+        {#each versions as version (version.versionId)}
+          <div class="script-row">
+            <div><strong>{new Date(version.createdAt).toLocaleString()}</strong><p>{version.versionId.slice(0, 12)}</p></div>
+            <button class="console-action" onclick={() => restoreVersion(version)} disabled={!!restoring || box.status !== 'running'}>{restoring === version.versionId ? 'RESTORING…' : 'RESTORE'}</button>
+          </div>
+        {:else}
+          <p class="hint">No saved versions yet. Deploy or register a robot to create one.</p>
+        {/each}
       </article>
     </div>
 

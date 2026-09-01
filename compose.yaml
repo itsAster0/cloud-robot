@@ -1,6 +1,12 @@
 services:
   floci:
     image: floci/floci:latest
+    environment:
+      # Default memory mode loses every match, script, and credential on
+      # restart, which strands boxes with "already in a match" markers that
+      # point at deleted records. Hybrid keeps in-memory speed and flushes to
+      # the floci-data volume every 5s.
+      FLOCI_STORAGE_MODE: hybrid
     ports:
       - "4566:4566"
     volumes:
@@ -27,6 +33,10 @@ services:
       WORKOS_ISSUER: "${WORKOS_ISSUER}"
       WORKOS_API_KEY: "${WORKOS_API_KEY}"
       AUTH_REQUIRED: "${AUTH_REQUIRED:-true}"
+      QUEUE_CONNECT_GRACE_SECONDS: "${QUEUE_CONNECT_GRACE_SECONDS:-30}"
+      QUEUE_BOT_FILL_SECONDS: "${QUEUE_BOT_FILL_SECONDS:-45}"
+      ADMIN_USER_IDS: "${ADMIN_USER_IDS:-}"
+      MAINTENANCE_MODE: "${MAINTENANCE_MODE:-false}"
     depends_on:
       - floci
       - provisioner
@@ -43,8 +53,11 @@ services:
       PROVISIONER_TOKEN: "${PROVISIONER_TOKEN:-local-review-token-change-me}"
       ROBOT_BOX_IMAGE: "${ROBOT_BOX_IMAGE:-cloud-robot-box:local}"
       SSH_PUBLIC_HOST: "${SSH_PUBLIC_HOST:-localhost}"
-      SSH_PORT_START: "${SSH_PORT_START:-22000}"
-      SSH_PORT_END: "${SSH_PORT_END:-22999}"
+      SSH_PORT_MIN: "${SSH_PORT_MIN:-22000}"
+      SSH_PORT_COUNT: "${SSH_PORT_COUNT:-1000}"
+      SSH_PORT_START: "${SSH_PORT_START:-}"
+      SSH_PORT_END: "${SSH_PORT_END:-}"
+      EXPECTED_BOX_COUNT: "${EXPECTED_BOX_COUNT:-2}"
       BOX_CPUS: "${BOX_CPUS:-1}"
       BOX_MEMORY_MB: "${BOX_MEMORY_MB:-512}"
       BOX_PIDS: "${BOX_PIDS:-128}"

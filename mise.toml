@@ -19,6 +19,12 @@ API_ADDR = ":8080"
 BOX_PROVISIONER_URL = "http://localhost:8090"
 PROVISIONER_TOKEN = "local-review-token-change-me"
 ROBOT_AGENT_BASE_URL = "ws://host.docker.internal:8080"
+SSH_PORT_MIN = "22000"
+SSH_PORT_COUNT = "1000"
+EXPECTED_BOX_COUNT = "2"
+QUEUE_CONNECT_GRACE_SECONDS = "30"
+QUEUE_BOT_FILL_SECONDS = "45"
+MAINTENANCE_MODE = "false"
 
 [tasks.install]
 description = "Install frontend dependencies"

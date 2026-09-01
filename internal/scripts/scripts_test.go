@@ -17,6 +17,17 @@ func TestListReturnsCuratedTemplates(t *testing.T) {
 		if !strings.Contains(template.Source, "arena.run(") {
 			t.Fatalf("template %q does not use the SDK runner", template.Name)
 		}
+		// Every template must be item-aware, zone-aware, and size-capped so a
+		// deployed script still fits the 16 KiB snapshot limit.
+		if !strings.Contains(template.Source, "obs.items") {
+			t.Fatalf("template %q ignores items", template.Name)
+		}
+		if !strings.Contains(template.Source, "obs.zone") {
+			t.Fatalf("template %q ignores the zone", template.Name)
+		}
+		if len(template.Source) > 16*1024 {
+			t.Fatalf("template %q exceeds the 16 KiB snapshot cap", template.Name)
+		}
 	}
 }
 

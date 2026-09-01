@@ -30,12 +30,16 @@ type server struct {
 }
 
 func main() {
+	portRange, err := boxes.ResolveSSHPortRange(os.Getenv)
+	if err != nil {
+		panic(err)
+	}
 	s := &server{
 		token:        requiredEnv("PROVISIONER_TOKEN"),
 		image:        envOr("ROBOT_BOX_IMAGE", "cloud-robot-box:local"),
 		sshHost:      envOr("SSH_PUBLIC_HOST", "localhost"),
-		portStart:    envInt("SSH_PORT_START", 22000),
-		portEnd:      envInt("SSH_PORT_END", 22999),
+		portStart:    portRange.Start,
+		portEnd:      portRange.End,
 		limits:       model.BoxLimits{CPUs: envFloat("BOX_CPUS", 1), MemoryMB: int64(envInt("BOX_MEMORY_MB", 512)), PIDs: int64(envInt("BOX_PIDS", 128)), StorageBytes: boxes.DefaultStorageBytes},
 		storageBytes: envInt64("BOX_STORAGE_BYTES", boxes.DefaultStorageBytes),
 	}
@@ -210,7 +214,19 @@ func (s *server) availablePort(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return boxes.NextSSHPort(boxes.ParseSSHHostPorts(listing), s.portStart, s.portEnd)
+	used := boxes.ParseSSHHostPorts(listing)
+	capacity := s.portEnd - s.portStart + 1
+	usedInRange := 0
+	for port := range used {
+		if port >= s.portStart && port <= s.portEnd {
+			usedInRange++
+		}
+	}
+	remaining := capacity - usedInRange
+	if remaining <= max(1, capacity/10) {
+		slog.Warn("SSH box ports running low", "remaining", remaining, "capacity", capacity, "start", s.portStart, "end", s.portEnd)
+	}
+	return boxes.NextSSHPort(used, s.portStart, s.portEnd)
 }
 
 func (s *server) stopAll(ctx context.Context) {

@@ -21,6 +21,8 @@ type RobotSubmission struct {
 	StartCommand    string    `json:"startCommand"`
 	Runtime         string    `json:"runtime"`
 	SubmittedAt     time.Time `json:"submittedAt"`
+	PlayerID        string    `json:"-"`
+	Bot             bool      `json:"bot,omitempty"`
 }
 
 type BoxLimits struct {
@@ -56,20 +58,67 @@ type RobotSummary struct {
 	Failed        bool     `json:"failed"`
 	AvgResponseMS float64  `json:"avgResponseMs"`
 	Equipment     []string `json:"equipment,omitempty"`
+	DamageDealt   int      `json:"damageDealt"`
+	DamageTaken   int      `json:"damageTaken"`
+	Kills         int      `json:"kills"`
+	ItemsPickedUp int      `json:"itemsPickedUp"`
+}
+
+type MatchEvent struct {
+	Sequence int    `json:"sequence"`
+	Tick     int    `json:"tick"`
+	Type     string `json:"type"`
+	RobotID  string `json:"robotId,omitempty"`
+	TargetID string `json:"targetId,omitempty"`
+	Damage   int    `json:"damage,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
+type PlayerStats struct {
+	PlayerID    string         `json:"playerId"`
+	Handle      string         `json:"handle"`
+	Matches     int            `json:"matches"`
+	Wins        int            `json:"wins"`
+	Losses      int            `json:"losses"`
+	Draws       int            `json:"draws"`
+	DamageDealt int            `json:"damageDealt"`
+	DamageTaken int            `json:"damageTaken"`
+	Ratings     map[string]int `json:"ratings"`
+	UpdatedAt   time.Time      `json:"updatedAt"`
+}
+
+type ScriptVersion struct {
+	VersionID string    `json:"versionId"`
+	ObjectKey string    `json:"-"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type Match struct {
-	MatchID        string            `json:"matchId"`
-	OwnerID        string            `json:"ownerId,omitempty"`
-	Status         MatchStatus       `json:"status"`
-	Mode           string            `json:"mode"`
-	Seed           int64             `json:"seed"`
-	TickRate       int               `json:"tickRate"`
-	Robots         []RobotSubmission `json:"robots"`
-	WinnerTeam     string            `json:"winnerTeam,omitempty"`
-	RobotSummaries []RobotSummary    `json:"robotSummaries,omitempty"`
-	Error          string            `json:"error,omitempty"`
-	CreatedAt      time.Time         `json:"createdAt"`
-	StartedAt      *time.Time        `json:"startedAt,omitempty"`
-	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
+	MatchID     string      `json:"matchId"`
+	OwnerID     string      `json:"ownerId,omitempty"`
+	Status      MatchStatus `json:"status"`
+	Mode        string      `json:"mode"`
+	MapID       string      `json:"mapId"`
+	ArenaWidth  float64     `json:"arenaWidth"`
+	ArenaHeight float64     `json:"arenaHeight"`
+	Practice    bool        `json:"practice,omitempty"`
+	Seed        int64       `json:"seed"`
+	TickRate    int         `json:"tickRate"`
+	// Combat options mirror the engine.Config field types; zero values keep
+	// stock behavior (friendly fire off, no regen, no ramming damage).
+	FriendlyFire    bool `json:"friendlyFire,omitempty"`
+	RegenPerTick    int  `json:"regenPerTick,omitempty"`
+	RegenDelayTicks int  `json:"regenDelayTicks,omitempty"`
+	RammingDamage   bool `json:"rammingDamage,omitempty"`
+	// BotPersonality selects server-bot behavior: aggressive, evasive, or camper.
+	BotPersonality  string            `json:"botPersonality,omitempty"`
+	Robots          []RobotSubmission `json:"robots"`
+	WinnerTeam      string            `json:"winnerTeam,omitempty"`
+	RobotSummaries  []RobotSummary    `json:"robotSummaries,omitempty"`
+	EventSummary    []MatchEvent      `json:"eventSummary,omitempty"`
+	ReplayObjectKey string            `json:"replayObjectKey,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	CreatedAt       time.Time         `json:"createdAt"`
+	StartedAt       *time.Time        `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time        `json:"finishedAt,omitempty"`
 }

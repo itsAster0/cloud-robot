@@ -31,6 +31,7 @@ func main() {
 
 	provisioner := boxes.NewClient(envOr("BOX_PROVISIONER_URL", "http://localhost:8090"), os.Getenv("PROVISIONER_TOKEN"))
 	app := api.NewServer(store, provisioner)
+	app.RecoverMatches(ctx)
 	go app.RunWorker(ctx)
 	address := os.Getenv("API_ADDR")
 	if address == "" {

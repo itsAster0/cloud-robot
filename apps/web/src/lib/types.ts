@@ -20,6 +20,10 @@ export interface RobotSummary {
   failed: boolean;
   avgResponseMs: number;
   equipment?: string[];
+  damageDealt?: number;
+  damageTaken?: number;
+  kills?: number;
+  itemsPickedUp?: number;
 }
 
 export interface Match {
@@ -33,6 +37,55 @@ export interface Match {
   robotSummaries?: RobotSummary[];
   error?: string;
   createdAt: string;
+  mapId?: string;
+  arenaWidth?: number;
+  arenaHeight?: number;
+  viewerCount?: number;
+  durationTicks?: number;
+  damageStats?: Record<string, { dealt: number; taken: number; kills: number; itemsPickedUp: number }>;
+  eventSummary?: MatchEvent[];
+  startedAt?: string;
+  finishedAt?: string;
+  practice?: boolean;
+}
+
+export interface MatchEvent extends ArenaEvent {
+  sequence: number;
+  tick: number;
+}
+
+export interface PlayerStats {
+  playerId: string;
+  handle: string;
+  matches: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  damageDealt: number;
+  damageTaken: number;
+  ratings: Record<string, number>;
+  updatedAt: string;
+}
+
+export interface QueueStatus {
+  status: 'idle' | 'waiting' | 'pairing' | 'matched';
+  joinedAt?: string;
+  matchId?: string;
+  match?: Match;
+}
+
+export interface Replay {
+  matchId: string;
+  events: MatchEvent[];
+  complete: boolean;
+}
+
+export interface AdminStatus {
+  matches: Partial<Record<MatchStatus, number>>;
+  queueDepth: number;
+  viewers: Record<string, number>;
+  agents: number;
+  cloud: Record<string, string>;
 }
 
 export interface RobotState {
@@ -52,6 +105,9 @@ export interface RobotState {
   computeMs: number;
   memoryMb: number;
   equipment?: string[];
+  itemsPickedUp?: number;
+  killStreak?: number;
+  streakName?: string;
   lastAction?: string;
   logs?: string[];
 }
@@ -61,7 +117,34 @@ export interface ArenaEvent {
   robotId?: string;
   targetId?: string;
   damage?: number;
+  value?: number;
   message?: string;
+  itemType?: string;
+  x?: number;
+  y?: number;
+}
+
+export interface ArenaObstacle {
+  id: string;
+  shape: 'circle' | 'aabb';
+  x: number;
+  y: number;
+  radius?: number;
+  width?: number;
+  height?: number;
+}
+
+export interface ArenaItem {
+  itemId: string;
+  type: string;
+  x: number;
+  y: number;
+  active: boolean;
+  spawnTick: number;
+  pickupRadius: number;
+  respawnTick?: number;
+  source?: string;
+  rarity?: string;
 }
 
 export interface Projectile {
@@ -88,6 +171,13 @@ export interface Snapshot {
   robots: RobotState[];
   projectiles: Projectile[];
   events?: ArenaEvent[];
+  width?: number;
+  height?: number;
+  mapId?: string;
+  obstacles?: ArenaObstacle[];
+  items?: ArenaItem[];
+  announcements?: string[];
+  overtime?: boolean;
 }
 
 export interface CloudStatus {
@@ -109,6 +199,11 @@ export interface ScriptTemplate {
   name: string;
   description: string;
   source: string;
+}
+
+export interface ScriptVersion {
+  versionId: string;
+  createdAt: string;
 }
 
 export interface BoxLimits {
