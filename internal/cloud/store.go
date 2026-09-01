@@ -1,11 +1,14 @@
 package cloud
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -135,8 +138,34 @@ func (s *Store) GetScript(ctx context.Context, key string) (string, error) {
 	return string(data), nil
 }
 
+func (s *Store) ListScriptVersions(ctx context.Context, boxID string, limit int) ([]model.ScriptVersion, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	prefix := "versions/" + boxID + "/"
+	result, err := s.s3.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(s.config.Bucket), Prefix: aws.String(prefix), MaxKeys: aws.Int32(int32(limit))})
+	if err != nil {
+		return nil, fmt.Errorf("list script versions: %w", err)
+	}
+	versions := make([]model.ScriptVersion, 0, len(result.Contents))
+	for _, object := range result.Contents {
+		key := aws.ToString(object.Key)
+		parts := strings.Split(strings.TrimPrefix(key, prefix), "/")
+		if len(parts) != 2 || parts[1] != "main.lua" {
+			continue
+		}
+		created := time.Time{}
+		if object.LastModified != nil {
+			created = object.LastModified.UTC()
+		}
+		versions = append(versions, model.ScriptVersion{VersionID: parts[0], ObjectKey: key, CreatedAt: created})
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i].CreatedAt.After(versions[j].CreatedAt) })
+	return versions, nil
+}
+
 func (s *Store) PutMatch(ctx context.Context, match model.Match) error {
-	payload, err := json.Marshal(match)
+	payload, err := encodeStoredMatch(match)
 	if err != nil {
 		return fmt.Errorf("encode match: %w", err)
 	}
@@ -168,11 +197,172 @@ func (s *Store) GetMatch(ctx context.Context, matchID string) (model.Match, erro
 	if !ok {
 		return model.Match{}, errors.New("match not found")
 	}
-	var match model.Match
-	if err := json.Unmarshal([]byte(value.Value), &match); err != nil {
+	match, err := decodeStoredMatch([]byte(value.Value))
+	if err != nil {
 		return model.Match{}, fmt.Errorf("decode match: %w", err)
 	}
 	return match, nil
+}
+
+func (s *Store) ListMatches(ctx context.Context, status model.MatchStatus, limit int) ([]model.Match, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	result, err := s.dynamo.Scan(ctx, &dynamodb.ScanInput{
+		TableName:            aws.String(s.config.Table),
+		ProjectionExpression: aws.String("matchId, payload"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list matches: %w", err)
+	}
+	matches := make([]model.Match, 0, min(limit, len(result.Items)))
+	for _, item := range result.Items {
+		id, ok := item["matchId"].(*types.AttributeValueMemberS)
+		if !ok || strings.Contains(id.Value, "#") {
+			continue
+		}
+		value, ok := item["payload"].(*types.AttributeValueMemberS)
+		if !ok {
+			continue
+		}
+		match, decodeErr := decodeStoredMatch([]byte(value.Value))
+		if decodeErr != nil || status != "" && match.Status != status {
+			continue
+		}
+		matches = append(matches, match)
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].CreatedAt.After(matches[j].CreatedAt) })
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches, nil
+}
+
+type storedMatch struct {
+	model.Match
+	PlayerIDs map[string]string `json:"_playerIds,omitempty"`
+}
+
+func encodeStoredMatch(match model.Match) ([]byte, error) {
+	players := make(map[string]string)
+	for _, robot := range match.Robots {
+		if robot.PlayerID != "" {
+			players[robot.RobotID] = robot.PlayerID
+		}
+	}
+	return json.Marshal(storedMatch{Match: match, PlayerIDs: players})
+}
+
+func decodeStoredMatch(payload []byte) (model.Match, error) {
+	var stored storedMatch
+	if err := json.Unmarshal(payload, &stored); err != nil {
+		return model.Match{}, err
+	}
+	for index := range stored.Robots {
+		stored.Robots[index].PlayerID = stored.PlayerIDs[stored.Robots[index].RobotID]
+	}
+	return stored.Match, nil
+}
+
+func (s *Store) PutPlayerStats(ctx context.Context, stats model.PlayerStats) error {
+	stats.UpdatedAt = time.Now().UTC()
+	payload, err := json.Marshal(stats)
+	if err != nil {
+		return fmt.Errorf("encode player stats: %w", err)
+	}
+	_, err = s.dynamo.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(s.config.Table), Item: map[string]types.AttributeValue{
+		"matchId":   &types.AttributeValueMemberS{Value: "player#" + stats.PlayerID},
+		"status":    &types.AttributeValueMemberS{Value: "player"},
+		"payload":   &types.AttributeValueMemberS{Value: string(payload)},
+		"updatedAt": &types.AttributeValueMemberS{Value: stats.UpdatedAt.Format(time.RFC3339Nano)},
+	}})
+	if err != nil {
+		return fmt.Errorf("store player stats: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetPlayerStats(ctx context.Context, playerID string) (model.PlayerStats, error) {
+	result, err := s.dynamo.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(s.config.Table), Key: map[string]types.AttributeValue{
+		"matchId": &types.AttributeValueMemberS{Value: "player#" + playerID},
+	}, ConsistentRead: aws.Bool(true)})
+	if err != nil {
+		return model.PlayerStats{}, fmt.Errorf("read player stats: %w", err)
+	}
+	value, ok := result.Item["payload"].(*types.AttributeValueMemberS)
+	if !ok {
+		return model.PlayerStats{}, errors.New("player not found")
+	}
+	var stats model.PlayerStats
+	if err := json.Unmarshal([]byte(value.Value), &stats); err != nil {
+		return model.PlayerStats{}, fmt.Errorf("decode player stats: %w", err)
+	}
+	return stats, nil
+}
+
+func (s *Store) ListPlayerStats(ctx context.Context, limit int) ([]model.PlayerStats, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	result, err := s.dynamo.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String(s.config.Table), ProjectionExpression: aws.String("matchId, payload")})
+	if err != nil {
+		return nil, fmt.Errorf("list player stats: %w", err)
+	}
+	players := make([]model.PlayerStats, 0, limit)
+	for _, item := range result.Items {
+		id, ok := item["matchId"].(*types.AttributeValueMemberS)
+		if !ok || !strings.HasPrefix(id.Value, "player#") {
+			continue
+		}
+		value, ok := item["payload"].(*types.AttributeValueMemberS)
+		if !ok {
+			continue
+		}
+		var stats model.PlayerStats
+		if json.Unmarshal([]byte(value.Value), &stats) == nil {
+			players = append(players, stats)
+		}
+	}
+	sort.Slice(players, func(i, j int) bool {
+		left, right := players[i].Ratings["duel"], players[j].Ratings["duel"]
+		if left == right {
+			return players[i].Wins > players[j].Wins
+		}
+		return left > right
+	})
+	if len(players) > limit {
+		players = players[:limit]
+	}
+	return players, nil
+}
+
+func (s *Store) PutReplay(ctx context.Context, key string, events []model.MatchEvent) error {
+	payload, err := json.Marshal(events)
+	if err != nil {
+		return fmt.Errorf("encode replay: %w", err)
+	}
+	_, err = s.s3.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.config.Bucket), Key: aws.String(key), Body: bytes.NewReader(payload), ContentType: aws.String("application/json")})
+	if err != nil {
+		return fmt.Errorf("store replay: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetReplay(ctx context.Context, key string) ([]model.MatchEvent, error) {
+	result, err := s.s3.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.config.Bucket), Key: aws.String(key)})
+	if err != nil {
+		return nil, fmt.Errorf("read replay: %w", err)
+	}
+	defer result.Body.Close()
+	payload, err := readAllLimited(result.Body, 8*1024*1024)
+	if err != nil {
+		return nil, fmt.Errorf("read replay body: %w", err)
+	}
+	var events []model.MatchEvent
+	if err := json.Unmarshal(payload, &events); err != nil {
+		return nil, fmt.Errorf("decode replay: %w", err)
+	}
+	return events, nil
 }
 
 func (s *Store) PutBox(ctx context.Context, userID string, box model.BoxRecord) error {

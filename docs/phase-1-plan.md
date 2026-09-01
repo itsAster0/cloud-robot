@@ -2,7 +2,11 @@
 
 ## Goal
 
-Demo a continuous multiplayer robot arena for Review 1. A player gets an SSH-enabled Docker box, deploys a Lua agent, selects its start command, and keeps an outbound WebSocket connected. The Go server owns the simulation. The Svelte 5 site shows combat, connection health, response latency, runtime telemetry, equipment, projectiles, developer docs, and WorkOS login.
+Demo a continuous multiplayer robot arena for Review 1. A player gets an
+SSH-enabled Docker box, deploys a Lua agent, selects its start command, and keeps
+an outbound WebSocket connected. The Go server owns the simulation. The Svelte
+5 site shows maps, combat, pickups, telemetry, public match pages, developer
+docs, and WorkOS login.
 
 ## Fixed decisions
 
@@ -17,7 +21,9 @@ Demo a continuous multiplayer robot arena for Review 1. A player gets an SSH-ena
 | Toolchain | mise-pinned Go, Node, and pnpm |
 | Deployment | Docker Compose now; one cloud VPS later |
 
-S3 remains reserved for replay and artifact storage. Robot source is not uploaded through the website. Floci is an AWS API emulator, not evidence of AWS scale or production security.
+S3 stores robot source versions and replay events. The box remains the working
+copy for robot code. Floci is an AWS API emulator, not evidence of AWS scale or
+production security.
 
 ## Data flow
 
@@ -30,25 +36,25 @@ Svelte browser --HTTP/WS--> Go API + arena worker --SQS/DynamoDB--> Floci
                  SSH development box + Lua SDK
 ```
 
-1. Owner signs in or uses guest mode locally and creates a match.
+1. Owner signs in and creates a match or joins the duel queue. Anonymous users can watch.
 2. Players register red and blue boxes. The API returns each robot token once and stores only its SHA-256 hash.
 3. Players SSH into the boxes, deploy code, and start their declared command.
 4. SDK opens an outbound WebSocket and reconnects after network loss.
 5. Server sends an observation every tick. Agent returns movement, aim, fire intent, logs, equipment, and optional runtime telemetry within 150 ms.
 6. Owner starts once both teams exist and every agent is connected.
-7. SQS starts the match worker. Server resolves movement, collision, projectiles, damage, death, and result.
-8. Viewers receive versioned snapshots. DynamoDB stores match state and summaries.
+7. SQS starts the match worker. The server resolves maps, movement, collision, projectiles, items, damage, zones, overtime, death, and result.
+8. Viewers receive versioned snapshots. DynamoDB stores match state, player stats, and summaries. S3 stores replay events.
 
 ## Server-owned rules
 
-- Arena: 800 × 500 units.
+- Arena: map default or a validated custom size between 400 × 300 and 2000 × 1400 units.
 - Tick rate: 10 Hz.
 - Movement: at most 8 units per tick; reverse at half speed.
 - Rotation: at most 18 degrees per tick.
-- Weapon: visible plasma projectile, 25 damage, 8-tick cooldown.
-- Robot: 100 HP. Friendly fire is disabled.
+- Weapons: plasma, cannon, machine gun, and railgun with server-owned properties.
+- Robot: 100 HP by default. Match configuration owns friendly fire, regen, ramming, zone, and overtime rules.
 - Agent deadline: 150 ms. A missed deadline reuses the last action and records the miss.
-- Agent disconnect during a match fails that robot without stopping the worker.
+- Agent disconnect uses the last valid intent for up to 30 seconds. Expiry fails that robot without stopping the worker.
 - Match ends when one team remains or the tick limit is reached.
 
 Agents never set coordinates, HP, damage, winner, or another robot's state.
@@ -58,9 +64,14 @@ Agents never set coordinates, HP, damage, winner, or another robot's state.
 HTTP endpoints:
 
 - `POST /api/matches`
+- `GET /api/matches`
 - `GET /api/matches/{matchId}`
+- `GET /api/matches/{matchId}/replay`
 - `POST /api/matches/{matchId}/robots`
 - `POST /api/matches/{matchId}/start`
+- `GET`, `POST`, and `DELETE /api/queue`
+- `GET /api/profiles/{handle}`
+- `GET /api/leaderboard`
 - `GET /api/cloud/status`
 - `GET /healthz`
 - `GET /readyz`
@@ -70,7 +81,7 @@ WebSockets:
 - `/ws/matches/{matchId}` streams viewer snapshots and agent connection state.
 - `/agent/connect/{robotId}` accepts the `robot-arena.v1` protocol and a robot bearer token.
 
-See `docs/lua-sdk.md` for message schema and Lua helpers.
+See `docs/api.md` for endpoints and protocol rules. See `docs/lua-sdk.md` for Lua helpers.
 
 ## Review 1 run
 
@@ -99,12 +110,14 @@ See `docs/lua-sdk.md` for message schema and Lua helpers.
 - Live sessions and viewer fan-out are in process. API restart ends active matches.
 - One API process consumes match jobs. Horizontal coordination is deferred.
 - Auth defaults to optional locally. VPS deployment must set `AUTH_REQUIRED=true`, HTTPS/WSS, and a configured WorkOS redirect URI.
-- No reconnect resume after a robot's running match has already failed it.
+- Queue state is local to one API process and supports duel mode only.
+- Replays store event streams instead of inputs for deterministic re-simulation.
+- Starter maps are compiled into the server instead of loaded from S3.
 
 ## Next phase
 
 1. Provision VPS, DNS, TLS, firewall, backups, and monitoring.
 2. Verify KVM before choosing Firecracker.
 3. Add hardened per-user isolation and resource accounting.
-4. Persist replay events to S3 and add playback.
-5. Add invitations, spectator access rules, ranking, and multi-match scheduling.
+4. Persist live match checkpoints for API restart recovery.
+5. Add durable team matchmaking, replay playback, parties, and seasons.

@@ -50,3 +50,13 @@ func (h *Hub) Subscribe(matchID string) (<-chan any, func()) {
 		close(channel)
 	}
 }
+
+func (h *Hub) ViewerCounts() map[string]int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	counts := make(map[string]int, len(h.subscribers))
+	for matchID, subscribers := range h.subscribers {
+		counts[matchID] = len(subscribers)
+	}
+	return counts
+}

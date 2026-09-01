@@ -11,6 +11,17 @@ mise run vps:doctor -- deploy@example.com 22
 ```
 
 Doctor command is read-only. It reports OS, CPU, memory, KVM, Docker, Compose, and disk.
+It also prints the configured robot-box port range and firewall commands. Set the
+range before the command when the VPS uses non-default ports:
+
+```sh
+SSH_PORT_MIN=32000 SSH_PORT_COUNT=200 mise run vps:doctor -- deploy@example.com 22
+```
+
+`SSH_PORT_MIN` and `SSH_PORT_COUNT` define the range. `SSH_PORT_START` and
+`SSH_PORT_END` override both values for an existing deployment. The provisioner
+refuses an inverted range, a range containing port 22, ports above 65535, or a
+range smaller than `EXPECTED_BOX_COUNT`.
 
 ## Review host
 
@@ -21,7 +32,9 @@ Doctor command is read-only. It reports OS, CPU, memory, KVM, Docker, Compose, a
 - SSH box port range restricted by firewall
 - Persistent Docker volume storage
 
-Set `SSH_PUBLIC_HOST` to public DNS name. Change `PROVISIONER_TOKEN`. Keep provisioner port private. Main API may call provisioner only through internal network.
+Set `SSH_PUBLIC_HOST` to the public DNS name. Change `PROVISIONER_TOKEN`. Keep
+the provisioner port private. Only the main API should call the provisioner over
+the internal network.
 
 Use Linux filesystem project quotas or supported Docker `storage-opt` enforcement for hard 1 GB box limits. Local usage monitoring is not enough for public deployment.
 

@@ -22,10 +22,10 @@ type Template struct {
 // Descriptions double as the allow-list: a template without an entry here is
 // not deployable even if a .lua file somehow lands in the directory.
 var descriptions = map[string]string{
-	"aggressive": "Close the distance and fire nonstop. The straightforward brawler.",
-	"evasive":    "Circle the enemy with light armor while returning fire.",
-	"sniper":     "Hold mid-range, back off when crowded, never stops aiming.",
-	"patroller":  "Walks a waypoint loop around the arena and engages on contact.",
+	"aggressive": "Hunts the nearest enemy, leads shots, detours for heals, and strafes unpredictably up close.",
+	"evasive":    "Kites at long range with random strafe flips, grabs heals and shields, and flees when critical.",
+	"sniper":     "Holds mid range, fires only with line of sight, sidesteps randomly, and races for railguns.",
+	"patroller":  "Walks a randomized corner loop, detours for nearby items, and engages on sight.",
 }
 
 func List() []Template {
