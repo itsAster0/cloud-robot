@@ -36,10 +36,13 @@ type Config struct {
 	Zone            ZoneConfig    `json:"zone"`
 	OvertimeTicks   int           `json:"overtimeTicks"`
 	RammingDamage   bool          `json:"rammingDamage"`
+	// CriticalChance is the percent of weapon hits that deal 1.5x damage.
+	// Zero disables crits; burn, ramming, and hazard damage never crit.
+	CriticalChance int `json:"criticalChance"`
 }
 
 func DefaultConfig() Config {
-	return Config{Width: ArenaWidth, Height: ArenaHeight, Map: DefaultMap(ArenaWidth, ArenaHeight), MaxTicks: DefaultMaxTicks, Items: ItemConfig{SpawnMinTicks: 100, SpawnMaxTicks: 200, RespawnMinTicks: 100, RespawnMaxTicks: 150, MaxConcurrent: 3, PickupRadius: 20}, DropOnDeath: true, DropWeapons: true, Zone: ZoneConfig{StartTick: 1200, EndTick: 1800, EndRadius: 80, Damage: 2, DamageInterval: 10}, OvertimeTicks: 100}
+	return Config{Width: ArenaWidth, Height: ArenaHeight, Map: DefaultMap(ArenaWidth, ArenaHeight), MaxTicks: DefaultMaxTicks, Items: ItemConfig{SpawnMinTicks: 100, SpawnMaxTicks: 200, RespawnMinTicks: 100, RespawnMaxTicks: 150, MaxConcurrent: 3, PickupRadius: 20}, DropOnDeath: true, DropWeapons: true, Zone: ZoneConfig{StartTick: 1200, EndTick: 1800, EndRadius: 80, Damage: 2, DamageInterval: 10}, OvertimeTicks: 100, CriticalChance: 10}
 }
 func (c *Config) normalize() {
 	mapWidth, mapHeight := c.Map.Width, c.Map.Height
@@ -110,6 +113,73 @@ type Item struct {
 	Rarity       string  `json:"rarity,omitempty"`
 }
 
+// rollItemKind picks the next spawner drop from exactly one IntN(100) draw so
+// the RNG call order stays fixed for byte-stable replays. Weapon kinds are
+// sub-ranges of the same roll, never extra draws: common guns 12%, shotgun and
+// grenade 3% each, cannon 2%, and the 1% railgun jackpot robots race for.
+func (a *Arena) rollItemKind() string {
+	switch roll := a.rng.IntN(100); {
+	case roll < 30:
+		return "heal"
+	case roll < 40:
+		return "shield"
+	case roll < 46:
+		return "medkit"
+	case roll < 52:
+		return "nano_repair"
+	case roll < 56:
+		return "armor_plate"
+	case roll < 59:
+		return "battery"
+	case roll < 63:
+		return "overdrive"
+	case roll < 66:
+		return "rapid_fire"
+	case roll < 68:
+		return "scanner"
+	case roll < 70:
+		return "dash_cell"
+	case roll < 72:
+		return "cloak"
+	case roll < 74:
+		return "frenzy"
+	case roll < 76:
+		return "teleport_beacon"
+	case roll < 77:
+		return "berserker_charm"
+	case roll < 78:
+		return "vampiric_fang"
+	case roll < 81:
+		return "weapon_machine_gun"
+	case roll < 84:
+		return "weapon_incendiary"
+	case roll < 87:
+		return "weapon_cryo"
+	case roll < 90:
+		return "weapon_emp"
+	case roll < 93:
+		return "weapon_shotgun"
+	case roll < 96:
+		return "weapon_grenade"
+	case roll < 97:
+		return "weapon_mine_layer"
+	case roll < 99:
+		return "weapon_cannon"
+	default:
+		return "weapon_railgun"
+	}
+}
+
+func (a *Arena) spawnInZone(zone SpawnZone) Item {
+	x := zone.X + a.rng.Float64()*zone.Width
+	y := zone.Y + a.rng.Float64()*zone.Height
+	a.addItem(a.rollItemKind(), x, y, "spawner")
+	return a.Items[len(a.Items)-1]
+}
+
+// supplyDropOdds is one in N spawn events that also drop a bonus item.
+const supplyDropOdds = 8
+
 func (a *Arena) spawnItems() []Event {
 	activeCount := len(a.activeSpawnItems())
 	for index := range a.Items {
@@ -132,21 +202,15 @@ func (a *Arena) spawnItems() []Event {
 		return nil
 	}
 	zone := a.Config.Map.ItemSpawnZones[a.rng.IntN(len(a.Config.Map.ItemSpawnZones))]
-	kind := "heal"
-	roll := a.rng.IntN(100)
-	if roll >= 75 && roll < 88 {
-		kind = "shield"
-	} else if roll >= 88 && roll < 95 {
-		kind = "overdrive"
-	} else if roll >= 95 {
-		kind = "rapid_fire"
-	}
-	x := zone.X + a.rng.Float64()*zone.Width
-	y := zone.Y + a.rng.Float64()*zone.Height
-	a.addItem(kind, x, y, "spawner")
+	item := a.spawnInZone(zone)
 	a.lastSpawnTick = a.TickNumber
-	item := a.Items[len(a.Items)-1]
-	return []Event{a.event(Event{Type: "item_spawned", ItemID: item.ItemID, Message: item.Type, X: item.X, Y: item.Y})}
+	events := []Event{a.event(Event{Type: "item_spawned", ItemID: item.ItemID, Message: item.Type, X: item.X, Y: item.Y})}
+	// Supply drop bursts: sometimes the drop plane releases two crates.
+	if activeCount+1 < a.Config.Items.MaxConcurrent && a.rng.IntN(supplyDropOdds) == 0 {
+		bonus := a.spawnInZone(zone)
+		events = append(events, a.event(Event{Type: "supply_drop", ItemID: bonus.ItemID, Message: bonus.Type, X: bonus.X, Y: bonus.Y}))
+	}
+	return events
 }
 func (a *Arena) activeSpawnItems() []Item {
 	out := []Item{}
@@ -196,7 +260,7 @@ func (a *Arena) pickupItems() []Event {
 			if a.overtime() && (item.Type == "heal" || item.Type == "repair-core") {
 				continue
 			}
-			value := applyItem(robot, item.Type)
+			value, extra := a.applyItemArena(robot, item.Type)
 			if value < 0 {
 				continue
 			}
@@ -210,6 +274,7 @@ func (a *Arena) pickupItems() []Event {
 			}
 			robot.ItemsPickedUp++
 			events = append(events, a.event(Event{Type: "item_picked_up", RobotID: robot.RobotID, ItemID: item.ItemID, Value: value, Message: item.Type, X: item.X, Y: item.Y}))
+			events = append(events, extra...)
 			break
 		}
 	}
@@ -229,6 +294,19 @@ func acceptsItem(in Intent, kind string) bool {
 	}
 	return false
 }
+
+// applyItemArena applies a pickup that may need arena state: teleport_beacon
+// rolls a seeded open spot with the arena RNG, everything else delegates to
+// the pure applyItem. A negative value skips the pickup and leaves the item
+// on the floor; extra events are appended after item_picked_up.
+func (a *Arena) applyItemArena(r *RobotState, kind string) (int, []Event) {
+	if kind == "teleport_beacon" {
+		x, y := a.safeDrop(a.rng.Float64()*a.Config.Width, a.rng.Float64()*a.Config.Height)
+		r.X, r.Y = x, y
+		return 1, []Event{a.event(Event{Type: "teleport", RobotID: r.RobotID, X: x, Y: y})}
+	}
+	return applyItem(r, kind), nil
+}
 func applyItem(r *RobotState, kind string) int {
 	switch kind {
 	case "heal":
@@ -239,6 +317,51 @@ func applyItem(r *RobotState, kind string) int {
 		before := r.HP
 		r.HP = min(r.MaxHP, r.HP+15)
 		return r.HP - before
+	case "medkit":
+		if r.HP >= r.MaxHP {
+			return -1
+		}
+		before := r.HP
+		r.HP = min(r.MaxHP, r.HP+60)
+		return r.HP - before
+	case "nano_repair":
+		upsertEffect(r, "regen", 150, 2, "")
+		return 150
+	case "armor_plate":
+		upsertEffect(r, "armor", 150, 0.6, "")
+		return 150
+	case "battery":
+		r.Cooldown = 0
+		kept := r.Effects[:0]
+		for _, effect := range r.Effects {
+			if effect.Type != "emp" && effect.Type != "slow" && effect.Type != "burn" {
+				kept = append(kept, effect)
+			}
+		}
+		r.Effects = kept
+		return 1
+	case "cloak":
+		upsertEffect(r, "cloak", 90, 1, "")
+		return 90
+	case "scanner":
+		upsertEffect(r, "radar", 150, 1, "")
+		return 150
+	case "berserker_charm":
+		upsertEffect(r, "berserk", 80, 1, "")
+		return 80
+	case "vampiric_fang":
+		upsertEffect(r, "vampiric", 100, 1, "")
+		return 100
+	case "dash_cell":
+		if r.DashCharges >= 2 {
+			return -1
+		}
+		r.DashCharges = min(2, r.DashCharges+1)
+		return r.DashCharges
+	case "frenzy":
+		upsertEffect(r, "overdrive", 60, 1.5, "")
+		upsertEffect(r, "rapid_fire", 60, .5, "")
+		return 60
 	case "shield":
 		r.Shield = min(50, r.Shield+50)
 		upsertEffect(r, "shield_decay", 200, 0.25, "")
@@ -253,15 +376,18 @@ func applyItem(r *RobotState, kind string) int {
 	const prefix = "weapon_"
 	if len(kind) > len(prefix) && kind[:len(prefix)] == prefix {
 		r.Weapon = kind[len(prefix):]
+		if r.Weapon == "mine_layer" {
+			r.MineCharges = min(3, r.MineCharges+3)
+		}
 		return 1
 	}
 	return -1
 }
 func itemRarity(kind string) string {
 	switch kind {
-	case "shield", "overdrive", "rapid_fire":
+	case "shield", "overdrive", "rapid_fire", "medkit", "nano_repair", "armor_plate", "scanner", "dash_cell", "weapon_shotgun":
 		return "rare"
-	case "weapon_railgun":
+	case "weapon_railgun", "weapon_grenade", "weapon_mine_layer", "cloak", "teleport_beacon", "berserker_charm", "vampiric_fang", "frenzy":
 		return "epic"
 	}
 	return "common"
@@ -279,9 +405,17 @@ type Weapon struct {
 	BurnTicks       int
 	SlowTicks       int
 	EMPTicks        int
+	// Pellets spawns that many projectiles per shot, each independently
+	// jittered by Spread; zero means a single projectile.
+	Pellets int
+	// BlastRadius replaces direct hits with an explosion: BlastDamage at the
+	// core, half (min 1) beyond half the radius, owner and FF-protected
+	// teammates excluded.
+	BlastRadius float64
+	BlastDamage int
 }
 
-var Weapons = map[string]Weapon{"plasma": {Name: "plasma", Damage: 25, Cooldown: 8, ProjectileSpeed: 24, Range: 864}, "cannon": {Name: "cannon", Damage: 60, Cooldown: 20, ProjectileSpeed: 14, Range: 700, Knockback: 28}, "machine_gun": {Name: "machine_gun", Damage: 8, Cooldown: 2, ProjectileSpeed: 32, Range: 550, Spread: 3}, "railgun": {Name: "railgun", Damage: 45, Cooldown: 25, Range: 1000, Hitscan: true}, "incendiary": {Name: "incendiary", Damage: 15, Cooldown: 12, ProjectileSpeed: 20, Range: 600, BurnTicks: 50}, "cryo": {Name: "cryo", Damage: 12, Cooldown: 12, ProjectileSpeed: 20, Range: 600, SlowTicks: 50}, "emp": {Name: "emp", Damage: 5, Cooldown: 15, ProjectileSpeed: 18, Range: 500, EMPTicks: 30}}
+var Weapons = map[string]Weapon{"plasma": {Name: "plasma", Damage: 25, Cooldown: 8, ProjectileSpeed: 24, Range: 864}, "cannon": {Name: "cannon", Damage: 60, Cooldown: 20, ProjectileSpeed: 14, Range: 700, Knockback: 28}, "machine_gun": {Name: "machine_gun", Damage: 8, Cooldown: 2, ProjectileSpeed: 32, Range: 550, Spread: 3}, "railgun": {Name: "railgun", Damage: 45, Cooldown: 25, Range: 1000, Hitscan: true}, "incendiary": {Name: "incendiary", Damage: 15, Cooldown: 12, ProjectileSpeed: 20, Range: 600, BurnTicks: 50}, "cryo": {Name: "cryo", Damage: 12, Cooldown: 12, ProjectileSpeed: 20, Range: 600, SlowTicks: 50}, "emp": {Name: "emp", Damage: 5, Cooldown: 15, ProjectileSpeed: 18, Range: 500, EMPTicks: 30}, "shotgun": {Name: "shotgun", Damage: 10, Cooldown: 14, ProjectileSpeed: 30, Range: 400, Spread: 12, Pellets: 5}, "grenade": {Name: "grenade", Damage: 60, Cooldown: 25, ProjectileSpeed: 10, Range: 500, BlastRadius: 80, BlastDamage: 60}, "mine_layer": {Name: "mine_layer", Damage: 0, Cooldown: 20}}
 
 func WeaponByName(name string) Weapon {
 	if w, ok := Weapons[name]; ok {
@@ -328,6 +462,21 @@ func effectMultiplier(r RobotState, kind string, fallback float64) float64 {
 		}
 	}
 	return fallback
+}
+
+// isCloaked reports whether the robot currently benefits from an active cloak.
+// Observation filtering for cloaked robots lives with the vision pass.
+func isCloaked(r RobotState) bool { return effectActive(r, "cloak") }
+
+// breakCloak removes an active cloak early: firing a shot or taking any hit
+// reveals the robot.
+func breakCloak(r *RobotState) {
+	for i, effect := range r.Effects {
+		if effect.Type == "cloak" {
+			r.Effects = append(r.Effects[:i], r.Effects[i+1:]...)
+			return
+		}
+	}
 }
 
 type ZoneState struct {

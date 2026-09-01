@@ -7,7 +7,7 @@
   import { parseRoute, type Route } from './lib/router';
   import { api, setTokenProvider } from './lib/api';
   import { accessToken, authConfigured, clearRedirectCallback, initializeAuth, redirectCallbackPending, signIn, signOut } from './lib/auth';
-  import { isNewerSnapshot, type AgentEnrollment, type ArenaEvent, type CloudStatus, type Match, type RobotBox, type Snapshot, type Team } from './lib/types';
+  import { isNewerSnapshot, type AgentEnrollment, type ArenaEvent, type CloudStatus, type Match, type RobotBox, type RobotState, type Snapshot, type Team } from './lib/types';
 
   function routeFromLocation() { return parseRoute(window.location.hash); }
   function go(path: string) { window.location.hash = path; }
@@ -52,8 +52,12 @@
 
   let hasRed = $derived(match?.robots.some((robot) => robot.team === 'red') ?? false);
   let hasBlue = $derived(match?.robots.some((robot) => robot.team === 'blue') ?? false);
+  let isSolo = $derived(match?.mode === 'solo');
+  let isSquad = $derived(match?.mode === 'squad');
   let allConnected = $derived(match?.robots.every((robot) => connectedAgents[robot.robotId]) ?? false);
-  let canStart = $derived(match?.status === 'lobby' && hasRed && hasBlue && allConnected);
+  // Solo free-for-all rosters have no red/blue sides; a start needs at least
+  // one robot registered there.
+  let canStart = $derived(match?.status === 'lobby' && (isSolo ? (match?.robots.length ?? 0) > 0 : hasRed && hasBlue) && allConnected);
   let myRobot = $derived(match?.robots.find((robot) => robot.ownerBoxId === robotBox?.boxId) ?? null);
   let latestFeed = $derived(feed.slice(-14).reverse());
   let announcements = $derived.by(() => {
@@ -129,12 +133,22 @@
     return match?.robots.find((robot) => robot.robotId === robotId)?.displayName ?? robotId?.slice(0, 6) ?? '?';
   }
 
+  function teamGlyph(team: string) {
+    return team === 'red' ? 'R' : team === 'blue' ? 'B' : 'S';
+  }
+
+  function teamClass(team: string) {
+    return team === 'red' || team === 'blue' ? team : 'solo';
+  }
+
   function feedEntry(seq: number, index: number, event: ArenaEvent): FeedEntry {
     const label = event.type.replace(/_/g, ' ').toUpperCase();
     const fatal = event.type === 'robot_destroyed' || event.type === 'robot_failed' || event.type === 'robot_withdrawn';
     let text = event.message ?? '';
     if (event.type === 'shot_fired') text = `${robotName(event.robotId)} fired`;
     else if (event.type === 'hit') text = `${robotName(event.robotId)} hit ${robotName(event.targetId)} for ${event.damage} dmg`;
+    else if (event.type === 'critical_hit') text = `${robotName(event.robotId)} CRIT ${robotName(event.targetId)} for ${event.damage} dmg`;
+    else if (event.type === 'supply_drop') text = `supply drop: ${event.message ?? 'bonus item'}`;
     else if (event.type === 'robot_destroyed') text = `${robotName(event.robotId)} destroyed by ${robotName(event.targetId)}`;
     else if (event.type === 'robot_failed') text = `${robotName(event.robotId)} script failed`;
     else if (event.type === 'robot_withdrawn') text = `${robotName(event.robotId)} withdrew from the match`;
@@ -142,6 +156,61 @@
     else if (event.type === 'item_picked_up' || event.type === 'pickup') text = `${robotName(event.robotId)} picked up ${event.itemType ?? 'item'}`;
     else if (event.type === 'agent_disconnected') text = `${robotName(event.robotId)} disconnected`;
     return { id: `${seq}:${index}:${label}`, tone: fatal ? 'bad' : 'ok', label, text };
+  }
+
+  // Rebuild the arena view from the stored match so a refresh during or after
+  // a match shows the real session state instead of an empty "waiting" arena.
+  // Live snapshots carry higher sequences, so they replace this once playing.
+  function snapshotFromMatch(source: Match): Snapshot {
+    const lanes: Record<string, number> = {};
+    const summaries = source.robotSummaries ?? [];
+    const robots: RobotState[] = source.robots.map((robot) => {
+      const summary = summaries.find((entry) => entry.robotId === robot.robotId);
+      const lane = lanes[robot.team] ?? 0;
+      lanes[robot.team] = lane + 1;
+      return {
+        robotId: robot.robotId,
+        name: robot.displayName,
+        team: robot.team,
+        x: source.arenaWidth ? (robot.team === 'red' ? 0.25 : 0.75) * source.arenaWidth : robot.team === 'red' ? 200 : 600,
+        y: 110 + lane * 110,
+        heading: 0,
+        hp: summary?.hp ?? 100,
+        cooldown: 0,
+        alive: summary?.alive ?? true,
+        failed: summary?.failed ?? false,
+        connected: false,
+        avgResponseMs: summary?.avgResponseMs ?? 0,
+        lastResponseMs: 0,
+        computeMs: 0,
+        memoryMb: 0,
+        equipment: summary?.equipment,
+        itemsPickedUp: summary?.itemsPickedUp,
+      };
+    });
+    const events = source.eventSummary ?? [];
+    return {
+      type: 'snapshot',
+      version: 1,
+      matchId: source.matchId,
+      sequence: 0,
+      tick: events.length ? events[events.length - 1].tick : 0,
+      status: source.status === 'finished' ? 'finished' : 'running',
+      winnerTeam: source.winnerTeam,
+      robots,
+      projectiles: [],
+      events,
+      width: source.arenaWidth ?? 800,
+      height: source.arenaHeight ?? 500,
+      mapId: source.mapId,
+    };
+  }
+
+  function hydrateMatchView(source: Match) {
+    if (source.status !== 'finished' && source.status !== 'failed') return;
+    if (snapshot?.matchId === source.matchId) return;
+    snapshot = snapshotFromMatch(source);
+    feed = (source.eventSummary ?? []).map((event, index) => feedEntry(event.sequence, index, event));
   }
 
   onMount(() => {
@@ -183,6 +252,7 @@
     if (matchId) {
       try {
         match = await api.getMatch(matchId);
+        hydrateMatchView(match);
         connect(matchId);
         // Joining a shared match should suggest whichever side is still open.
         if (match.robots.some((robot) => robot.team === 'red') && !match.robots.some((robot) => robot.team === 'blue')) team = 'blue';
@@ -200,7 +270,7 @@
 
   async function loadRouteMatch() {
     if (!view.parameter || (view.name !== 'match' && view.name !== 'match-detail') || view.parameter === match?.matchId) return;
-    try { match = await api.getMatch(view.parameter); if (view.name === 'match') connect(view.parameter); }
+    try { match = await api.getMatch(view.parameter); hydrateMatchView(match); if (view.name === 'match') connect(view.parameter); }
     catch (failure) { setError(failure); }
   }
 
@@ -294,6 +364,15 @@
     if (target.status === 'running') await api.withdrawFromMatch(target.matchId);
     else if (target.status === 'lobby') await api.withdrawRobot(target.matchId);
     else throw new Error('match is no longer active; refresh the box');
+    await refreshBox();
+  });
+
+  // Popup escape hatch for the "box already has an active robot" fault: the
+  // server drops a lobby registration, concedes a running match, or clears a
+  // stale binding, then the box state refreshes so queueing works again.
+  const exitActiveMatch = () => withPending('exit-active', async () => {
+    error = '';
+    await api.releaseBox();
     await refreshBox();
   });
 
@@ -399,7 +478,7 @@
     </div>
   </header>
 
-  {#if error}<div class="error-banner" role="alert"><span>FAULT</span>{error}<button onclick={() => (error = '')}>DISMISS</button></div>{/if}
+  {#if error}<div class="error-banner" role="alert"><span>FAULT</span>{error}{#if error.includes('box already has an active robot')}<button onclick={exitActiveMatch} disabled={pending['exit-active']}>{pending['exit-active'] ? 'RELEASING…' : 'EXIT ACTIVE MATCH'}</button>{/if}<button onclick={() => (error = '')}>DISMISS</button></div>{/if}
 
   {#if view.name === 'box'}
     <BoxConsole
@@ -451,10 +530,12 @@
 
         {#if match}<div class="match-id"><span>MATCH ID</span><code>{match.matchId.slice(0, 13)}</code><button onclick={copyInvite} disabled={pending.link}>{copied === 'link' ? 'COPIED ✓' : 'COPY LINK'}</button></div>{/if}
         <label>Robot name<input bind:value={displayName} maxlength="32" disabled={match?.status !== 'lobby' && !!match} /></label>
-        <fieldset disabled={match?.status !== 'lobby' && !!match}><legend>Team</legend><div class="team-switch"><button class:active={team === 'red'} onclick={() => (team = 'red')}>RED</button><button class:active={team === 'blue'} onclick={() => (team = 'blue')}>BLUE</button></div></fieldset>
+        {#if !isSolo}
+          <fieldset disabled={match?.status !== 'lobby' && !!match}><legend>Team{isSquad ? ' · joining replaces one bot' : ''}</legend><div class="team-switch"><button class:active={team === 'red'} onclick={() => (team = 'red')}>RED</button><button class:active={team === 'blue'} onclick={() => (team = 'blue')}>BLUE</button></div></fieldset>
+        {/if}
         <label>Start command<input bind:value={startCommand} maxlength="256" disabled={match?.status !== 'lobby' && !!match} /></label>
 
-        <div class="facts"><div><span>MODE</span><strong>REAL-TIME 1V1</strong></div><div><span>TICK</span><strong>{snapshot?.tick ?? 0}</strong></div><div><span>VIEW STREAM</span><strong class:live={socketState === 'live'}>{socketState.toUpperCase()}</strong></div></div>
+        <div class="facts"><div><span>MODE</span><strong>{(match?.mode ?? 'duel').toUpperCase()}</strong></div><div><span>TICK</span><strong>{snapshot?.tick ?? 0}</strong></div><div><span>VIEW STREAM</span><strong class:live={socketState === 'live'}>{socketState.toUpperCase()}</strong></div></div>
 
         {#if !match}<button class="deploy" onclick={createMatch} disabled={busy || pending.create || !user || !robotBox?.keyFingerprint}>{working('create', 'CREATING…') ?? 'CREATE MATCH'} <span>↗</span></button>
         {:else if match.status === 'lobby'}<div class="lobby-actions">
@@ -482,7 +563,7 @@
           {#if !snapshot}<div><span>RESPONSE</span><strong>--</strong><i>agent telemetry</i></div><div><span>HEALTH</span><strong>--</strong><i>waiting for match</i></div>{/if}
         </div>
         {#if snapshot?.status === 'finished'}
-          <div class="arena-recap" role="status"><div><span>MATCH COMPLETE</span><h2>{snapshot.winnerTeam?.toUpperCase() ?? 'DRAW'} WINS</h2><p>{snapshot.tick} ticks · {snapshot.robots.filter((robot) => !robot.alive).length} destroyed · {snapshot.robots.reduce((sum, robot) => sum + (robot.itemsPickedUp ?? 0), 0)} items · {feed.filter((entry) => entry.label === 'HIT').reduce((sum, entry) => sum + Number(entry.text.match(/for (\d+)/)?.[1] ?? 0), 0)} damage</p></div><a href={`#/match/${match?.matchId}/detail`}>FULL RECAP</a></div>
+          <div class="arena-recap" role="status"><div><span>MATCH COMPLETE</span><h2>{snapshot.winnerTeam ? `${snapshot.winnerTeam.toUpperCase()} WINS` : match?.status === 'failed' ? 'MATCH FAILED' : 'DRAW'}</h2><p>{snapshot.tick} ticks · {snapshot.robots.filter((robot) => !robot.alive).length} destroyed · {snapshot.robots.reduce((sum, robot) => sum + (robot.itemsPickedUp ?? 0), 0)} items · {feed.filter((entry) => entry.label === 'HIT').reduce((sum, entry) => sum + Number(entry.text.match(/for (\d+)/)?.[1] ?? 0), 0)} damage</p></div><a href={`#/match/${match?.matchId}/detail`}>FULL RECAP</a></div>
         {/if}
         {#if enrollment}
           <div class="enrollment-card"><div><div class="eyebrow">BOX AGENT // AUTOMATIC</div><h3>{enrollment.status}</h3><p>Server configured box supervisor. Agent reconnects without exposing token to browser.</p></div><button onclick={refreshBox} disabled={pending.refresh}>{working('refresh', 'REFRESHING…') ?? 'REFRESH STATUS'}</button></div>
@@ -495,7 +576,7 @@
         <div class="panel-head"><div>ROBOT TELEMETRY</div><span>10 HZ</span></div>
         <div class="roster">
           <div class="eyebrow">ROSTER</div>
-          {#if match?.robots.length}{#each match.robots as robot}{@const runtime = snapshot?.robots.find((entry) => entry.robotId === robot.robotId)}<div class="robot-card"><div class="roster-row"><b class={robot.team}>{robot.team.slice(0, 1).toUpperCase()}</b><strong>{robot.displayName}</strong><span class:live={connectedAgents[robot.robotId]}>{connectedAgents[robot.robotId] ? 'CONNECTED' : 'OFFLINE'}</span></div><div class="hp-track" aria-label="hit points"><i class:low={(runtime?.hp ?? 100) <= 30} style="width: {runtime?.hp ?? 100}%"></i></div><div class="metric-grid"><div><span>HP</span><strong>{runtime?.hp ?? 100}</strong></div><div><span>AVG</span><strong>{runtime?.avgResponseMs?.toFixed(1) ?? '--'} ms</strong></div><div><span>COMPUTE</span><strong>{runtime?.computeMs?.toFixed(2) ?? '--'} ms</strong></div><div><span>MEMORY</span><strong>{runtime?.memoryMb?.toFixed(0) ?? '--'} MB</strong></div></div><div class="equipment">{#each runtime?.equipment ?? ['cannon', 'scanner'] as item}<span>{item}</span>{/each}</div></div>{/each}{:else}<p class="empty">No robot boxes registered.</p>{/if}
+          {#if match?.robots.length}{#each match.robots as robot}{@const runtime = snapshot?.robots.find((entry) => entry.robotId === robot.robotId)}<div class="robot-card"><div class="roster-row"><b class={teamClass(robot.team)}>{teamGlyph(robot.team)}</b><strong>{robot.displayName}</strong><span class:live={connectedAgents[robot.robotId]}>{connectedAgents[robot.robotId] ? 'CONNECTED' : 'OFFLINE'}</span></div><div class="hp-track" aria-label="hit points"><i class:low={(runtime?.hp ?? 100) <= 30} style="width: {runtime?.hp ?? 100}%"></i></div><div class="metric-grid"><div><span>HP</span><strong>{runtime?.hp ?? 100}</strong></div><div><span>AVG</span><strong>{runtime?.avgResponseMs?.toFixed(1) ?? '--'} ms</strong></div><div><span>COMPUTE</span><strong>{runtime?.computeMs?.toFixed(2) ?? '--'} ms</strong></div><div><span>MEMORY</span><strong>{runtime?.memoryMb?.toFixed(0) ?? '--'} MB</strong></div></div><div class="equipment">{#each runtime?.equipment ?? ['cannon', 'scanner'] as item}<span>{item}</span>{/each}</div></div>{/each}{:else}<p class="empty">No robot boxes registered.</p>{/if}
         </div>
         <div class="event-feed">
           <div class="eyebrow">LIVE FEED</div>
@@ -509,6 +590,6 @@
       </aside>
     </section>
   {:else}
-    <PortalPage route={view} {user} {match} {cloud} box={robotBox} onSignIn={handleSignIn} onCreateMatch={createMatch} />
+    <PortalPage route={view} {user} {match} {cloud} box={robotBox} onSignIn={handleSignIn} onCreateMatch={createMatch} onReleaseBox={exitActiveMatch} />
   {/if}
 </main>

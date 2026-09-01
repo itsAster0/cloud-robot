@@ -33,6 +33,7 @@ List limits range from 1 to 100.
 - `GET /api/me/box`
 - `PUT /api/me/box/ssh-key`
 - `POST /api/me/box/restart`
+- `POST /api/me/box/release`
 - `GET /api/me/box/main.lua`
 - `PUT /api/me/box/main.lua`
 - `GET /api/me/box/scripts`
@@ -62,6 +63,18 @@ Combat options are optional and default to today's baseline: friendly fire off,
 no regen, no ramming. Valid values: `botPersonality` is
 `aggressive|evasive|camper`, `regenPerTick` is 0–10 (regen applies after 50
 ticks without taking damage).
+
+`mode` accepts `duel` (default), `squad`, and `solo`:
+
+- `squad` ignores `bots` and seeds ten bots, five per side, on the Corridors
+  map. Players register with `POST /api/matches/{matchId}/robots` and choose
+  red or blue; the newest bot on that team is removed and the player takes its
+  slot. A team accepts at most five robots. Auto-start waits for a human on
+  each side.
+- `solo` uses `bots` (0–7) as free-for-all opponents. Every robot gets its own
+  `solo-NN` team and the requested team is ignored. With zero bots the match
+  is a single-robot sandbox that ends at the tick limit or when the robot dies.
+- Squad and solo matches are flagged `practice` and never update ratings.
 
 Queue a box-backed Lua robot:
 

@@ -14,8 +14,10 @@ end-to-end implementation. Unchecked items still need work.
 - Seven weapons (plasma, cannon, machine gun, railgun, incendiary, cryo, EMP),
   burn/slow/EMP status effects, per-match friendly-fire/regen/ramming options,
   selectable bot personalities, zone collapse, and overtime.
-- Deterministic items (heal, shield, overdrive, rapid fire), repair-core and
-  weapon drops on death, kill-streak announcements with bounty; all engine RNG
+- Deterministic items (heal, shield, overdrive, rapid fire) with randomized
+  spawner loot (common weapons 8%, cannon 3%, railgun 1%) and supply-drop
+  bursts (1-in-8 spawns), repair-core and weapon drops on death, 10% weapon
+  crits at 1.5x damage, kill-streak announcements with bounty; all engine RNG
   seeded from match config.
 - Four server bot difficulties with collision-probe movement; manual matches,
   practice matches, and an in-memory duel queue with bot fill, connection

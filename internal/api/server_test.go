@@ -383,6 +383,58 @@ func TestGetBoxKeepsLiveMatchMarker(t *testing.T) {
 	}
 }
 
+// After emulator state loss the supervisor still reports markers from
+// agent.json while the store has no box record. Those markers must not be
+// resurrected into the store or the browser, or the box stays "in a match"
+// that no longer exists.
+func TestGetBoxDropsSupervisorMarkersWithoutStoreRecord(t *testing.T) {
+	h := newHarness(t)
+	supervisor := readyBox()
+	supervisor.ActiveRobotID, supervisor.ActiveMatchID = "r-old", "m-gone"
+	h.provisioner.box = supervisor
+
+	response, payload := h.request(t, http.MethodGet, "/api/me/box", "")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("get box failed: %d %v", response.StatusCode, payload)
+	}
+	if payload["activeMatchId"] != nil || payload["activeRobotId"] != nil {
+		t.Fatalf("supervisor marker leaked without a store record: %v", payload)
+	}
+	if stored := h.store.boxes[testUserID]; stored.ActiveMatchID != "" || stored.ActiveRobotID != "" {
+		t.Fatalf("stale marker persisted: %+v", stored)
+	}
+}
+
+func TestRecoverMatchesFailsRunningAndRequeuesQueued(t *testing.T) {
+	h := newHarness(t)
+	running := model.Match{MatchID: "m-running", Status: model.MatchRunning, Robots: []model.RobotSubmission{{RobotID: "r1", PlayerID: testUserID}}}
+	queued := model.Match{MatchID: "m-queued", Status: model.MatchQueued}
+	if err := h.store.PutMatch(context.Background(), running); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutMatch(context.Background(), queued); err != nil {
+		t.Fatal(err)
+	}
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r1", "m-running"
+	if err := h.store.PutBox(context.Background(), testUserID, box); err != nil {
+		t.Fatal(err)
+	}
+
+	h.app.RecoverMatches(context.Background())
+
+	failed := h.store.matches["m-running"]
+	if failed.Status != model.MatchFailed || failed.Error == "" {
+		t.Fatalf("running match not failed after restart: %+v", failed)
+	}
+	if released := h.store.boxes[testUserID]; released.ActiveMatchID != "" {
+		t.Fatalf("box not released after restart: %+v", released)
+	}
+	if len(h.store.queue) != 1 || h.store.queue[0] != "m-queued" {
+		t.Fatalf("queued match not re-enqueued: %v", h.store.queue)
+	}
+}
+
 func TestGetBoxMainReturnsWorkspaceSource(t *testing.T) {
 	h := newHarness(t)
 	h.provisioner.readMain = "-- demo robot script"
@@ -565,15 +617,48 @@ func TestSubmitRobotBlocksBoxWithActiveMatch(t *testing.T) {
 	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m1", Status: model.MatchLobby}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m2", Status: model.MatchRunning}); err != nil {
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m2", Status: model.MatchRunning, Robots: []model.RobotSubmission{
+		{RobotID: "r2", PlayerID: testUserID, OwnerBoxID: testBoxID},
+	}}); err != nil {
 		t.Fatal(err)
 	}
-	h.provisioner.box = readyBox()
-	h.provisioner.box.ActiveMatchID = "m2"
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r2", "m2"
+	if err := h.store.PutBox(context.Background(), testUserID, box); err != nil {
+		t.Fatal(err)
+	}
+	h.provisioner.box = box
 	h.provisioner.readMain = "x"
 	response, payload := h.request(t, http.MethodPost, "/api/matches/m1/robots", `{"displayName":"Ada","team":"red","startCommand":"lua main.lua"}`)
-	if response.StatusCode != http.StatusConflict {
+	if response.StatusCode != http.StatusConflict || payload["error"] != "box already has an active robot" {
 		t.Fatalf("expected conflict, got %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestSubmitRobotIgnoresStaleSupervisorMarker(t *testing.T) {
+	// The supervisor keeps the agent.json marker after a withdrawal, but the
+	// store no longer binds the box; registration into a fresh lobby must
+	// proceed instead of failing with "box already has an active robot".
+	h := newHarness(t)
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m1", OwnerID: testUserID, Status: model.MatchLobby}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m2", Status: model.MatchLobby, Robots: []model.RobotSubmission{
+		{RobotID: "bot-1", Bot: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r-old", "m2"
+	h.provisioner.box = box
+	h.provisioner.readMain = "x"
+	response, payload := h.request(t, http.MethodPost, "/api/matches/m1/robots", `{"displayName":"Ada","team":"red","startCommand":"lua main.lua"}`)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("expected registration despite supervisor marker, got %d %v", response.StatusCode, payload)
+	}
+	storedBox := h.store.boxes[testUserID]
+	if storedBox.ActiveMatchID != "m1" {
+		t.Fatalf("binding not moved to the new match: %+v", storedBox)
 	}
 }
 
@@ -892,6 +977,10 @@ func TestAuthRequiredBlocksAnonymousBoxOperations(t *testing.T) {
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d %v", response.StatusCode, payload)
 	}
+	response, payload = h.requestAs(t, http.MethodPost, "/api/me/box/release", "", false)
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for box release, got %d %v", response.StatusCode, payload)
+	}
 }
 
 func TestConnectAgentRejectsBadCredential(t *testing.T) {
@@ -946,16 +1035,47 @@ func TestQueueJoinStatusAndLeave(t *testing.T) {
 
 func TestQueueJoinBlocksBoxWithActiveMatch(t *testing.T) {
 	h := newHarness(t)
-	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m2", Status: model.MatchRunning}); err != nil {
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m2", Status: model.MatchRunning, Robots: []model.RobotSubmission{
+		{RobotID: "r2", PlayerID: testUserID, OwnerBoxID: testBoxID},
+	}}); err != nil {
 		t.Fatal(err)
 	}
-	h.provisioner.box = readyBox()
-	h.provisioner.box.ActiveMatchID = "m2"
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r2", "m2"
+	if err := h.store.PutBox(context.Background(), testUserID, box); err != nil {
+		t.Fatal(err)
+	}
+	h.provisioner.box = box
 	h.provisioner.readMain = "return 1"
 	body := `{"displayName":"Ada","mode":"duel","runtime":"lua5.4","startCommand":"lua main.lua"}`
 	response, payload := h.request(t, http.MethodPost, "/api/queue", body)
 	if response.StatusCode != http.StatusConflict || payload["error"] != "box already has an active robot" {
 		t.Fatalf("expected conflict, got %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestQueueJoinIgnoresStaleSupervisorMarker(t *testing.T) {
+	// Same store-authority rule as registration: a supervisor marker pointing
+	// at a live match that no longer holds this box's robot never blocks the
+	// duel queue.
+	h := newHarness(t)
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m2", Status: model.MatchRunning, Robots: []model.RobotSubmission{
+		{RobotID: "bot-1", Bot: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r-old", "m2"
+	h.provisioner.box = box
+	h.provisioner.readMain = "return 1"
+	body := `{"displayName":"Ada","mode":"duel","runtime":"lua5.4","startCommand":"lua main.lua"}`
+	response, payload := h.request(t, http.MethodPost, "/api/queue", body)
+	if response.StatusCode != http.StatusAccepted || payload["status"] != "waiting" {
+		t.Fatalf("expected queue join despite supervisor marker, got %d %v", response.StatusCode, payload)
+	}
+	stored := h.store.boxes[testUserID]
+	if stored.ActiveRobotID != "" || stored.ActiveMatchID != "" {
+		t.Fatalf("stale markers not cleared: %+v", stored)
 	}
 }
 
@@ -975,6 +1095,96 @@ func TestQueueJoinClearsStaleActiveMatch(t *testing.T) {
 	stored := h.store.boxes[testUserID]
 	if stored.ActiveRobotID != "" || stored.ActiveMatchID != "" {
 		t.Fatalf("stale markers not cleared: %+v", stored)
+	}
+}
+
+func TestReleaseBoxDropsLobbyRegistration(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m9", Status: model.MatchLobby, Robots: []model.RobotSubmission{
+		{RobotID: "r9", PlayerID: testUserID, OwnerBoxID: testBoxID},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r9", "m9"
+	if err := h.store.PutBox(context.Background(), testUserID, box); err != nil {
+		t.Fatal(err)
+	}
+	response, payload := h.request(t, http.MethodPost, "/api/me/box/release", "")
+	if response.StatusCode != http.StatusOK || payload["status"] != "released" {
+		t.Fatalf("lobby release failed: %d %v", response.StatusCode, payload)
+	}
+	stored := h.store.boxes[testUserID]
+	if stored.ActiveRobotID != "" || stored.ActiveMatchID != "" {
+		t.Fatalf("markers not cleared: %+v", stored)
+	}
+	if robots := h.store.matches["m9"].Robots; len(robots) != 0 {
+		t.Fatalf("robot not removed from lobby: %+v", robots)
+	}
+	// The unblocked box can queue again immediately.
+	h.provisioner.readMain = "return 1"
+	body := `{"displayName":"Ada","mode":"duel","runtime":"lua5.4","startCommand":"lua main.lua"}`
+	response, payload = h.request(t, http.MethodPost, "/api/queue", body)
+	if response.StatusCode != http.StatusAccepted || payload["status"] != "waiting" {
+		t.Fatalf("queue join after release failed: %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestReleaseBoxClearsStaleMarkerWithoutMatch(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r-gone", "m-gone"
+	if err := h.store.PutBox(context.Background(), testUserID, box); err != nil {
+		t.Fatal(err)
+	}
+	// overlayBoxMatchState clears the vanished-match marker during the read,
+	// so the release itself reports idle.
+	response, payload := h.request(t, http.MethodPost, "/api/me/box/release", "")
+	if response.StatusCode != http.StatusOK || (payload["status"] != "released" && payload["status"] != "idle") {
+		t.Fatalf("stale release failed: %d %v", response.StatusCode, payload)
+	}
+	stored := h.store.boxes[testUserID]
+	if stored.ActiveRobotID != "" || stored.ActiveMatchID != "" {
+		t.Fatalf("stale markers not cleared: %+v", stored)
+	}
+}
+
+func TestReleaseBoxWithoutActiveMatchIsIdle(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	response, payload := h.request(t, http.MethodPost, "/api/me/box/release", "")
+	if response.StatusCode != http.StatusOK || payload["status"] != "idle" {
+		t.Fatalf("expected idle release, got %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestReleaseBoxFailsStuckRunningMatchWithoutWorker(t *testing.T) {
+	// A running match with no registered arena can never resolve (stack
+	// restart); releasing the box must fail the match instead of blocking.
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m7", Status: model.MatchRunning, Robots: []model.RobotSubmission{
+		{RobotID: "r7", PlayerID: testUserID, OwnerBoxID: testBoxID},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	box := readyBox()
+	box.ActiveRobotID, box.ActiveMatchID = "r7", "m7"
+	if err := h.store.PutBox(context.Background(), testUserID, box); err != nil {
+		t.Fatal(err)
+	}
+	response, payload := h.request(t, http.MethodPost, "/api/me/box/release", "")
+	if response.StatusCode != http.StatusOK || payload["status"] != "released" {
+		t.Fatalf("release failed: %d %v", response.StatusCode, payload)
+	}
+	if stored := h.store.matches["m7"]; stored.Status != model.MatchFailed {
+		t.Fatalf("stuck match not failed: %+v", stored)
+	}
+	storedBox := h.store.boxes[testUserID]
+	if storedBox.ActiveRobotID != "" || storedBox.ActiveMatchID != "" {
+		t.Fatalf("markers not cleared: %+v", storedBox)
 	}
 }
 
@@ -1126,5 +1336,172 @@ func TestWorkerCopiesMatchOptionsIntoEngineConfig(t *testing.T) {
 	}
 	if botPersonalityFor(model.Match{BotPersonality: "camper"}) != engine.PersonalityCamper {
 		t.Fatal("camper personality not mapped")
+	}
+}
+
+func TestCreateSquadSeedsFiveBotsPerSide(t *testing.T) {
+	h := newHarness(t)
+	response, payload := h.request(t, http.MethodPost, "/api/matches", `{"mode":"squad","botDifficulty":"fighter"}`)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create squad failed: %d %v", response.StatusCode, payload)
+	}
+	robots := payload["robots"].([]any)
+	if len(robots) != 10 {
+		t.Fatalf("squad lobby must seed 10 bots, got %d", len(robots))
+	}
+	red, blue := 0, 0
+	for _, raw := range robots {
+		robot := raw.(map[string]any)
+		switch robot["team"] {
+		case "red":
+			red++
+		case "blue":
+			blue++
+		}
+		if robot["bot"] != true {
+			t.Fatalf("squad seed must be bots: %v", robot)
+		}
+	}
+	if red != 5 || blue != 5 {
+		t.Fatalf("squad must open 5v5: red=%d blue=%d", red, blue)
+	}
+	if payload["mode"] != "squad" || payload["mapId"] != "corridors" || payload["practice"] != true {
+		t.Fatalf("squad defaults wrong: mode=%v mapId=%v practice=%v", payload["mode"], payload["mapId"], payload["practice"])
+	}
+}
+
+func TestSquadRegistrationDisplacesBotOnChosenTeam(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	h.provisioner.readMain = "-- squad robot"
+	_, payload := h.request(t, http.MethodPost, "/api/matches", `{"mode":"squad"}`)
+	matchID := payload["matchId"].(string)
+	response, payload := h.request(t, http.MethodPost, "/api/matches/"+matchID+"/robots", `{"displayName":"Ada","team":"blue","startCommand":"lua main.lua"}`)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("squad registration failed: %d %v", response.StatusCode, payload)
+	}
+	robots := h.store.matches[matchID].Robots
+	if len(robots) != 10 {
+		t.Fatalf("squad roster must stay at 10 robots: %d", len(robots))
+	}
+	redBots, blueBots, bluePlayers := 0, 0, 0
+	for _, robot := range robots {
+		switch {
+		case robot.Bot && robot.Team == "red":
+			redBots++
+		case robot.Bot && robot.Team == "blue":
+			blueBots++
+		case !robot.Bot && robot.Team == "blue":
+			bluePlayers++
+		default:
+			t.Fatalf("unexpected roster entry: %+v", robot)
+		}
+	}
+	if redBots != 5 || blueBots != 4 || bluePlayers != 1 {
+		t.Fatalf("blue bot not displaced: redBots=%d blueBots=%d bluePlayers=%d", redBots, blueBots, bluePlayers)
+	}
+}
+
+func TestSquadRegistrationRejectsFullTeam(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	h.provisioner.readMain = "-- squad robot"
+	match := model.Match{MatchID: "m1", OwnerID: testUserID, Status: model.MatchLobby, Mode: "squad"}
+	for i := 0; i < 5; i++ {
+		match.Robots = append(match.Robots, model.RobotSubmission{RobotID: fmt.Sprintf("r%d", i), Team: "red", PlayerID: fmt.Sprintf("p%d", i), OwnerBoxID: fmt.Sprintf("box-%d", i)})
+	}
+	if err := h.store.PutMatch(context.Background(), match); err != nil {
+		t.Fatal(err)
+	}
+	response, payload := h.request(t, http.MethodPost, "/api/matches/m1/robots", `{"displayName":"Ada","team":"red","startCommand":"lua main.lua"}`)
+	if response.StatusCode != http.StatusConflict || payload["error"] != "team is full: five robots per side" {
+		t.Fatalf("full team must be rejected: %d %v", response.StatusCode, payload)
+	}
+}
+
+func TestSquadAutoStartWaitsForHumanOnEachSide(t *testing.T) {
+	h := newHarness(t)
+	match := model.Match{MatchID: "m1", OwnerID: testUserID, Status: model.MatchLobby, Mode: "squad"}
+	match.Robots = []model.RobotSubmission{
+		{RobotID: "bot-r1", Team: "red", Bot: true},
+		{RobotID: "bot-b1", Team: "blue", Bot: true},
+		{RobotID: "r1", Team: "red", PlayerID: testUserID, OwnerBoxID: testBoxID},
+	}
+	if err := h.store.PutMatch(context.Background(), match); err != nil {
+		t.Fatal(err)
+	}
+	attachAgents(h.app, "r1")
+	h.app.autoStartIfReady("m1")
+	if h.store.matches["m1"].Status != model.MatchLobby {
+		t.Fatalf("one-sided squad lobby must not auto-start: %+v", h.store.matches["m1"])
+	}
+	match.Robots = append(match.Robots, model.RobotSubmission{RobotID: "r2", Team: "blue", PlayerID: "alice", OwnerBoxID: "box-alice"})
+	if err := h.store.PutMatch(context.Background(), match); err != nil {
+		t.Fatal(err)
+	}
+	attachAgents(h.app, "r2")
+	h.app.autoStartIfReady("m1")
+	if h.store.matches["m1"].Status != model.MatchQueued {
+		t.Fatalf("squad lobby with humans on both sides should auto-start: %+v", h.store.matches["m1"])
+	}
+}
+
+func TestSoloModeAssignsUniqueTeamsPerRobot(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	h.provisioner.readMain = "-- solo robot"
+	_, payload := h.request(t, http.MethodPost, "/api/matches", `{"mode":"solo","bots":2,"botDifficulty":"fighter"}`)
+	matchID := payload["matchId"].(string)
+	response, payload := h.request(t, http.MethodPost, "/api/matches/"+matchID+"/robots", `{"displayName":"Ada","team":"red","startCommand":"lua main.lua"}`)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("solo registration failed: %d %v", response.StatusCode, payload)
+	}
+	stored := h.store.matches[matchID]
+	if len(stored.Robots) != 3 {
+		t.Fatalf("solo roster wrong: %+v", stored.Robots)
+	}
+	teams := map[string]int{}
+	for _, robot := range stored.Robots {
+		teams[robot.Team]++
+	}
+	for team, count := range teams {
+		if count != 1 {
+			t.Fatalf("solo teams must be unique per robot: %q appears %d times", team, count)
+		}
+	}
+	player := payload["match"].(map[string]any)["robots"].([]any)
+	var playerTeam any
+	for _, raw := range player {
+		robot := raw.(map[string]any)
+		if robot["ownerBoxId"] != nil {
+			playerTeam = robot["team"]
+		}
+	}
+	if playerTeam != "solo-03" {
+		t.Fatalf("player should be assigned solo-03 after two bots, got %v", playerTeam)
+	}
+	if stored.Practice != true {
+		t.Fatalf("solo matches must be unranked practice: %+v", stored)
+	}
+}
+
+func TestSoloWithoutBotsStartsSingleTeamSandbox(t *testing.T) {
+	h := newHarness(t)
+	h.provisioner.box = readyBox()
+	h.provisioner.readMain = "-- sandbox robot"
+	_, payload := h.request(t, http.MethodPost, "/api/matches", `{"mode":"solo","bots":0}`)
+	matchID := payload["matchId"].(string)
+	_, payload = h.request(t, http.MethodPost, "/api/matches/"+matchID+"/robots", `{"displayName":"Ada","team":"red","startCommand":"lua main.lua"}`)
+	if response := payload; response == nil {
+		t.Fatal("missing registration payload")
+	}
+	robotID := payload["agent"].(map[string]any)["robotId"].(string)
+	attachAgents(h.app, robotID)
+	response, payload := h.request(t, http.MethodPost, "/api/matches/"+matchID+"/start", "")
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("single-robot sandbox must be startable: %d %v", response.StatusCode, payload)
+	}
+	if h.store.matches[matchID].Status != model.MatchQueued {
+		t.Fatalf("sandbox not queued: %+v", h.store.matches[matchID])
 	}
 }

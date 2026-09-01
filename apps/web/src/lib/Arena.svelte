@@ -16,6 +16,22 @@
     return { ...robot, x: before.x + (robot.x - before.x) * amount, y: before.y + (robot.y - before.y) * amount, heading: before.heading + (robot.heading - before.heading) * amount };
   }
 
+  // Solo free-for-all matches assign every robot its own team, so non-red and
+  // non-blue teams hash into a stable palette entry.
+  const teamPalette = ['#dfff86', '#ffc857', '#ff8fd0', '#54ffd0', '#c78bff', '#f5f5b0', '#ffa76b', '#7bf1ff'];
+  function teamColor(team: string) {
+    if (team === 'red') return '#ff5b4d';
+    if (team === 'blue') return '#54a7ff';
+    let hash = 0;
+    for (let index = 0; index < team.length; index++) hash = (hash * 31 + team.charCodeAt(index)) >>> 0;
+    return teamPalette[hash % teamPalette.length];
+  }
+  function teamGlyph(robot: RobotState) {
+    if (robot.team === 'red') return 'R';
+    if (robot.team === 'blue') return 'B';
+    return robot.name.slice(0, 1).toUpperCase();
+  }
+
   function draw(now: number) {
     if (!canvas) return;
     const ratio = window.devicePixelRatio || 1, worldWidth = target?.width ?? 800, worldHeight = target?.height ?? 500;
@@ -39,11 +55,15 @@
       context.fillRect(x - 7 * scale, y - 2 * scale, 14 * scale, 4 * scale); context.fillRect(x - 2 * scale, y - 7 * scale, 4 * scale, 14 * scale); context.strokeRect(x - 8 * scale, y - 8 * scale, 16 * scale, 16 * scale);
     }
     for (const projectile of target.projectiles ?? []) {
-      const x = projectile.x * scale, y = projectile.y * scale; context.strokeStyle = projectile.team === 'red' ? 'rgba(255,91,77,.45)' : 'rgba(84,167,255,.45)'; context.lineWidth = 2 * scale; context.beginPath(); context.moveTo((projectile.x - projectile.vx * .7) * scale, (projectile.y - projectile.vy * .7) * scale); context.lineTo(x, y); context.stroke(); context.fillStyle = '#dfff86'; context.shadowColor = '#b9f542'; context.shadowBlur = 10; context.beginPath(); context.arc(x, y, 4 * scale, 0, Math.PI * 2); context.fill(); context.shadowBlur = 0;
+      const x = projectile.x * scale, y = projectile.y * scale;
+      const teamColor = projectile.team === 'red' ? 'rgba(255,91,77,.45)' : projectile.team === 'blue' ? 'rgba(84,167,255,.45)' : 'rgba(223,255,134,.45)';
+      context.strokeStyle = teamColor; context.lineWidth = 2 * scale; context.beginPath(); context.moveTo((projectile.x - projectile.vx * .7) * scale, (projectile.y - projectile.vy * .7) * scale); context.lineTo(x, y); context.stroke(); context.fillStyle = '#dfff86'; context.shadowColor = '#b9f542'; context.shadowBlur = 10; context.beginPath(); context.arc(x, y, 4 * scale, 0, Math.PI * 2); context.fill(); context.shadowBlur = 0;
     }
     for (const raw of target.robots) {
-      const robot = robotAt(raw, now), x = robot.x * scale, y = robot.y * scale; context.save(); context.translate(x, y); context.rotate(robot.heading * Math.PI / 180); context.fillStyle = robot.alive ? (robot.team === 'red' ? '#ff5b4d' : '#54a7ff') : '#34423c'; context.strokeStyle = '#07110f'; context.lineWidth = 3; context.beginPath(); context.moveTo(17 * scale, 0); context.lineTo(-12 * scale, -12 * scale); context.lineTo(-8 * scale, 0); context.lineTo(-12 * scale, 12 * scale); context.closePath(); context.fill(); context.stroke(); context.fillStyle = '#07110f'; context.font = `${Math.max(8, 9 * scale)}px DM Mono`; context.textAlign = 'center'; context.fillText(robot.team === 'red' ? 'R' : 'B', 0, 3 * scale); context.restore();
-      context.fillStyle = '#0b1814'; context.fillRect(x - 20 * scale, y - 25 * scale, 40 * scale, 4 * scale); context.fillStyle = robot.team === 'red' ? '#ff5b4d' : '#54a7ff'; context.fillRect(x - 20 * scale, y - 25 * scale, 40 * scale * robot.hp / 100, 4 * scale); context.fillStyle = '#dfe9e4'; context.font = `${Math.max(8, 9 * scale)}px DM Mono`; context.textAlign = 'center'; context.fillText(robot.name, x, y + 30 * scale);
+      const robot = robotAt(raw, now), x = robot.x * scale, y = robot.y * scale;
+      const color = teamColor(robot.team);
+      context.save(); context.translate(x, y); context.rotate(robot.heading * Math.PI / 180); context.fillStyle = robot.alive ? color : '#34423c'; context.strokeStyle = '#07110f'; context.lineWidth = 3; context.beginPath(); context.moveTo(17 * scale, 0); context.lineTo(-12 * scale, -12 * scale); context.lineTo(-8 * scale, 0); context.lineTo(-12 * scale, 12 * scale); context.closePath(); context.fill(); context.stroke(); context.fillStyle = '#07110f'; context.font = `${Math.max(8, 9 * scale)}px DM Mono`; context.textAlign = 'center'; context.fillText(teamGlyph(robot), 0, 3 * scale); context.restore();
+      context.fillStyle = '#0b1814'; context.fillRect(x - 20 * scale, y - 25 * scale, 40 * scale, 4 * scale); context.fillStyle = color; context.fillRect(x - 20 * scale, y - 25 * scale, 40 * scale * robot.hp / 100, 4 * scale); context.fillStyle = '#dfe9e4'; context.font = `${Math.max(8, 9 * scale)}px DM Mono`; context.textAlign = 'center'; context.fillText(robot.name, x, y + 30 * scale);
     }
     for (const event of target.events ?? []) {
       if (event.type !== 'hit' || !event.damage) continue; const victim = target.robots.find((robot) => robot.robotId === event.targetId); if (!victim) continue;
@@ -58,4 +78,4 @@
   });
   $effect(() => { if (!snapshot || snapshot === target) return; previous = target; target = snapshot; receivedAt = performance.now(); });
 </script>
-<canvas bind:this={canvas} aria-label="Live robot arena. Teams have red R and blue B glyphs; color is not the only identifier."></canvas>
+<canvas bind:this={canvas} aria-label="Live robot arena. Team glyphs and per-team colors distinguish robots; color is not the only identifier."></canvas>

@@ -16,12 +16,13 @@ This is a trusted-reviewer prototype: Docker boxes are not a security boundary f
 - Boxes run with 1 CPU, 512 MB RAM, and 128 PIDs. The supervisor monitors workspace usage and stops the agent above 1 GB while SSH stays available.
 - Every box boots with a working demo robot in `/workspace/main.lua`. The box console (MY BOX) shows the file and can deploy curated variants (aggressive, evasive, sniper, patroller) with one click; SSH editing keeps working.
 - Robot registration snapshots `/workspace/main.lua` to S3, stores the SHA-256-hashed robot token in DynamoDB, configures the box supervisor, and starts the agent. The token never reaches the browser.
-- One active robot per box and one robot per user per match; a box is reusable after its match finishes or fails.
+- One active robot per box and one robot per user per match; a box is reusable after its match finishes or fails. When a lingering binding blocks queueing or registration with "box already has an active robot", the fault banner and the Play page offer EXIT ACTIVE MATCH (`POST /api/me/box/release`): lobby registrations are dropped, running matches are conceded, and stale bindings are cleared.
 - Matches enqueue through SQS, run on the server-authoritative engine, and publish versioned snapshots to browsers. When both teams are registered and every agent is connected, the match queues itself; the owner's START NOW button remains as a manual fallback.
 - A player can withdraw mid-match (`POST /api/matches/{matchID}/withdraw`, WITHDRAW FROM MATCH button in the match view and on the box console). The robot is destroyed at the next tick without crediting a kill, and the match resolves by normal elimination rules. The box console button also releases a box bound to a match that never left the lobby.
 - Matches can use five starter maps, custom arena dimensions, static obstacles, hazards, item spawns, server bots with selectable personalities, weapon rules, optional friendly fire, regen, and ramming, zone collapse, and overtime.
-- Healing, shields, overdrive, rapid fire, repair cores, and weapon drops use deterministic server-side spawning and pickup rules.
+- Healing, shields, overdrive, rapid fire, repair cores, weapon drops, and randomized spawner loot (including rare weapons and occasional supply-drop bursts) use deterministic server-side spawning and pickup rules; weapon hits can crit for 1.5x damage (10% by default, per-match config).
 - Dummy, Rookie, Fighter, and Sharpshooter bots run inside the server. Practice matches can start without a second SSH box.
+- Three lobby modes exist besides the duel queue. `squad` opens with ten bots, five per side, on the Corridors map; registering a robot on a team replaces one of that team's bots, so each side always fields five robots. `solo` is a free-for-all where the player plus 0–7 bots each fight on their own team; with zero bots it is an empty sandbox that runs until the tick limit or the robot dies. Squad and solo matches are unranked practice results. Squad auto-start waits until at least one human per side has joined (the owner can force-start earlier); solo auto-starts when the player's agent connects.
 - The duel queue pairs two players, adds a bot after a configurable wait, cancels matches whose agents miss the connection grace window, and automatically requeues players from cancelled queue matches.
 - Public routes cover Home, Match, Match history, Profile, Leaderboard, Spectate, SDK docs, and API docs. Authenticated routes cover Play, My Box, Settings, Create, and Admin.
 - Finished matches store event replays and per-robot stats. Player wins, losses, damage, and duel ratings update after non-practice results.
@@ -47,6 +48,8 @@ WorkOS dashboard prerequisites (required before sign-in works; the demo client I
 3. On the Authentication, Sessions, Cross-Origin Resource Sharing page, add `http://localhost:3000` as an allowed origin. Without it, WorkOS omits `Access-Control-Allow-Origin` during the browser token exchange. Sign-in then fails with a CORS error, and the UI shows the required setting.
 
 Services: web on `http://localhost:3000`, API on `:8080`, Floci on `:4566`, provisioner on `:8090` (internal only). Box SSH ports start at `22000` and bind to `127.0.0.1`.
+
+Floci runs with `FLOCI_STORAGE_MODE=hybrid`, so matches, scripts, and results survive stack restarts through the `floci-data` volume. On API startup, matches left `running` by a restart are failed and `queued` matches are re-enqueued, so no box stays blocked as "already in a match".
 
 Stop and restart without losing workspaces:
 
