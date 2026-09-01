@@ -114,18 +114,93 @@ export interface RobotState {
   streakName?: string;
   lastAction?: string;
   logs?: string[];
+  dashCharges?: number;
+  mineCharges?: number;
+  scanResult?: ScanReport;
+  events?: ArenaEvent[];
+  messages?: string[];
+}
+
+export interface MineState {
+  mineId: string;
+  ownerId: string;
+  team: ArenaTeam;
+  x: number;
+  y: number;
+  spawnTick: number;
+  armTick: number;
+  active: boolean;
+}
+
+// Declared for protocol v3; the engine keeps turrets empty for now.
+export interface TurretState {
+  turretId: string;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  alive: boolean;
+}
+
+export interface ScannedItem {
+  itemId: string;
+  type: string;
+  x: number;
+  y: number;
+  distance: number;
+}
+
+export interface ScannedRobot {
+  robotId: string;
+  team: ArenaTeam;
+  x: number;
+  y: number;
+  heading: number;
+  hp: number;
+  distance: number;
+  cloaked: boolean;
+}
+
+export interface ScannedMine {
+  mineId: string;
+  x: number;
+  y: number;
+  distance: number;
+  armed: boolean;
+}
+
+export interface ScannedHazard {
+  id: string;
+  type: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  distance: number;
+}
+
+export interface ScanReport {
+  x: number;
+  y: number;
+  radius: number;
+  items: ScannedItem[];
+  enemies: ScannedRobot[];
+  mines: ScannedMine[];
+  hazards: ScannedHazard[];
 }
 
 export interface ArenaEvent {
   type: string;
   robotId?: string;
   targetId?: string;
+  itemId?: string;
   damage?: number;
   value?: number;
   message?: string;
   itemType?: string;
   x?: number;
   y?: number;
+  tick?: number;
 }
 
 export interface ArenaObstacle {
@@ -166,6 +241,7 @@ export interface Projectile {
 
 export interface Snapshot {
   type: 'snapshot';
+  // Protocol version 3: adds mines, turrets (empty for now), dash/scan state.
   version: number;
   matchId: string;
   sequence: number;
@@ -180,6 +256,8 @@ export interface Snapshot {
   mapId?: string;
   obstacles?: ArenaObstacle[];
   items?: ArenaItem[];
+  mines?: MineState[];
+  turrets?: TurretState[];
   announcements?: string[];
   overtime?: boolean;
 }

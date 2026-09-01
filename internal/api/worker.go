@@ -162,9 +162,7 @@ func tailEvents(events []model.MatchEvent, limit int) []model.MatchEvent {
 // regeneration, no ramming damage.
 func engineConfigFor(match model.Match) engine.Config {
 	config := engine.DefaultConfig()
-	if selected, ok := engine.StarterMaps()[match.MapID]; ok {
-		config.Map = selected
-	}
+	config.Map = mapForMatch(match)
 	if match.ArenaWidth > 0 {
 		config.Width = match.ArenaWidth
 	}
@@ -177,6 +175,31 @@ func engineConfigFor(match model.Match) engine.Config {
 	config.RegenDelayTicks = match.RegenDelayTicks
 	config.RammingDamage = match.RammingDamage
 	return config
+}
+
+// mapForMatch resolves the persisted map id: starter maps come from the
+// registry and "random-*" ids generate deterministically from the match seed,
+// so every worker rebuilds an identical arena for the same match. Custom match
+// dims are passed through, which keeps ScaleMap a no-op for generated maps.
+func mapForMatch(match model.Match) engine.MapDefinition {
+	if style, ok := engine.ProceduralMapStyles[match.MapID]; ok {
+		width, height := match.ArenaWidth, match.ArenaHeight
+		if width <= 0 {
+			width = 900
+		}
+		if height <= 0 {
+			height = 600
+		}
+		generated, err := engine.GenerateMap(uint64(match.Seed), style, width, height)
+		if err == nil {
+			return generated
+		}
+		slog.Error("generate procedural map", "mapId", match.MapID, "error", err)
+	}
+	if selected, ok := engine.StarterMaps()[match.MapID]; ok {
+		return selected
+	}
+	return engine.DefaultMap(900, 600)
 }
 
 // botPersonalityFor maps the persisted match setting onto the engine;

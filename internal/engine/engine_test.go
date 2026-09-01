@@ -885,3 +885,418 @@ func TestNewItemsProduceByteStableEventLogs(t *testing.T) {
 		}
 	}
 }
+
+// viewCaptureController records the robot slice the engine hands the
+// controller, so tests can assert per-observer visibility filtering.
+type viewCaptureController struct {
+	fixedController
+	seen [][]RobotState
+}
+
+func (c *viewCaptureController) Tick(ctx context.Context, self RobotState, robots []RobotState) (Intent, error) {
+	c.seen = append(c.seen, robots)
+	return c.fixedController.Tick(ctx, self, robots)
+}
+
+// recordingController records the self state of every tick, so tests can
+// inspect per-tick deliveries like team messages.
+type recordingController struct {
+	fixedController
+	selves []RobotState
+}
+
+func (c *recordingController) Tick(ctx context.Context, self RobotState, robots []RobotState) (Intent, error) {
+	c.selves = append(c.selves, self)
+	return c.fixedController.Tick(ctx, self, robots)
+}
+
+// onceMessageController sends its fixed intent's message on the first tick
+// only, so later ticks can verify the relay clears.
+type onceMessageController struct {
+	recordingController
+	sent bool
+}
+
+func (c *onceMessageController) Tick(ctx context.Context, self RobotState, robots []RobotState) (Intent, error) {
+	intent, err := c.recordingController.Tick(ctx, self, robots)
+	if c.sent {
+		intent.Message = ""
+	}
+	c.sent = true
+	return intent, err
+}
+
+func TestDashConsumesChargeRespectsCooldownAndSlides(t *testing.T) {
+	config := DefaultConfig()
+	config.Width, config.Height = 800, 500
+	config.Map = DefaultMap(800, 500)
+	config.Map.Obstacles = []Obstacle{{ID: "wall", Shape: "aabb", X: 130, Y: 0, Width: 40, Height: 260}}
+	robots := []RobotState{
+		{RobotID: "red-1", Name: "Red", Team: "red", X: 100, Y: 200, Heading: 45, HP: 100, Alive: true, DashCharges: 2},
+		{RobotID: "blue-1", Name: "Blue", Team: "blue", X: 700, Y: 400, HP: 100, Alive: true},
+	}
+	controllers := map[string]Controller{"red-1": &fixedController{intent: Intent{Dash: true}}, "blue-1": &fixedController{}}
+	arena := NewWithConfig("dash", robots, controllers, config)
+	arena.Step(context.Background())
+	red := arenaRobot(arena, "red-1")
+	// A 45-degree dash into the wall slides along it like a normal move: the
+	// blocked X component stays put while the free Y component carries.
+	wantY := 200 + DashDistance*math.Sin(math.Pi/4)
+	if red.X != 100 || math.Abs(red.Y-wantY) > 0.0001 {
+		t.Fatalf("dash should slide along the wall, got x=%v y=%v want x=100 y=%v", red.X, red.Y, wantY)
+	}
+	if red.DashCharges != 1 {
+		t.Fatalf("dash should consume one charge, got %d", red.DashCharges)
+	}
+	arena.Step(context.Background())
+	if red.DashCharges != 1 || math.Abs(red.Y-wantY) > 0.0001 {
+		t.Fatalf("dash must be gated by its cooldown: charges=%d y=%v", red.DashCharges, red.Y)
+	}
+	for arena.TickNumber < DashCooldownTicks {
+		arena.Step(context.Background())
+	}
+	arena.Step(context.Background())
+	if red.DashCharges != 0 {
+		t.Fatalf("dash should fire again after cooldown, charges=%d", red.DashCharges)
+	}
+	dashes := 0
+	for _, event := range arena.EventLog() {
+		if event.Type == "dash" {
+			dashes++
+		}
+	}
+	if dashes != 2 {
+		t.Fatalf("expected two dash events, got %d", dashes)
+	}
+}
+
+func TestMineDeploysArmsExplodesAndExpires(t *testing.T) {
+	config := DefaultConfig()
+	config.CriticalChance = 0
+	robots := []RobotState{
+		{RobotID: "a", Name: "Red", Team: "red", X: 100, Y: 100, HP: 100, Alive: true, MineCharges: 2},
+		{RobotID: "b", Name: "Blue", Team: "blue", X: 500, Y: 500, HP: 100, Alive: true},
+	}
+	controllers := map[string]Controller{"a": &fixedController{intent: Intent{Deploy: "mine"}}, "b": &fixedController{}}
+	arena := NewWithConfig("mines", robots, controllers, config)
+	snapshot := arena.Step(context.Background())
+	if !hasEvent(snapshot.Events, "mine_deployed") || len(arena.Mines) != 1 {
+		t.Fatalf("deploy should place one mine: events=%+v mines=%+v", snapshot.Events, arena.Mines)
+	}
+	mine := arena.Mines[0]
+	if mine.OwnerID != "a" || mine.Team != "red" || !mine.Active || mine.ArmTick != mine.SpawnTick+MineArmTicks {
+		t.Fatalf("bad mine state: %+v", mine)
+	}
+	if arenaRobot(arena, "a").MineCharges != 1 {
+		t.Fatalf("deploy should consume one charge, got %d", arenaRobot(arena, "a").MineCharges)
+	}
+	// Standing on an unarmed mine is safe.
+	arenaRobot(arena, "b").X, arenaRobot(arena, "b").Y = 118, 100
+	arenaRobot(arena, "a").X, arenaRobot(arena, "a").Y = 300, 300
+	arena.TickNumber = mine.SpawnTick + MineArmTicks - 1
+	if events := arena.advanceMines(); len(events) != 0 || len(arena.Mines) != 1 {
+		t.Fatalf("unarmed mine must not trigger: events=%+v mines=%+v", events, arena.Mines)
+	}
+	// Once armed, the enemy inside the trigger radius detonates it.
+	arena.TickNumber = mine.SpawnTick + MineArmTicks
+	events := arena.advanceMines()
+	if !hasEvent(events, "mine_exploded") || len(arena.Mines) != 0 {
+		t.Fatalf("armed mine should explode and be removed: events=%+v mines=%+v", events, arena.Mines)
+	}
+	if arenaRobot(arena, "b").HP != 50 || arenaRobot(arena, "a").HP != 100 {
+		t.Fatalf("blast should hit the enemy for 50 and spare the owner: a=%d b=%d", arenaRobot(arena, "a").HP, arenaRobot(arena, "b").HP)
+	}
+	for _, event := range events {
+		if event.Type == "mine_exploded" && (event.RobotID != "a" || event.TargetID != "b" || event.Value != MineDamage || event.X != 100 || event.Y != 100) {
+			t.Fatalf("bad mine_exploded event: %+v", event)
+		}
+	}
+	// A mine nobody steps on expires after its lifetime.
+	arena.Mines = append(arena.Mines, MineState{MineID: "mine-a-2", OwnerID: "a", Team: "red", X: 400, Y: 250, SpawnTick: mine.SpawnTick, ArmTick: mine.SpawnTick + MineArmTicks, Active: true})
+	arena.TickNumber = mine.SpawnTick + MineLifetimeTicks
+	events = arena.advanceMines()
+	if len(events) != 1 || events[0].Type != "mine_expired" || events[0].RobotID != "a" || len(arena.Mines) != 0 {
+		t.Fatalf("stale mine should expire silently: events=%+v mines=%+v", events, arena.Mines)
+	}
+}
+
+func TestMineBlastHonorsFriendlyFireRules(t *testing.T) {
+	for _, friendlyFire := range []bool{false, true} {
+		config := DefaultConfig()
+		config.CriticalChance = 0
+		config.FriendlyFire = friendlyFire
+		robots := []RobotState{
+			{RobotID: "enemy", Name: "Enemy", Team: "blue", X: 500, Y: 500, HP: 100, Alive: true},
+			{RobotID: "mate", Name: "Mate", Team: "red", X: 600, Y: 500, HP: 100, Alive: true},
+			{RobotID: "owner", Name: "Owner", Team: "red", X: 100, Y: 100, HP: 100, Alive: true, MineCharges: 1},
+		}
+		controllers := map[string]Controller{"owner": &fixedController{intent: Intent{Deploy: "mine"}}, "mate": &fixedController{}, "enemy": &fixedController{}}
+		arena := NewWithConfig("mine-ff", robots, controllers, config)
+		arena.Step(context.Background())
+		mine := arena.Mines[0]
+		arenaRobot(arena, "enemy").X, arenaRobot(arena, "enemy").Y = 118, 100
+		arenaRobot(arena, "mate").X, arenaRobot(arena, "mate").Y = 160, 100
+		arenaRobot(arena, "owner").X, arenaRobot(arena, "owner").Y = 300, 300
+		arena.TickNumber = mine.ArmTick
+		arena.advanceMines()
+		if arenaRobot(arena, "enemy").HP != 50 {
+			t.Fatalf("enemy should take 50 blast damage, got %d", arenaRobot(arena, "enemy").HP)
+		}
+		if arenaRobot(arena, "owner").HP != 100 {
+			t.Fatalf("owner must never take mine damage, got %d", arenaRobot(arena, "owner").HP)
+		}
+		want := 100
+		if friendlyFire {
+			want = 50
+		}
+		if arenaRobot(arena, "mate").HP != want {
+			t.Fatalf("teammate HP with friendlyFire=%v: got %d want %d", friendlyFire, arenaRobot(arena, "mate").HP, want)
+		}
+	}
+}
+
+func TestMineCapRefusesWhenFull(t *testing.T) {
+	arena := New("mine-cap", []RobotState{{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true, MineCharges: 3}}, map[string]Controller{"a": &fixedController{intent: Intent{Deploy: "mine"}}})
+	for i := range MaxMines {
+		arena.Mines = append(arena.Mines, MineState{MineID: "mine-fill-" + itoa(i), OwnerID: "a", Team: "red", X: 700, Y: 450, SpawnTick: 0, ArmTick: MineArmTicks, Active: true})
+	}
+	snapshot := arena.Step(context.Background())
+	if hasEvent(snapshot.Events, "mine_deployed") {
+		t.Fatal("deploy must be refused when the arena mine cap is reached")
+	}
+	if arenaRobot(arena, "a").MineCharges != 3 || len(arena.Mines) != MaxMines {
+		t.Fatalf("refused deploy must keep charges and mines untouched: charges=%d mines=%d", arenaRobot(arena, "a").MineCharges, len(arena.Mines))
+	}
+}
+
+func TestScanReportContentsSortingAndCooldown(t *testing.T) {
+	m := DefaultMap(800, 500)
+	m.Hazards = []Hazard{
+		{ID: "lava", Type: "damage", X: 150, Y: 150, Width: 100, Height: 50, Damage: 1},
+		{ID: "acid", Type: "damage", X: 600, Y: 400, Width: 50, Height: 50, Damage: 1},
+	}
+	config := DefaultConfig()
+	config.Map, config.Width, config.Height = m, 800, 500
+	config.CriticalChance = 0
+	robots := []RobotState{
+		{RobotID: "alpha", Name: "Alpha", Team: "blue", X: 200, Y: 250, HP: 90, Alive: true},
+		{RobotID: "far", Name: "Far", Team: "blue", X: 700, Y: 100, HP: 100, Alive: true},
+		{RobotID: "mate", Name: "Mate", Team: "red", X: 210, Y: 210, HP: 100, Alive: true},
+		{RobotID: "scan", Name: "Scan", Team: "red", X: 200, Y: 200, HP: 100, Alive: true},
+		{RobotID: "zeta", Name: "Zeta", Team: "blue", X: 240, Y: 200, HP: 80, Alive: true},
+	}
+	arena := NewWithConfig("scan", robots, map[string]Controller{}, config)
+	arena.Items = []Item{
+		{ItemID: "item-a", Type: "shield", X: 200, Y: 260, Active: true},
+		{ItemID: "item-b", Type: "heal", X: 220, Y: 200, Active: true},
+		{ItemID: "item-c", Type: "heal", X: 250, Y: 200, Active: false},
+	}
+	arena.Mines = []MineState{
+		{MineID: "mine-1", OwnerID: "alpha", Team: "blue", X: 190, Y: 190, SpawnTick: 0, ArmTick: 100, Active: true},
+		{MineID: "mine-2", OwnerID: "zeta", Team: "blue", X: 230, Y: 230, SpawnTick: 0, ArmTick: 30, Active: true},
+	}
+	scanEvents := 0
+	scanAt := func(tick int, req ScanRequest) *ScanReport {
+		arena.TickNumber = tick
+		events := arena.applyScans(map[string]Intent{"scan": {Scan: &req}})
+		scanEvents += len(events)
+		return arenaRobot(arena, "scan").ScanResult
+	}
+	report := scanAt(50, ScanRequest{X: 200, Y: 200, Radius: 100})
+	if report.X != 200 || report.Y != 200 || report.Radius != 100 {
+		t.Fatalf("scan report should echo the request: %+v", report)
+	}
+	if len(report.Items) != 2 || report.Items[0].ItemID != "item-a" || report.Items[1].ItemID != "item-b" {
+		t.Fatalf("items must list active ones sorted by ID: %+v", report.Items)
+	}
+	if len(report.Enemies) != 2 || report.Enemies[0].RobotID != "alpha" || report.Enemies[1].RobotID != "zeta" {
+		t.Fatalf("enemies must list living foes sorted by ID: %+v", report.Enemies)
+	}
+	if len(report.Mines) != 2 || report.Mines[0].MineID != "mine-1" || report.Mines[0].Armed || !report.Mines[1].Armed {
+		t.Fatalf("mines must be sorted with correct armed flags: %+v", report.Mines)
+	}
+	if len(report.Hazards) != 1 || report.Hazards[0].ID != "lava" || report.Hazards[0].Width != 100 {
+		t.Fatalf("hazards must use rect centers inside the radius: %+v", report.Hazards)
+	}
+	// On cooldown: ignored silently, the previous report stays.
+	before := arenaRobot(arena, "scan").ScanResult
+	if again := scanAt(50, ScanRequest{X: 200, Y: 200, Radius: 100}); again != before {
+		t.Fatal("scan on cooldown must be ignored and keep the last report")
+	}
+	// Cloaked enemies stay hidden without radar.
+	upsertEffect(arenaRobot(arena, "zeta"), "cloak", 90, 1, "")
+	report = scanAt(110, ScanRequest{X: 200, Y: 200, Radius: 100})
+	if len(report.Enemies) != 1 || report.Enemies[0].RobotID != "alpha" {
+		t.Fatalf("cloaked enemy must be excluded without radar: %+v", report.Enemies)
+	}
+	// Radar reveals cloaked enemies with the flag set.
+	upsertEffect(arenaRobot(arena, "scan"), "radar", 150, 1, "")
+	report = scanAt(170, ScanRequest{X: 200, Y: 200, Radius: 100})
+	if len(report.Enemies) != 2 || report.Enemies[1].RobotID != "zeta" || !report.Enemies[1].Cloaked || report.Enemies[0].Cloaked {
+		t.Fatalf("radar must reveal the cloaked enemy: %+v", report.Enemies)
+	}
+	// Radius clamps to [40, 400].
+	report = scanAt(230, ScanRequest{X: 200, Y: 200, Radius: 9999})
+	if report.Radius != MaxScanRadius {
+		t.Fatalf("oversized radius must clamp to 400, got %v", report.Radius)
+	}
+	report = scanAt(290, ScanRequest{X: 200, Y: 200, Radius: 5})
+	if report.Radius != MinScanRadius || len(report.Enemies) != 1 || report.Enemies[0].RobotID != "zeta" || len(report.Items) != 1 || report.Items[0].ItemID != "item-b" {
+		t.Fatalf("tiny radius must clamp to 40 and shrink the report: %+v", report)
+	}
+	if scanEvents != 5 {
+		t.Fatalf("expected five scan_performed events, got %d", scanEvents)
+	}
+}
+
+func TestCloakedEnemiesHiddenFromPerRobotViewsAndBots(t *testing.T) {
+	robots := []RobotState{
+		{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true},
+		{RobotID: "b", Team: "blue", X: 200, Y: 100, HP: 100, Alive: true},
+		{RobotID: "c", Team: "red", X: 100, Y: 200, HP: 100, Alive: true},
+		{RobotID: "d", Team: "blue", X: 200, Y: 200, HP: 100, Alive: true},
+	}
+	controllers := map[string]Controller{"a": &viewCaptureController{}, "b": &fixedController{}, "c": &fixedController{}, "d": &fixedController{}}
+	arena := New("cloak-views", robots, controllers)
+	upsertEffect(arenaRobot(arena, "b"), "cloak", 90, 1, "")
+	upsertEffect(arenaRobot(arena, "c"), "cloak", 90, 1, "")
+	ids := func(view []RobotState) map[string]bool {
+		out := map[string]bool{}
+		for _, r := range view {
+			out[r.RobotID] = true
+		}
+		return out
+	}
+	if view := ids(arena.visibleRobots(*arenaRobot(arena, "a"))); view["b"] || !view["c"] || !view["d"] {
+		t.Fatalf("cloaked enemy hidden but teammates visible: %v", view)
+	}
+	if view := ids(arena.visibleRobots(*arenaRobot(arena, "d"))); view["c"] || !view["a"] {
+		t.Fatalf("cloaked enemy hidden from enemy observers too: %v", view)
+	}
+	upsertEffect(arenaRobot(arena, "a"), "radar", 150, 1, "")
+	if view := ids(arena.visibleRobots(*arenaRobot(arena, "a"))); !view["b"] {
+		t.Fatalf("radar must reveal the cloaked enemy: %v", view)
+	}
+	// Controller Tick receives the filtered view through the engine loop; the
+	// radar from the direct-view checks must be gone first.
+	arenaRobot(arena, "a").Effects = nil
+	capture := &viewCaptureController{}
+	arena.controllers["a"] = capture
+	arena.Step(context.Background())
+	if view := ids(capture.seen[len(capture.seen)-1]); view["b"] || !view["c"] {
+		t.Fatalf("controller view must filter cloaked enemies: %v", view)
+	}
+	upsertEffect(arenaRobot(arena, "a"), "radar", 150, 1, "")
+	arena.Step(context.Background())
+	if view := ids(capture.seen[len(capture.seen)-1]); !view["b"] {
+		t.Fatalf("radar holder must see the cloaked enemy in its view: %v", view)
+	}
+	// Bots carry no radar and must ignore cloaked enemies.
+	bot := NewBotController("bot-1", BotSharpshooter, PersonalityAggressive, DefaultMap(800, 500))
+	self := RobotState{RobotID: "bot-1", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma"}
+	enemy := RobotState{RobotID: "enemy", Team: "blue", X: 300, Y: 100, Alive: true}
+	upsertEffect(&enemy, "cloak", 90, 1, "")
+	intent, err := bot.Tick(context.Background(), self, []RobotState{self, enemy})
+	if err != nil || intent.Fire || intent.TargetX != nil {
+		t.Fatalf("bot must not target a cloaked enemy: %+v %v", intent, err)
+	}
+}
+
+func TestTeamMessagesRelayToTeammatesAndClear(t *testing.T) {
+	robots := []RobotState{
+		{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true},
+		{RobotID: "b", Team: "blue", X: 400, Y: 400, HP: 100, Alive: true},
+		{RobotID: "c", Team: "red", X: 160, Y: 100, HP: 100, Alive: true},
+	}
+	sender := &onceMessageController{recordingController: recordingController{fixedController: fixedController{intent: Intent{Message: "  push mid  "}}}}
+	enemy := &recordingController{}
+	receiver := &recordingController{}
+	arena := New("relay", robots, map[string]Controller{"a": sender, "b": enemy, "c": receiver})
+	arena.Step(context.Background())
+	if len(receiver.selves[0].Messages) != 0 {
+		t.Fatalf("messages must not arrive in the sending tick: %+v", receiver.selves[0].Messages)
+	}
+	arena.Step(context.Background())
+	if len(receiver.selves[1].Messages) != 1 || receiver.selves[1].Messages[0] != "push mid" {
+		t.Fatalf("teammate should receive the trimmed message: %+v", receiver.selves[1].Messages)
+	}
+	if len(sender.selves[1].Messages) != 0 || len(enemy.selves[1].Messages) != 0 {
+		t.Fatalf("senders and enemies must not receive the message: %v %v", sender.selves[1].Messages, enemy.selves[1].Messages)
+	}
+	arena.Step(context.Background())
+	if len(receiver.selves[2].Messages) != 0 {
+		t.Fatalf("messages must clear once delivered: %+v", receiver.selves[2].Messages)
+	}
+}
+
+func TestTeamMessageDeliveryCapsAtFivePerRobot(t *testing.T) {
+	robots := []RobotState{{RobotID: "e", Team: "blue", HP: 100, Alive: true}}
+	for _, id := range []string{"r", "s1", "s2", "s3", "s4", "s5", "s6"} {
+		robots = append(robots, RobotState{RobotID: id, Team: "red", HP: 100, Alive: true})
+	}
+	controllers := map[string]Controller{}
+	for _, r := range robots {
+		controllers[r.RobotID] = &fixedController{}
+	}
+	arena := New("relay-cap", robots, controllers)
+	arena.TeamMessages = map[string][]string{"s1": {"m1"}, "s2": {"m2"}, "s3": {"m3"}, "s4": {"m4"}, "s5": {"m5"}, "s6": {"m6"}}
+	arena.deliverTeamMessages()
+	receiver := arenaRobot(arena, "r")
+	if len(receiver.Messages) != MaxTeamMessages {
+		t.Fatalf("delivery must cap at %d messages, got %d", MaxTeamMessages, len(receiver.Messages))
+	}
+	if receiver.Messages[0] != "m1" || receiver.Messages[4] != "m5" {
+		t.Fatalf("delivery must follow roster order of senders: %v", receiver.Messages)
+	}
+	if len(arenaRobot(arena, "e").Messages) != 0 {
+		t.Fatal("other teams must not receive red's messages")
+	}
+}
+
+func TestProtocolV3FeaturesProduceByteStableEventLogs(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxTicks = 40
+	config.OvertimeTicks = 0
+	config.CriticalChance = 0
+	robots := []RobotState{
+		{RobotID: "a", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, DashCharges: 2, MineCharges: 3},
+		{RobotID: "b", Team: "red", X: 300, Y: 100, HP: 100, Alive: true, MineCharges: 1},
+		{RobotID: "c", Team: "blue", X: 700, Y: 250, Heading: 180, HP: 100, Alive: true},
+	}
+	controllers := map[string]Controller{
+		"a": &fixedController{intent: Intent{Move: 8, Dash: true, Deploy: "mine", Message: "push mid", Scan: &ScanRequest{X: 150, Y: 100, Radius: 120}}},
+		"b": &fixedController{intent: Intent{Message: "  covering  "}},
+		"c": &fixedController{intent: Intent{Move: 8, Fire: true}},
+	}
+	run := func() []byte {
+		arena := NewWithConfig("v3-stable", robots, controllers, config)
+		// A pre-placed armed mine sits on c's westward path: walking over it
+		// mid-match exercises the proximity trigger and blast damage.
+		arena.Mines = append(arena.Mines, MineState{MineID: "mine-pre", OwnerID: "a", Team: "red", X: 400, Y: 250, SpawnTick: 0, ArmTick: 20, Active: true})
+		for !arena.Finished() {
+			arena.Step(context.Background())
+		}
+		encoded, err := json.Marshal(arena.EventLog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	first := run()
+	if second := run(); !reflect.DeepEqual(first, second) {
+		t.Fatalf("protocol v3 event logs differ across same-seed runs:\n%s\n%s", first, second)
+	}
+	var events []Event
+	if err := json.Unmarshal(first, &events); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, event := range events {
+		seen[event.Type] = true
+	}
+	for _, kind := range []string{"dash", "mine_deployed", "mine_exploded", "scan_performed"} {
+		if !seen[kind] {
+			t.Fatalf("expected %s events in the v3 match log", kind)
+		}
+	}
+}
