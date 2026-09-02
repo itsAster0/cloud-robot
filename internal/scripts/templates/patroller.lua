@@ -1,10 +1,11 @@
 local arena = require "arena"
 
--- Sentry: walks a randomized corner loop sized from the actual arena, detours
--- for nearby items, and engages anything inside its vision range with clear
--- line of sight. Outside of fights it keeps patrolling rather than firing at
--- ghosts. Patrol direction is chosen once per run from the seeded robot ID
--- RNG.
+-- Sentry: a disciplined route walker with radio procedure. It walks a
+-- deliberate corner loop sized from the arena, sweeps a scan at every
+-- checkpoint, investigates disturbances near the route, and reports each
+-- step over the team channel in its flattest military voice. Contact inside
+-- the vision range with clear line of sight is engaged; everything else is
+-- paperwork. Randomness is seeded from the robot ID.
 
 local seed = 0
 local robot_id = os.getenv("ROBOT_ID") or "sentry"
@@ -21,7 +22,11 @@ local ITEM_SCORE = {
   weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30,
 }
 
-local state = { index = 1, last_x = nil, last_y = nil, stuck = 0, escape = 0, escape_turn = 0 }
+local state = {
+  index = 1, swept = false, swept_at = nil, engaged = nil,
+  last_x = nil, last_y = nil, stuck = 0, escape = 0, escape_turn = 0,
+  radio_at = 0, search = nil, search_until = 0, search_reported = false, hp = nil,
+}
 -- Half the sentries walk the loop the other way.
 local direction = math.random() < 0.5 and 1 or -1
 
@@ -56,7 +61,7 @@ end
 
 -- Aims where the enemy will be; damped because enemies rarely hold a line.
 local function lead_target(obs, enemy)
-  local speed = PROJECTILE_SPEED[obs.self.weapon] or 14
+  local speed = PROJECTILE_SPEED[obs.self.weapon or "plasma"] or 14
   if speed <= 0 then return enemy.x, enemy.y end
   local flight = math.min(arena.distance(obs.self, enemy) / speed, 8)
   local radians = enemy.heading * math.pi / 180
@@ -72,7 +77,7 @@ local function item_score(obs, item)
   end
   if item.type == "nano_repair" and self.hp >= self.maxHp then return 0 end
   if item.type == "shield" and self.shield >= 50 then return 0 end
-  if self.weapon ~= "" and item.type == "weapon_" .. self.weapon then return 0 end
+  if item.type == "weapon_" .. (self.weapon or "plasma") then return 0 end
   return base
 end
 
@@ -107,19 +112,38 @@ local function patrol_route(obs)
   return waypoints
 end
 
--- Waypoints outside the collapsing zone are skipped until one is inside.
-local function next_waypoint(obs)
+-- The current post: advance only past waypoints the collapsing zone has
+-- eaten, so the loop is actually walked instead of averaged.
+local function current_waypoint(obs)
   local route = patrol_route(obs)
   local zone = obs.zone
+  local waypoint = route[state.index]
+  if not zone or not zone.active then return waypoint end
   for _ = 1, #route do
+    if arena.distance(waypoint, zone) < zone.radius - 30 then return waypoint end
     state.index = ((state.index - 1 + direction) % #route) + 1
-    local waypoint = route[state.index]
-    if not zone or not zone.active or arena.distance(waypoint, zone) < zone.radius - 30 then
-      return waypoint
-    end
+    waypoint = route[state.index]
   end
-  zone = zone or { x = obs.arenaWidth / 2, y = obs.arenaHeight / 2 }
   return { x = zone.x, y = zone.y }
+end
+
+-- Radio discipline: every report is logged for telemetry, and relayed over
+-- the team channel when someone is listening and the channel is not clogged.
+local function transmit(obs, spec, text)
+  spec.logs = { "radio: " .. text }
+  if obs.tick >= state.radio_at then
+    state.radio_at = obs.tick + 25
+    if #arena.teammates(obs) > 0 then return arena.send_message(text, spec) end
+  end
+  return arena.action(spec)
+end
+
+-- Health dropping between ticks means we are taking fire from somewhere.
+local function took_damage(obs)
+  local self = obs.self
+  local damaged = state.hp and self.hp < state.hp - 1
+  state.hp = self.hp
+  return damaged
 end
 
 local function zone_safe(obs)
@@ -130,6 +154,7 @@ end
 
 local function decide(observation)
   local self = observation.self
+  local damaged = took_damage(observation)
 
   if not zone_safe(observation) then
     local held = unstick(observation, { moving = true })
@@ -150,6 +175,15 @@ local function decide(observation)
     end
   end
   if enemy and visible and enemy_distance < 220 then
+    -- First tick of an engagement goes out over the radio.
+    if state.engaged ~= enemy.robotId then
+      state.engaged = enemy.robotId
+      local turn = ((arena.bearing(self, enemy) - self.heading + 540) % 360) - 180
+      local held = unstick(observation, { moving = true })
+      if held then return held end
+      local spec = { move = 7, turn = turn, fire = true, target_x = enemy.x, target_y = enemy.y }
+      return transmit(observation, spec, "contact " .. enemy.name .. ". engaging.")
+    end
     if enemy_distance > 45 then
       local held = unstick(observation, { moving = true })
       if held then return held end
@@ -160,6 +194,31 @@ local function decide(observation)
     if held then return held end
     return arena.action({ move = 5, turn = 10, fire = true, target_x = x, target_y = y, logs = { "engaging " .. enemy.name } })
   end
+  state.engaged = nil
+
+  -- Disturbance handling: incoming fire or a sweep contact opens a search of
+  -- the sector. After the search, the route resumes on its own.
+  if state.search then
+    if observation.tick > state.search_until or arena.distance(self, state.search) < 30 then
+      state.search = nil
+      state.search_reported = false
+      local waypoint = current_waypoint(observation)
+      local turn = ((arena.bearing(self, waypoint) - self.heading + 540) % 360) - 180
+      local held = unstick(observation, { moving = true })
+      if held then return held end
+      return transmit(observation, { move = 6, turn = turn }, "sector searched. resuming patrol.")
+    end
+    local held = unstick(observation, { moving = true })
+    if held then return held end
+    local turn = ((arena.bearing(self, state.search) - self.heading + 540) % 360) - 180
+    local text = state.search_reported and "searching the sector." or "taking fire. searching the sector."
+    state.search_reported = true
+    return transmit(observation, { move = 6, turn = turn }, text)
+  end
+  if damaged then
+    state.search = arena.random_safe_point(observation, self.x, self.y, 110, 8)
+    state.search_until = observation.tick + 140
+  end
 
   -- Items close to the route are worth a small detour.
   local item = best_item(observation, 150)
@@ -169,10 +228,36 @@ local function decide(observation)
     return navigate(observation, item.x, item.y, 6, "detour for " .. item.type)
   end
 
-  local waypoint = next_waypoint(observation)
+  -- Checkpoint procedure: on arrival, one sweep before the loop advances.
+  local waypoint = current_waypoint(observation)
   if arena.distance(self, waypoint) < 40 then
-    waypoint = next_waypoint(observation)
+    if not state.swept then
+      state.swept = true
+      state.swept_at = observation.tick
+      local held = unstick(observation, { moving = true })
+      if held then return held end
+      return arena.scan(waypoint.x, waypoint.y, 240, { move = 3,
+        logs = { "radio: checkpoint " .. state.index .. " of " .. #patrol_route(observation) .. ". sweeping sector." } })
+    end
+    state.index = ((state.index - 1 + direction) % #patrol_route(observation)) + 1
+    state.swept = false
+    waypoint = current_waypoint(observation)
+    local turn = ((arena.bearing(self, waypoint) - self.heading + 540) % 360) - 180
+    local held = unstick(observation, { moving = true })
+    if held then return held end
+    return transmit(observation, { move = 5, turn = turn }, "checkpoint secure. advancing to checkpoint " .. state.index .. ".")
   end
+
+  -- A fresh sweep that painted contacts off-route becomes an investigation.
+  local report = observation.scanResult
+  if report and state.swept_at and observation.tick > state.swept_at and observation.tick - state.swept_at <= 60 then
+    for _, contact in ipairs(report.enemies or {}) do
+      state.search = { x = contact.x, y = contact.y }
+      state.search_until = observation.tick + 120
+      break
+    end
+  end
+
   local held = unstick(observation, { moving = true })
   if held then return held end
   return navigate(observation, waypoint.x, waypoint.y, 5, "patrolling")

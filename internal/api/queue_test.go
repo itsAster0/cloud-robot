@@ -239,3 +239,77 @@ func TestRequeueSkipsBoxRegisteredInAnotherLiveMatch(t *testing.T) {
 		t.Fatalf("live match binding must be preserved: %+v", store.boxes["alice"])
 	}
 }
+
+// A queue entry must not outlive its match. The web client auto-redirects a
+// "matched" player from /play to the entry's match, so an entry left behind
+// after the match started bounces the player back to the finished match page
+// forever — the stuck-after-duel bug.
+func TestEnforceConnectGraceClearsEntriesAfterMatchStarts(t *testing.T) {
+	app, store := newQueueServer(t)
+	t.Setenv("QUEUE_CONNECT_GRACE_SECONDS", "1")
+	match := seedQueuedPair(t, app, store)
+	match.Status = model.MatchRunning
+	if err := store.PutMatch(context.Background(), match); err != nil {
+		t.Fatal(err)
+	}
+
+	app.enforceConnectGrace("qm1", []string{"alice", "bob"})
+
+	if app.queue.entries["alice"] != nil || app.queue.entries["bob"] != nil {
+		t.Fatalf("started match left queue entries behind: %+v", app.queue.entries)
+	}
+	if store.matches["qm1"].Status != model.MatchRunning {
+		t.Fatalf("grace timer must not touch a started match: %+v", store.matches["qm1"])
+	}
+}
+
+// The worker owns the normal start path, so it must drop the queue entries
+// when the match flips from queued to running.
+func TestRunMatchClearsQueueEntries(t *testing.T) {
+	app, store := newQueueServer(t)
+	match := seedQueuedPair(t, app, store)
+	// Swap the humans for dummy bots so the worker can simulate the duel
+	// without agent connections; the queue entries still bind to the match.
+	match.Status = model.MatchQueued
+	match.TickRate = 2000
+	for i := range match.Robots {
+		match.Robots[i].Bot = true
+		match.Robots[i].StartCommand = "bot:dummy"
+		match.Robots[i].PlayerID = ""
+		match.Robots[i].OwnerBoxID = ""
+	}
+	if err := store.PutMatch(context.Background(), match); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.runMatch(context.Background(), "qm1"); err != nil {
+		t.Fatalf("run match failed: %v", err)
+	}
+
+	if app.queue.entries["alice"] != nil || app.queue.entries["bob"] != nil {
+		t.Fatalf("match start left queue entries behind: %+v", app.queue.entries)
+	}
+	if store.matches["qm1"].Status != model.MatchFinished {
+		t.Fatalf("match did not finish: %+v", store.matches["qm1"])
+	}
+}
+
+// A cancelled match rebuilds fresh entries pointing at a new match id; the
+// grace timer of the old match must leave those alone.
+func TestGraceCleanupSkipsRepairedEntries(t *testing.T) {
+	app, store := newQueueServer(t)
+	seedQueuedPair(t, app, store)
+	// Alice and Bob were requeued into a different match after a cancel.
+	app.queue.entries["alice"].MatchID = "qm2"
+	app.queue.entries["bob"].MatchID = "qm2"
+
+	app.clearQueueEntriesForMatch("qm1")
+
+	if app.queue.entries["alice"] == nil || app.queue.entries["bob"] == nil {
+		t.Fatalf("re-paired entries were dropped: %+v", app.queue.entries)
+	}
+	app.clearQueueEntriesForMatch("qm2")
+	if app.queue.entries["alice"] != nil || app.queue.entries["bob"] != nil {
+		t.Fatalf("entries for the cleared match survived: %+v", app.queue.entries)
+	}
+}

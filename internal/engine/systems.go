@@ -253,6 +253,7 @@ func (a *Arena) addItem(kind string, x, y float64, source string) {
 	a.nextItem++
 	x, y = a.safeDrop(x, y)
 	a.Items = append(a.Items, Item{ItemID: "item-" + itoa(a.nextItem), Type: kind, X: x, Y: y, SpawnTick: a.TickNumber, Active: true, PickupRadius: a.Config.Items.PickupRadius, Source: source, Rarity: itemRarity(kind)})
+	a.itemsOrdered = false
 }
 func (a *Arena) dropItem(kind string, x, y float64) { a.addItem(kind, x, y, "drop") }
 
@@ -293,7 +294,7 @@ func (a *Arena) safeDrop(x, y float64) (float64, float64) {
 }
 func (a *Arena) pickupItems() []Event {
 	events := []Event{}
-	sort.SliceStable(a.Items, func(i, j int) bool { return a.Items[i].ItemID < a.Items[j].ItemID })
+	a.ensureItemOrder()
 	for i := range a.Items {
 		item := &a.Items[i]
 		if !item.Active {
@@ -326,6 +327,14 @@ func (a *Arena) pickupItems() []Event {
 		}
 	}
 	return events
+}
+
+func (a *Arena) ensureItemOrder() {
+	if a.itemsOrdered {
+		return
+	}
+	sort.SliceStable(a.Items, func(i, j int) bool { return a.Items[i].ItemID < a.Items[j].ItemID })
+	a.itemsOrdered = true
 }
 func acceptsItem(in Intent, kind string) bool {
 	if in.AutoPickup != nil && !*in.AutoPickup {

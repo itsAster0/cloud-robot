@@ -164,6 +164,7 @@ fieldset { border: 0; padding: 0; margin: 0 0 28px; }
 .match-result strong { font: 600 13px 'DM Mono'; }
 .match-result.finished { border-color: var(--acid); }
 .match-result.finished strong { color: var(--acid); }
+.queue-again { width: 100%; margin-top: 9px; }
 .live { color: var(--acid) !important; }
 .editor-panel, .arena-panel, .telemetry-panel { margin: 26px 0 26px 26px; border: 1px solid var(--line); min-height: 650px; background: rgba(8, 20, 16, .94); }
 .telemetry-panel { margin-right: 26px; }
@@ -217,6 +218,7 @@ textarea { width: 100%; height: 100%; resize: none; border: 0; outline: 0; paddi
 .hz-mine { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 9px solid #ff5b4d; }
 .hz-turret { width: 9px; height: 9px; background: #41504a; border: 1px solid #5c6f66; }
 .hz-zone { width: 10px; height: 10px; border: 1px dashed rgba(255, 91, 77, .8); border-radius: 50%; }
+.hz-vision { width: 10px; height: 10px; border: 1px dashed rgba(139, 155, 148, .9); border-radius: 50%; }
 .stats-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
 .stats-strip > div { padding: 16px; border-right: 1px solid var(--line); }
 .stats-strip span, .stats-strip i { display: block; color: var(--muted); font: normal 9px 'DM Mono'; }

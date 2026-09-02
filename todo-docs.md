@@ -118,7 +118,7 @@ Server-side AI robots let one player demo, test scripts, and fill rosters. The s
   - *Rookie*: random walk + fire when enemy in line of sight.
   - *Fighter*: seek enemy, aim with lead prediction, retreat when low HP, seek health packs.
   - *Sharpshooter*: adds strafing, cover usage, item denial (takes items before the player can).
-- [x] **P1** Bot personalities: aggressive / evasive / camper presets that tune the same controller knobs, selectable per match (`botPersonality`).
+- [x] **P1** Bot personalities: aggressive / evasive / camper presets that tune the same controller knobs, selectable per match (`botPersonality`). `mixed` derives a stable per-bot persona from each robot's ID, first contact opens a persona-specific reaction (charge / re-range / plant-and-aim), and wander bursts plus random patrol legs stop loop-stuck movement.
 - [ ] **P1** Bots use maps properly: obstacle-aware movement (simple A* or potential fields on the grid; no physics-heavy pathfinding).
 - [ ] **P1** Match creation can add bots before humans register. Adding bots to an existing lobby remains.
 - [x] **P1** Solo practice mode: player + N bots, no result recorded (or recorded as `practice`).

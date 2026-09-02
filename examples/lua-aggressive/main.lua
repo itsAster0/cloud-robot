@@ -1,15 +1,12 @@
--- Example robot: aggressive brawler. Mirrors internal/scripts/templates/aggressive.lua.
--- Vision: enemies, items, projectiles, and mines beyond the vision range
--- (default 320 units) never appear in observations; this robot fires only at
--- targets it can fully see. The rare `scope` pickup doubles vision for 150 ticks.
 local arena = require "arena"
 
--- Brawler: hunts the nearest enemy it can see, leads shots based on their
--- heading, detours for heals when hurt, and strafes unpredictably in close
--- range. Firing is gated on full sight: inside the vision range with clear
--- line of sight. When nothing is in sight it sweeps loot, then pushes toward
--- the map center instead of roaming blind. Randomness is seeded from the
--- robot ID so two boxes behave differently without wall-clock time.
+-- Brawler: a relentless hunter. It remembers where prey was last seen and
+-- keeps pushing that point after contact breaks, feeds heading-based drift
+-- into the SDK aim predictor for lead shots, and spends dash charges to run
+-- down wounded enemies. Kills are announced on the team channel; the first
+-- kill of the match gets its own line. Firing is gated on full sight: inside
+-- the vision range with clear line of sight. Randomness is seeded from the
+-- robot ID so two boxes hunt differently without wall-clock time.
 
 local seed = 0
 local robot_id = os.getenv("ROBOT_ID") or "brawler"
@@ -26,8 +23,13 @@ local ITEM_SCORE = {
   weapon_railgun = 100, weapon_cannon = 80, weapon_incendiary = 55,
   weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30,
 }
+local TAUNTS = { "too slow.", "stay down.", "that all you have?", "next.", "keep running." }
+local FIRST_BLOOD = "first blood. it will not be the last."
 
-local state = { strafe = 1, flip_at = 0, last_x = nil, last_y = nil, stuck = 0, escape = 0, escape_turn = 0, wander = nil }
+local state = {
+  strafe = 1, flip_at = 0, last_x = nil, last_y = nil, stuck = 0, escape = 0, escape_turn = 0,
+  wander = nil, kills = 0, taunt = nil, known = nil, known_at = 0,
+}
 
 local function has_effect(self, name)
   for _, effect in ipairs(self.effects or {}) do
@@ -80,7 +82,7 @@ local function item_score(obs, item)
   end
   if item.type == "nano_repair" and self.hp >= self.maxHp then return 0 end
   if item.type == "shield" and self.shield >= 50 then return 0 end
-  if self.weapon ~= "" and item.type == "weapon_" .. self.weapon then return 0 end
+  if item.type == "weapon_" .. (self.weapon or "plasma") then return 0 end
   return base
 end
 
@@ -102,8 +104,7 @@ local function best_item(obs, max_distance)
 end
 
 -- Prefers enemies we can actually see: inside the vision range with clear
--- line of sight. Falls back to the nearest known enemy so the brawler still
--- has a direction when everyone is hidden, but it never fires at one.
+-- line of sight. Enemies behind cover are still worth chasing down.
 local function pick_enemy(obs)
   local seen, unseen, seen_distance, unseen_distance
   for _, robot in ipairs(obs.robots or {}) do
@@ -119,14 +120,24 @@ local function pick_enemy(obs)
   return seen or unseen, seen_distance or unseen_distance, seen ~= nil
 end
 
--- Aims where the enemy will be: heading * speed * flight time, damped 30%
--- because enemies rarely hold a straight line.
-local function lead_target(obs, enemy)
-  local speed = PROJECTILE_SPEED[obs.self.weapon] or 14
+-- Aims where the enemy will be: heading-based drift damped 30% and fed
+-- through the SDK lead helper, because prey rarely holds a straight line.
+local function lead_point(obs, enemy)
+  local speed = PROJECTILE_SPEED[obs.self.weapon or "plasma"] or 14
   if speed <= 0 then return enemy.x, enemy.y end
-  local flight = math.min(arena.distance(obs.self, enemy) / speed, 8)
   local radians = enemy.heading * math.pi / 180
-  return enemy.x + math.cos(radians) * flight * 8 * 0.7, enemy.y + math.sin(radians) * flight * 8 * 0.7
+  local lead = arena.aim_predict(obs.self, enemy, speed, math.cos(radians) * 5.6, math.sin(radians) * 5.6)
+  return lead.x, lead.y
+end
+
+-- The kill counter on self is the kill feed: a rising count means something
+-- died to us this tick. Queue the next taunt; the first kill of the match
+-- gets its own line.
+local function check_kills(obs)
+  local kills = obs.self.kills or 0
+  if kills <= state.kills then return end
+  state.taunt = state.kills == 0 and FIRST_BLOOD or TAUNTS[(kills % #TAUNTS) + 1]
+  state.kills = kills
 end
 
 local function zone_safe(obs)
@@ -137,6 +148,7 @@ end
 
 local function decide(observation)
   local self = observation.self
+  check_kills(observation)
 
   -- Zone collapse outranks everything; standing outside is free damage.
   if not zone_safe(observation) then
@@ -146,6 +158,10 @@ local function decide(observation)
   end
 
   local enemy, distance, visible = pick_enemy(observation)
+  if enemy and visible then
+    state.known = { x = enemy.x, y = enemy.y }
+    state.known_at = observation.tick
+  end
 
   -- Detour for heals when genuinely hurt and no enemy is breathing on us.
   if self.hp < self.maxHp * 0.45 and (not enemy or not visible or distance > 60) then
@@ -160,6 +176,17 @@ local function decide(observation)
 
   if enemy then
     local hold
+    -- Wounded prey inside dash range: burn a charge and finish it.
+    if visible and distance > 45 and distance < 240 and (self.dashCharges or 0) > 0
+      and (enemy.hp or 0) < (enemy.maxHp or 1) * 0.6 then
+      local x, y = lead_point(observation, enemy)
+      local turn = ((arena.bearing(self, enemy) - self.heading + 540) % 360) - 180
+      local taunt = state.taunt
+      state.taunt = nil
+      local spec = { move = 8, turn = turn, fire = true, target_x = x, target_y = y, logs = { taunt or ("running down " .. enemy.name) } }
+      if taunt then return arena.send_message(taunt, spec) end
+      return arena.dash(spec)
+    end
     if distance > 30 and visible then
       hold = unstick(observation, { moving = true })
       if hold then return hold end
@@ -172,13 +199,37 @@ local function decide(observation)
       state.strafe = math.random() < 0.5 and 1 or -1
       state.flip_at = observation.tick + 20 + math.random(30)
     end
-    local x, y = lead_target(observation, enemy)
+    -- Point blank: the SDK strafe orbits and fires down the current heading,
+    -- so the shot only goes out when the barrel is roughly on target.
+    if distance < 55 then
+      local error_turn = ((arena.bearing(self, enemy) - self.heading + 540) % 360) - 180
+      if math.abs(error_turn) < 25 then
+        return arena.strafe(observation, enemy, state.strafe)
+      end
+      hold = unstick(observation, { moving = true })
+      if hold then return hold end
+      return arena.action({ move = 6, turn = error_turn, logs = { "circling " .. enemy.name } })
+    end
+    local x, y = lead_point(observation, enemy)
     hold = unstick(observation, { moving = true })
     if hold then return hold end
-    return arena.action({ move = 6, turn = 14 * state.strafe, fire = visible, target_x = x, target_y = y, logs = { "brawling " .. enemy.name } })
+    local taunt = state.taunt
+    state.taunt = nil
+    local spec = { move = 6, turn = 14 * state.strafe, fire = visible, target_x = x, target_y = y, logs = { taunt or ("brawling " .. enemy.name) } }
+    if taunt then return arena.send_message(taunt, spec) end
+    return arena.action(spec)
   end
 
-  -- No enemy in sight: sweep up items, then push toward the middle of the map
+  -- Prey broke sight: push the position it was really seen at before giving
+  -- up and going back to the sweep.
+  if state.known and observation.tick - state.known_at < 240 and arena.distance(self, state.known) > 50 then
+    local held = unstick(observation, { moving = true })
+    if held then return held end
+    return navigate(observation, state.known.x, state.known.y, 7, "pushing last known position")
+  end
+  state.known = nil
+
+  -- No prey, no trail: sweep up items, then push toward the middle of the map
   -- where fights happen. Overdrive pushes the pace.
   local item = best_item(observation)
   if item then

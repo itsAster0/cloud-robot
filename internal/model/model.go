@@ -110,7 +110,8 @@ type Match struct {
 	RegenPerTick    int  `json:"regenPerTick,omitempty"`
 	RegenDelayTicks int  `json:"regenDelayTicks,omitempty"`
 	RammingDamage   bool `json:"rammingDamage,omitempty"`
-	// BotPersonality selects server-bot behavior: aggressive, evasive, or camper.
+	// BotPersonality selects server-bot behavior: aggressive, evasive, camper,
+	// or mixed (mixed derives a stable persona per bot from its robot ID).
 	BotPersonality  string            `json:"botPersonality,omitempty"`
 	Robots          []RobotSubmission `json:"robots"`
 	WinnerTeam      string            `json:"winnerTeam,omitempty"`

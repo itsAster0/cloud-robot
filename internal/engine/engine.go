@@ -308,6 +308,7 @@ type Arena struct {
 	events        []Event
 	pairRam       map[string]int
 	pickupPrefs   map[string]Intent
+	itemsOrdered  bool
 	// TeamMessages queues chat lines keyed by sender robot ID; they flush to
 	// the sender's teammates at the start of the next tick.
 	TeamMessages map[string][]string
@@ -411,13 +412,14 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 		a.Robots[i].VisionRange = clamp(a.Config.VisionRange*visionMult(a.Robots[i]), 60, 1000)
 	}
 	before := cloneRobots(a.Robots)
-	intents := map[string]Intent{}
+	intents := make(map[string]Intent, len(before))
 	type decision struct {
+		active bool
 		index  int
 		intent Intent
 		err    error
 	}
-	ch := make(chan decision, len(before))
+	ordered := make([]decision, len(before))
 	var wg sync.WaitGroup
 	for i := range before {
 		if !before[i].Alive {
@@ -425,7 +427,7 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 		}
 		c := a.controllers[before[i].RobotID]
 		if c == nil {
-			ch <- decision{i, Intent{}, errors.New("controller missing")}
+			ordered[i] = decision{active: true, index: i, err: errors.New("controller missing")}
 			continue
 		}
 		if aware, ok := c.(WorldAwareController); ok {
@@ -436,17 +438,14 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 		go func(n int, c Controller, view []RobotState) {
 			defer wg.Done()
 			v, e := c.Tick(ctx, before[n], view)
-			ch <- decision{n, v, e}
+			ordered[n] = decision{active: true, index: n, intent: v, err: e}
 		}(i, c, view)
 	}
 	wg.Wait()
-	close(ch)
-	ordered := make([]decision, 0, len(before))
-	for d := range ch {
-		ordered = append(ordered, d)
-	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].index < ordered[j].index })
 	for _, d := range ordered {
+		if !d.active {
+			continue
+		}
 		r := &a.Robots[d.index]
 		if d.err != nil {
 			r.Alive, r.Failed, r.HP = false, true, 0
@@ -926,6 +925,7 @@ func (a *Arena) buildScanReport(r RobotState, req ScanRequest) *ScanReport {
 // SNAPSHOTS INTENTIONALLY STAY FULL-VISIBILITY — only controller/agent views
 // are filtered here.
 func (a *Arena) worldFor(observer RobotState) WorldState {
+	a.ensureItemOrder()
 	within := func(x, y float64) bool {
 		dx, dy := x-observer.X, y-observer.Y
 		return dx*dx+dy*dy <= observer.VisionRange*observer.VisionRange
@@ -936,9 +936,8 @@ func (a *Arena) worldFor(observer RobotState) WorldState {
 			items = append(items, item)
 		}
 	}
-	// Item IDs are sorted so agent payloads stay byte-stable; projectiles and
-	// mines keep engine slice order.
-	sort.Slice(items, func(i, j int) bool { return items[i].ItemID < items[j].ItemID })
+	// Filtering preserves the arena's stable item order. Projectiles and mines
+	// keep engine slice order as before.
 	projectiles := []Projectile{}
 	for _, p := range a.Projectiles {
 		if within(p.X, p.Y) {
@@ -951,7 +950,7 @@ func (a *Arena) worldFor(observer RobotState) WorldState {
 			mines = append(mines, mine)
 		}
 	}
-	return WorldState{Tick: a.TickNumber, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Items: items, Projectiles: projectiles, Mines: mines, Hazards: append([]Hazard(nil), a.Config.Map.Hazards...), Zone: a.zoneState(), Overtime: a.overtime(), VisionRange: observer.VisionRange}
+	return WorldState{Tick: a.TickNumber, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Obstacles: a.Config.Map.Obstacles, Items: items, Projectiles: projectiles, Mines: mines, Hazards: a.Config.Map.Hazards, Zone: a.zoneState(), Overtime: a.overtime(), VisionRange: observer.VisionRange}
 }
 
 // visibleRobots is the per-robot view handed to controllers: teammates and the
@@ -1227,7 +1226,7 @@ func (a *Arena) snapshot(e []Event) Snapshot {
 	if !a.finished && a.Config.PowerSurgeEveryTicks > 0 && a.TickNumber > 1 && (a.TickNumber-1)%a.Config.PowerSurgeEveryTicks == 0 {
 		ann = append(ann, "POWER SURGE")
 	}
-	return Snapshot{Type: "snapshot", Version: 3, MatchID: a.MatchID, Sequence: a.TickNumber, Tick: a.TickNumber, Status: status, WinnerTeam: a.winner, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Robots: cloneRobots(a.Robots), Projectiles: append([]Projectile(nil), a.Projectiles...), Items: append([]Item(nil), a.Items...), Mines: append([]MineState(nil), a.Mines...), Turrets: append([]TurretState(nil), a.Turrets...), Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Events: e, Zone: zone, Announcements: ann, Overtime: a.overtime()}
+	return Snapshot{Type: "snapshot", Version: 3, MatchID: a.MatchID, Sequence: a.TickNumber, Tick: a.TickNumber, Status: status, WinnerTeam: a.winner, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Robots: cloneRobots(a.Robots), Projectiles: append([]Projectile(nil), a.Projectiles...), Items: append([]Item(nil), a.Items...), Mines: append([]MineState(nil), a.Mines...), Turrets: append([]TurretState(nil), a.Turrets...), Obstacles: a.Config.Map.Obstacles, Events: e, Zone: zone, Announcements: ann, Overtime: a.overtime()}
 }
 func (a *Arena) event(e Event) Event { e.Tick = a.TickNumber; return e }
 func (a *Arena) robot(id string) *RobotState {

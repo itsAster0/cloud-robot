@@ -1297,6 +1297,20 @@ func TestCreateMatchDefaultsKeepStockBehavior(t *testing.T) {
 	}
 }
 
+func TestCreateMatchAcceptsMixedBotPersonality(t *testing.T) {
+	h := newHarness(t)
+	response, payload := h.request(t, http.MethodPost, "/api/matches", `{"botPersonality":"mixed"}`)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("mixed personality rejected: %d %v", response.StatusCode, payload)
+	}
+	if payload["botPersonality"] != "mixed" {
+		t.Fatalf("mixed personality missing from response: %v", payload)
+	}
+	if stored := onlyStoredMatch(t, h.store); stored.BotPersonality != "mixed" {
+		t.Fatalf("mixed personality not persisted: %+v", stored)
+	}
+}
+
 func TestCreateMatchRejectsInvalidCombatOptions(t *testing.T) {
 	for _, body := range []string{
 		`{"regenPerTick":-1}`,
@@ -1337,6 +1351,9 @@ func TestWorkerCopiesMatchOptionsIntoEngineConfig(t *testing.T) {
 	}
 	if botPersonalityFor(model.Match{BotPersonality: "camper"}) != engine.PersonalityCamper {
 		t.Fatal("camper personality not mapped")
+	}
+	if botPersonalityFor(model.Match{BotPersonality: "mixed"}) != engine.PersonalityMixed {
+		t.Fatal("mixed personality not mapped")
 	}
 	random := engineConfigFor(model.Match{MapID: "random-maze", ArenaWidth: 1200, ArenaHeight: 700, Seed: 4242})
 	again := engineConfigFor(model.Match{MapID: "random-maze", ArenaWidth: 1200, ArenaHeight: 700, Seed: 4242})
@@ -1551,21 +1568,23 @@ func TestSoloWithoutBotsStartsSingleTeamSandbox(t *testing.T) {
 	}
 }
 
-func TestViewerEventSendsArenaLayoutOnce(t *testing.T) {
-	snapshot := engine.Snapshot{Type: "snapshot", Obstacles: []engine.Obstacle{{ID: "wall", Shape: "rect", Width: 40, Height: 20}}}
-	first, sent := viewerEvent(snapshot, false)
-	firstSnapshot, ok := first.(engine.Snapshot)
-	if !ok || !sent || len(firstSnapshot.Obstacles) != 1 {
-		t.Fatalf("first snapshot must include layout: %#v, sent=%v", first, sent)
+func TestHubSeparatesArenaLayoutFromSnapshot(t *testing.T) {
+	hub := NewHub()
+	channel, unsubscribe := hub.Subscribe("m1")
+	defer unsubscribe()
+	hub.Publish("m1", engine.Snapshot{Type: "snapshot", MatchID: "m1", MapID: "map-1", Width: 800, Height: 500, Obstacles: []engine.Obstacle{{ID: "wall", Shape: "rect", Width: 40, Height: 20}}})
+	message := <-channel
+	if !bytes.Contains(message.layout, []byte(`"type":"arena_layout"`)) || !bytes.Contains(message.layout, []byte(`"id":"wall"`)) {
+		t.Fatalf("layout payload missing geometry: %s", message.layout)
 	}
-	second, sent := viewerEvent(snapshot, true)
-	secondSnapshot, ok := second.(engine.Snapshot)
-	if !ok || !sent || secondSnapshot.Obstacles != nil {
-		t.Fatalf("later snapshot must omit layout: %#v, sent=%v", second, sent)
+	if bytes.Contains(message.payload, []byte(`"obstacles"`)) || !bytes.Contains(message.payload, []byte(`"type":"snapshot"`)) {
+		t.Fatalf("dynamic snapshot contains layout or is malformed: %s", message.payload)
 	}
-	status, sent := viewerEvent(map[string]any{"type": "agent_status"}, true)
-	if !sent || status.(map[string]any)["type"] != "agent_status" {
-		t.Fatalf("non-snapshot event changed: %#v, sent=%v", status, sent)
+
+	hub.Publish("m1", map[string]any{"type": "agent_status"})
+	status := <-channel
+	if !bytes.Contains(status.payload, []byte(`"type":"agent_status"`)) || len(status.layout) == 0 {
+		t.Fatalf("cached layout was not retained with later events: payload=%s layout=%s", status.payload, status.layout)
 	}
 }
 
@@ -1573,8 +1592,8 @@ func TestHubReleasesEmptySubscriptionsAndForgottenEvents(t *testing.T) {
 	hub := NewHub()
 	channel, unsubscribe := hub.Subscribe("m1")
 	hub.Publish("m1", "snapshot")
-	if got := <-channel; got != "snapshot" {
-		t.Fatalf("subscriber received %v, want snapshot", got)
+	if got := <-channel; string(got.payload) != `"snapshot"` {
+		t.Fatalf("subscriber received %s, want snapshot", got.payload)
 	}
 	unsubscribe()
 	if counts := hub.ViewerCounts(); len(counts) != 0 {
@@ -1586,7 +1605,7 @@ func TestHubReleasesEmptySubscriptionsAndForgottenEvents(t *testing.T) {
 	defer lateUnsubscribe()
 	select {
 	case event := <-late:
-		t.Fatalf("forgotten event was retained: %v", event)
+		t.Fatalf("forgotten event was retained: %s", event.payload)
 	default:
 	}
 }

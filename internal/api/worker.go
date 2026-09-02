@@ -75,6 +75,10 @@ func (s *Server) runMatch(ctx context.Context, matchID string) error {
 	if err := s.store.PutMatch(ctx, match); err != nil {
 		return err
 	}
+	// The queue hands ownership off at start. Entries cleared here stop
+	// /api/queue from reporting "matched" after the match ends, which would
+	// bounce the player between /play and the finished match page.
+	s.clearQueueEntriesForMatch(matchID)
 	s.hub.Publish(matchID, map[string]any{"type": "match_state", "version": 1, "match": match})
 
 	robots := make([]engine.RobotState, 0, len(match.Robots))
@@ -222,14 +226,17 @@ func mapForMatch(match model.Match) engine.MapDefinition {
 	return engine.DefaultMap(900, 600)
 }
 
-// botPersonalityFor maps the persisted match setting onto the engine;
-// unknown or empty values fall back to aggressive.
+// botPersonalityFor maps the persisted match setting onto the engine.
+// Mixed keeps flowing through: NewBotController resolves it per bot from the
+// robot ID. Unknown or empty values fall back to aggressive.
 func botPersonalityFor(match model.Match) engine.BotPersonality {
 	switch match.BotPersonality {
 	case "evasive":
 		return engine.PersonalityEvasive
 	case "camper":
 		return engine.PersonalityCamper
+	case "mixed":
+		return engine.PersonalityMixed
 	default:
 		return engine.PersonalityAggressive
 	}

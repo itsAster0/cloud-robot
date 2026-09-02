@@ -2,10 +2,11 @@ local websocket = require "http.websocket"
 local cqueues = require "cqueues"
 local json = require "dkjson"
 
-local arena = { VERSION = "0.3.1" }
+local arena = { VERSION = "0.3.2" }
 local pickup_config = { auto_pickup = true, pickup_types = {} }
 local latest_observation
 local zone_history
+local cached_layout = { match_id = nil, obstacles = {}, hazards = {} }
 
 local function clamp(value, low, high)
   return math.max(low, math.min(high, value))
@@ -519,9 +520,25 @@ function arena.run(config)
         local observation, _, decode_error = json.decode(payload)
         assert(observation, decode_error)
         if observation.type == "observation" then
+          if cached_layout.match_id ~= observation.matchId then
+            cached_layout = { match_id = observation.matchId, obstacles = {}, hazards = {} }
+          end
+          if observation.obstacles ~= nil then cached_layout.obstacles = observation.obstacles end
+          if observation.hazards ~= nil then cached_layout.hazards = observation.hazards end
+          observation.obstacles = cached_layout.obstacles
+          observation.hazards = cached_layout.hazards
           latest_observation = observation
           local started = os.clock()
-          local action = config.decide(observation) or arena.action()
+          -- A player script bug must not masquerade as a lost WebSocket or
+          -- immediately kill the robot. Keep the connection alive, submit a
+          -- safe no-op, and expose the Lua error through normal telemetry.
+          local decided, action_or_error = pcall(config.decide, observation)
+          local action
+          if decided then
+            action = action_or_error or arena.action()
+          else
+            action = arena.action({ logs = { "script error: " .. tostring(action_or_error) } })
+          end
           action.type = "action"
           action.requestId = observation.requestId
           action.computeMs = (os.clock() - started) * 1000
