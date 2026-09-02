@@ -1,8 +1,10 @@
 local arena = require "arena"
 
 -- Sentry: walks a randomized corner loop sized from the actual arena, detours
--- for nearby items, and engages anything it can see. Patrol direction is
--- chosen once per run from the seeded robot ID RNG.
+-- for nearby items, and engages anything inside its vision range with clear
+-- line of sight. Outside of fights it keeps patrolling rather than firing at
+-- ghosts. Patrol direction is chosen once per run from the seeded robot ID
+-- RNG.
 
 local seed = 0
 local robot_id = os.getenv("ROBOT_ID") or "sentry"
@@ -13,7 +15,8 @@ math.randomseed(seed)
 
 local PROJECTILE_SPEED = { plasma = 24, cannon = 14, machine_gun = 32, incendiary = 20, cryo = 20, emp = 18, railgun = 0 }
 local ITEM_SCORE = {
-  heal = 90, ["repair-core"] = 60, shield = 70, overdrive = 65, rapid_fire = 65,
+  heal = 90, medkit = 85, ["repair-core"] = 60, nano_repair = 65, scope = 60,
+  shield = 70, overdrive = 65, rapid_fire = 65,
   weapon_railgun = 100, weapon_cannon = 80, weapon_incendiary = 55,
   weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30,
 }
@@ -63,10 +66,11 @@ end
 local function item_score(obs, item)
   local self, base = obs.self, ITEM_SCORE[item.type]
   if not base then return 0 end
-  if item.type == "heal" or item.type == "repair-core" then
+  if item.type == "heal" or item.type == "repair-core" or item.type == "medkit" then
     if obs.overtime or self.hp >= self.maxHp then return 0 end
     if self.hp < self.maxHp * 0.5 then base = base * 2 end
   end
+  if item.type == "nano_repair" and self.hp >= self.maxHp then return 0 end
   if item.type == "shield" and self.shield >= 50 then return 0 end
   if self.weapon ~= "" and item.type == "weapon_" .. self.weapon then return 0 end
   return base
@@ -133,14 +137,15 @@ local function decide(observation)
     return navigate(observation, observation.zone.x, observation.zone.y, 7, "returning to zone")
   end
 
-  -- Engage the nearest visible enemy; ignore distant ghosts.
+  -- Engage the nearest enemy we can actually see: inside the vision range
+  -- with clear line of sight. Distant or covered robots are ignored.
   local enemy, enemy_distance, visible
   for _, robot in ipairs(observation.robots or {}) do
     if robot.alive and robot.team ~= self.team then
       local distance = arena.distance(self, robot)
       if not enemy_distance or distance < enemy_distance then
         enemy, enemy_distance = robot, distance
-        visible = arena.line_of_sight(self.x, self.y, robot.x, robot.y, observation.obstacles)
+        visible = arena.can_see(observation, robot)
       end
     end
   end

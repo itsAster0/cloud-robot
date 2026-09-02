@@ -1365,7 +1365,7 @@ func TestCreateMatchAcceptsProceduralMapIDs(t *testing.T) {
 		if stored.MapID != mapID {
 			t.Fatalf("map id not stored as given: %+v", stored)
 		}
-		if stored.ArenaWidth != 900 || stored.ArenaHeight != 600 {
+		if stored.ArenaWidth != 1200 || stored.ArenaHeight != 750 {
 			t.Fatalf("procedural map defaults wrong: %+v", stored)
 		}
 	}
@@ -1548,5 +1548,45 @@ func TestSoloWithoutBotsStartsSingleTeamSandbox(t *testing.T) {
 	}
 	if h.store.matches[matchID].Status != model.MatchQueued {
 		t.Fatalf("sandbox not queued: %+v", h.store.matches[matchID])
+	}
+}
+
+func TestViewerEventSendsArenaLayoutOnce(t *testing.T) {
+	snapshot := engine.Snapshot{Type: "snapshot", Obstacles: []engine.Obstacle{{ID: "wall", Shape: "rect", Width: 40, Height: 20}}}
+	first, sent := viewerEvent(snapshot, false)
+	firstSnapshot, ok := first.(engine.Snapshot)
+	if !ok || !sent || len(firstSnapshot.Obstacles) != 1 {
+		t.Fatalf("first snapshot must include layout: %#v, sent=%v", first, sent)
+	}
+	second, sent := viewerEvent(snapshot, true)
+	secondSnapshot, ok := second.(engine.Snapshot)
+	if !ok || !sent || secondSnapshot.Obstacles != nil {
+		t.Fatalf("later snapshot must omit layout: %#v, sent=%v", second, sent)
+	}
+	status, sent := viewerEvent(map[string]any{"type": "agent_status"}, true)
+	if !sent || status.(map[string]any)["type"] != "agent_status" {
+		t.Fatalf("non-snapshot event changed: %#v, sent=%v", status, sent)
+	}
+}
+
+func TestHubReleasesEmptySubscriptionsAndForgottenEvents(t *testing.T) {
+	hub := NewHub()
+	channel, unsubscribe := hub.Subscribe("m1")
+	hub.Publish("m1", "snapshot")
+	if got := <-channel; got != "snapshot" {
+		t.Fatalf("subscriber received %v, want snapshot", got)
+	}
+	unsubscribe()
+	if counts := hub.ViewerCounts(); len(counts) != 0 {
+		t.Fatalf("empty subscriber map retained: %#v", counts)
+	}
+
+	hub.Forget("m1")
+	late, lateUnsubscribe := hub.Subscribe("m1")
+	defer lateUnsubscribe()
+	select {
+	case event := <-late:
+		t.Fatalf("forgotten event was retained: %v", event)
+	default:
 	}
 }

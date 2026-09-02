@@ -142,6 +142,17 @@ export interface TurretState {
   alive: boolean;
 }
 
+// Mirrors engine ZoneState; stage arrives once the backend adds staged
+// collapse (1..3, where 3 marks the final zone).
+export interface ZoneState {
+  active: boolean;
+  x: number;
+  y: number;
+  radius: number;
+  damage: number;
+  stage?: number;
+}
+
 export interface ScannedItem {
   itemId: string;
   type: string;
@@ -258,6 +269,7 @@ export interface Snapshot {
   items?: ArenaItem[];
   mines?: MineState[];
   turrets?: TurretState[];
+  zone?: ZoneState;
   announcements?: string[];
   overtime?: boolean;
 }

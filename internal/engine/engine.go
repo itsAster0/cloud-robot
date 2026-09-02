@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	ArenaWidth       = 800.0
-	ArenaHeight      = 500.0
+	ArenaWidth       = 1200.0
+	ArenaHeight      = 750.0
 	RobotRadius      = 14.0
 	MaxMovePerTick   = 8.0
 	MaxTurnPerTick   = 18.0
@@ -42,6 +42,10 @@ const (
 	MaxRecentEvents   = 8
 	MaxTeamMessages   = 5
 	MaxMessageBytes   = 128
+	// DefaultVisionRange is the base radius (units) at which a robot perceives
+	// items, projectiles, mines, and living enemies in its controller view.
+	// Optics/radar effects multiply it; the result clamps to [60, 1000].
+	DefaultVisionRange = 320.0
 )
 
 type RobotState struct {
@@ -82,6 +86,9 @@ type RobotState struct {
 	LastDamageTick int            `json:"lastDamageTick,omitempty"`
 	LastAction     string         `json:"lastAction,omitempty"`
 	Logs           []string       `json:"logs,omitempty"`
+	// VisionRange is the per-tick perception radius backing WorldState
+	// filtering; zero means unlimited for direct helper callers.
+	VisionRange float64 `json:"visionRange,omitempty"`
 }
 type Intent struct {
 	Move        float64
@@ -106,16 +113,20 @@ type Controller interface {
 	Close()
 }
 type WorldState struct {
-	Tick      int
-	MapID     string
-	Width     float64
-	Height    float64
-	Obstacles []Obstacle
-	Items     []Item
-	Mines     []MineState
-	Hazards   []Hazard
-	Zone      *ZoneState
-	Overtime  bool
+	Tick        int
+	MapID       string
+	Width       float64
+	Height      float64
+	Obstacles   []Obstacle
+	Items       []Item
+	Projectiles []Projectile
+	Mines       []MineState
+	Hazards     []Hazard
+	Zone        *ZoneState
+	Overtime    bool
+	// VisionRange echoes the observer's perception radius so controllers can
+	// reason about what the filter already removed.
+	VisionRange float64
 }
 type WorldAwareController interface{ SetWorld(WorldState) }
 type Event struct {
@@ -168,15 +179,28 @@ type MineState struct {
 	Active    bool    `json:"active"`
 }
 
-// TurretState is declared for protocol v3 compatibility; turret logic lands
-// in a later wave, so snapshots keep this field nil.
+// TurretRadius is the hit radius robot projectiles use when checking turret
+// hits; turrets themselves are not movement obstacles (robots drive through
+// them) to keep demos free of permanent traffic jams.
+const TurretRadius = 16.0
+
+// TurretProjectileSpeed mirrors the turret firing profile baked into maps.
+const TurretProjectileSpeed = 20.0
+
+// TurretState is the shared snapshot/agent view of one neutral map turret.
+// Range/Damage/CooldownTicks/NextFireTick are runtime-only (json "-"): the
+// browser renders position, HP, and alive state.
 type TurretState struct {
-	TurretID string  `json:"turretId"`
-	X        float64 `json:"x"`
-	Y        float64 `json:"y"`
-	HP       int     `json:"hp"`
-	MaxHP    int     `json:"maxHp"`
-	Alive    bool    `json:"alive"`
+	TurretID      string  `json:"turretId"`
+	X             float64 `json:"x"`
+	Y             float64 `json:"y"`
+	HP            int     `json:"hp"`
+	MaxHP         int     `json:"maxHp"`
+	Alive         bool    `json:"alive"`
+	Range         float64 `json:"-"`
+	Damage        int     `json:"-"`
+	CooldownTicks int     `json:"-"`
+	NextFireTick  int     `json:"-"`
 }
 
 // ScanRequest is the agent intent payload for an area scan centered on X/Y.
@@ -266,6 +290,7 @@ type Arena struct {
 	Projectiles []Projectile
 	Items       []Item
 	Mines       []MineState
+	Turrets     []TurretState
 	Config      Config
 	// singleTeam is set when the roster fielded exactly one team (solo lobby
 	// without bots). Such matches must not end at tick 0 through the
@@ -320,7 +345,13 @@ func NewWithConfig(id string, robots []RobotState, controllers map[string]Contro
 	if len(distinct) == 1 {
 		singleTeam = rs[0].Team
 	}
-	return &Arena{MatchID: id, Robots: rs, controllers: controllers, withdrawals: make(chan string, 8), MaxTicks: c.MaxTicks, Config: c, singleTeam: singleTeam, rng: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), pairRam: map[string]int{}, pickupPrefs: map[string]Intent{}, TeamMessages: map[string][]string{}}
+	// Turrets mirror the map's TurretSpec list with live runtime state; the
+	// json-"-" fields carry the firing profile so no second lookup is needed.
+	var turrets []TurretState
+	for _, spec := range c.Map.Turrets {
+		turrets = append(turrets, TurretState{TurretID: spec.TurretID, X: spec.X, Y: spec.Y, HP: spec.HP, MaxHP: spec.HP, Alive: true, Range: spec.Range, Damage: spec.Damage, CooldownTicks: spec.CooldownTicks})
+	}
+	return &Arena{MatchID: id, Robots: rs, controllers: controllers, withdrawals: make(chan string, 8), MaxTicks: c.MaxTicks, Config: c, singleTeam: singleTeam, rng: rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15)), pairRam: map[string]int{}, pickupPrefs: map[string]Intent{}, TeamMessages: map[string][]string{}, Turrets: turrets}
 }
 func (a *Arena) Close() {
 	for _, c := range a.controllers {
@@ -374,6 +405,11 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 	events := []Event{}
 	a.applyWithdrawals(&events)
 	a.deliverTeamMessages()
+	// Vision is recomputed before decisions so controllers see both their own
+	// range and a consistently filtered world this tick.
+	for i := range a.Robots {
+		a.Robots[i].VisionRange = clamp(a.Config.VisionRange*visionMult(a.Robots[i]), 60, 1000)
+	}
 	before := cloneRobots(a.Robots)
 	intents := map[string]Intent{}
 	type decision struct {
@@ -393,7 +429,7 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 			continue
 		}
 		if aware, ok := c.(WorldAwareController); ok {
-			aware.SetWorld(WorldState{Tick: a.TickNumber, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Items: append([]Item(nil), a.Items...), Mines: append([]MineState(nil), a.Mines...), Hazards: append([]Hazard(nil), a.Config.Map.Hazards...), Zone: a.zoneState(), Overtime: a.overtime()})
+			aware.SetWorld(a.worldFor(before[i]))
 		}
 		view := a.visibleRobots(before[i])
 		wg.Add(1)
@@ -490,6 +526,7 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 		events = append(events, a.resolveRamming(before)...)
 	}
 	events = append(events, a.advanceMines()...)
+	events = append(events, a.advanceTurrets()...)
 	events = append(events, a.advanceProjectiles()...)
 	for i := range a.Robots {
 		r := &a.Robots[i]
@@ -500,6 +537,7 @@ func (a *Arena) Step(ctx context.Context) Snapshot {
 	}
 	events = append(events, a.applyDeploys(intents)...)
 	events = append(events, a.applyScans(intents)...)
+	events = append(events, a.powerSurge()...)
 	events = append(events, a.spawnItems()...)
 	events = append(events, a.pickupItems()...)
 	events = append(events, a.applyZone()...)
@@ -600,6 +638,27 @@ func (a *Arena) advanceProjectiles() []Event {
 			}
 			hit = true
 			break
+		}
+		// Robots can shoot neutral turrets (turret projectiles skip this:
+		// their owners are "turret-*", never robots). Any robot can damage a
+		// turret regardless of team or friendly-fire settings; destroying one
+		// drops a shield as the reward.
+		if !hit && !strings.HasPrefix(p.OwnerID, "turret-") {
+			for i := range a.Turrets {
+				turret := &a.Turrets[i]
+				if !turret.Alive || distancePointSegment(turret.X, turret.Y, ox, oy, p.X, p.Y) > TurretRadius {
+					continue
+				}
+				turret.HP -= p.Damage
+				e = append(e, a.event(Event{Type: "turret_damaged", RobotID: p.OwnerID, TargetID: turret.TurretID, Damage: p.Damage}))
+				if turret.HP <= 0 {
+					turret.Alive = false
+					e = append(e, a.event(Event{Type: "turret_destroyed", RobotID: p.OwnerID, TargetID: turret.TurretID, X: turret.X, Y: turret.Y}))
+					a.dropItem("shield", turret.X, turret.Y)
+				}
+				hit = true
+				break
+			}
 		}
 		if !hit {
 			active = append(active, p)
@@ -704,6 +763,51 @@ func (a *Arena) explodeMine(mine *MineState, victim *RobotState) []Event {
 		events = append(events, a.damage(owner, r, MineDamage, Weapon{})...)
 	}
 	return events
+}
+
+// advanceTurrets lets neutral map turrets engage. Turrets run after mines and
+// before projectiles so their shots travel the same tick they are fired. Each
+// turret scans the roster in slice order and engages the first living robot
+// that is visible (cloak hides), inside Range, and has line of sight; the
+// cooldown stamp is set only on an actual shot, so an idle turret fires the
+// moment a valid target appears. Turrets attack every team and hold position
+// forever — they are scenery with a grudge, not participants.
+func (a *Arena) advanceTurrets() []Event {
+	events := []Event{}
+	for i := range a.Turrets {
+		turret := &a.Turrets[i]
+		if !turret.Alive || a.TickNumber < turret.NextFireTick {
+			continue
+		}
+		target := a.firstTurretTarget(*turret)
+		if target == nil {
+			continue
+		}
+		dx, dy := target.X-turret.X, target.Y-turret.Y
+		distance := math.Hypot(dx, dy)
+		if distance <= 0 {
+			continue
+		}
+		a.Projectiles = append(a.Projectiles, Projectile{ProjectileID: fmt.Sprintf("turret-%s-%d", turret.TurretID, a.TickNumber), OwnerID: turret.TurretID, Team: "turret", Kind: "plasma", X: turret.X, Y: turret.Y, VX: dx / distance * TurretProjectileSpeed, VY: dy / distance * TurretProjectileSpeed, Damage: turret.Damage, TTL: max(1, int(distance/TurretProjectileSpeed)+2)})
+		turret.NextFireTick = a.TickNumber + turret.CooldownTicks
+		events = append(events, a.event(Event{Type: "turret_shot", TargetID: target.RobotID, X: turret.X, Y: turret.Y}))
+	}
+	return events
+}
+
+// firstTurretTarget returns the first living, uncloaked, in-range robot with
+// clear line of sight, in roster order.
+func (a *Arena) firstTurretTarget(turret TurretState) *RobotState {
+	for i := range a.Robots {
+		r := &a.Robots[i]
+		if !r.Alive || isCloaked(*r) || math.Hypot(r.X-turret.X, r.Y-turret.Y) > turret.Range {
+			continue
+		}
+		if a.LineOfSight(turret.X, turret.Y, r.X, r.Y) {
+			return r
+		}
+	}
+	return nil
 }
 
 // applyDeploys places mines requested by the deploy intent, in roster order.
@@ -815,15 +919,57 @@ func (a *Arena) buildScanReport(r RobotState, req ScanRequest) *ScanReport {
 	return report
 }
 
-// visibleRobots is the per-robot view handed to controllers: every robot
-// stays listed except living cloaked enemies, which are hidden unless the
-// observer carries radar. Teammates and the observer are always visible.
+// worldFor builds the per-robot WorldState handed to WorldAwareControllers
+// (and mirrored into agent observations). Items, projectiles, mines, and
+// living enemies are filtered to the observer's vision range; obstacles,
+// hazards, and the zone stay full so navigation keeps working. BROWSER
+// SNAPSHOTS INTENTIONALLY STAY FULL-VISIBILITY — only controller/agent views
+// are filtered here.
+func (a *Arena) worldFor(observer RobotState) WorldState {
+	within := func(x, y float64) bool {
+		dx, dy := x-observer.X, y-observer.Y
+		return dx*dx+dy*dy <= observer.VisionRange*observer.VisionRange
+	}
+	items := []Item{}
+	for i := range a.Items {
+		if item := a.Items[i]; item.Active && within(item.X, item.Y) {
+			items = append(items, item)
+		}
+	}
+	// Item IDs are sorted so agent payloads stay byte-stable; projectiles and
+	// mines keep engine slice order.
+	sort.Slice(items, func(i, j int) bool { return items[i].ItemID < items[j].ItemID })
+	projectiles := []Projectile{}
+	for _, p := range a.Projectiles {
+		if within(p.X, p.Y) {
+			projectiles = append(projectiles, p)
+		}
+	}
+	mines := []MineState{}
+	for _, mine := range a.Mines {
+		if mine.Active && within(mine.X, mine.Y) {
+			mines = append(mines, mine)
+		}
+	}
+	return WorldState{Tick: a.TickNumber, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Items: items, Projectiles: projectiles, Mines: mines, Hazards: append([]Hazard(nil), a.Config.Map.Hazards...), Zone: a.zoneState(), Overtime: a.overtime(), VisionRange: observer.VisionRange}
+}
+
+// visibleRobots is the per-robot view handed to controllers: teammates and the
+// observer are always visible; living enemies are dropped when beyond the
+// observer's vision range (a zero range means unlimited), and cloaked enemies
+// additionally stay hidden unless the observer carries radar. Range and cloak
+// both apply: radar reveals a cloaked enemy only inside vision range.
 func (a *Arena) visibleRobots(observer RobotState) []RobotState {
 	view := make([]RobotState, 0, len(a.Robots))
 	radar := effectActive(observer, "radar")
 	for _, r := range a.Robots {
-		if r.Alive && r.RobotID != observer.RobotID && r.Team != observer.Team && isCloaked(r) && !radar {
-			continue
+		if r.Alive && r.RobotID != observer.RobotID && r.Team != observer.Team {
+			if observer.VisionRange > 0 && math.Hypot(r.X-observer.X, r.Y-observer.Y) > observer.VisionRange {
+				continue
+			}
+			if isCloaked(r) && !radar {
+				continue
+			}
 		}
 		view = append(view, r)
 	}
@@ -951,6 +1097,18 @@ func (a *Arena) destroy(target, killer *RobotState) []Event {
 		if killer.StreakName != "" {
 			e = append(e, a.event(Event{Type: "kill_streak", RobotID: killer.RobotID, Value: killer.KillStreak, Message: killer.StreakName}))
 		}
+		// Streak rewards fire on exact counts and never touch the RNG: 3 kills
+		// grant a decaying shield, 5 grant the frenzy overdrive burst.
+		if killer.KillStreak == 3 {
+			killer.Shield = min(50, killer.Shield+50)
+			upsertEffect(killer, "shield_decay", 200, 0.25, "")
+			e = append(e, a.event(Event{Type: "streak_reward", RobotID: killer.RobotID, Value: 3, Message: "shield"}))
+		}
+		if killer.KillStreak == 5 {
+			upsertEffect(killer, "overdrive", 60, 1.5, "")
+			upsertEffect(killer, "rapid_fire", 60, 0.5, "")
+			e = append(e, a.event(Event{Type: "streak_reward", RobotID: killer.RobotID, Value: 5, Message: "frenzy"}))
+		}
 		if oldStreak >= 3 {
 			a.dropItem("shield", target.X, target.Y)
 			e = append(e, a.event(Event{Type: "bounty_claimed", RobotID: killer.RobotID, TargetID: target.RobotID}))
@@ -994,6 +1152,22 @@ func (a *Arena) applyEffects(r *RobotState, events *[]Event) {
 	r.Effects = next
 }
 func (a *Arena) checkFinished() {
+	// Solo matches name the human robot explicitly: the moment it stops being
+	// alive — by shot, withdrawal, or controller failure — the match ends and
+	// the surviving teams are ranked by HP. Nobody left alive is a draw. The
+	// worker only sets SoloRobotID for solo mode, so other modes are unaffected.
+	if a.Config.SoloRobotID != "" {
+		if solo := a.robot(a.Config.SoloRobotID); solo != nil && !solo.Alive {
+			alive := []RobotState{}
+			for _, r := range a.Robots {
+				if r.Alive {
+					alive = append(alive, r)
+				}
+			}
+			a.finished, a.winner = true, winnerByHP(alive)
+			return
+		}
+	}
 	teams := map[string]bool{}
 	for _, r := range a.Robots {
 		if r.Alive {
@@ -1040,9 +1214,20 @@ func (a *Arena) snapshot(e []Event) Snapshot {
 	}
 	zone := a.zoneState()
 	if zone != nil && zone.Active {
-		ann = append(ann, "ZONE CLOSING")
+		// Multi-stage zones call out the last stage explicitly; single-stage
+		// zones keep the plain closing banner.
+		if a.Config.Zone.StageCount > 1 && zone.Stage >= a.Config.Zone.StageCount {
+			ann = append(ann, "FINAL ZONE")
+		} else {
+			ann = append(ann, "ZONE CLOSING")
+		}
 	}
-	return Snapshot{Type: "snapshot", Version: 3, MatchID: a.MatchID, Sequence: a.TickNumber, Tick: a.TickNumber, Status: status, WinnerTeam: a.winner, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Robots: cloneRobots(a.Robots), Projectiles: append([]Projectile(nil), a.Projectiles...), Items: append([]Item(nil), a.Items...), Mines: append([]MineState(nil), a.Mines...), Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Events: e, Zone: zone, Announcements: ann, Overtime: a.overtime()}
+	// The surge event is stamped on tick T but the snapshot covers T+1, so
+	// announcements key off the just-completed tick.
+	if !a.finished && a.Config.PowerSurgeEveryTicks > 0 && a.TickNumber > 1 && (a.TickNumber-1)%a.Config.PowerSurgeEveryTicks == 0 {
+		ann = append(ann, "POWER SURGE")
+	}
+	return Snapshot{Type: "snapshot", Version: 3, MatchID: a.MatchID, Sequence: a.TickNumber, Tick: a.TickNumber, Status: status, WinnerTeam: a.winner, MapID: a.Config.Map.ID, Width: a.Config.Width, Height: a.Config.Height, Robots: cloneRobots(a.Robots), Projectiles: append([]Projectile(nil), a.Projectiles...), Items: append([]Item(nil), a.Items...), Mines: append([]MineState(nil), a.Mines...), Turrets: append([]TurretState(nil), a.Turrets...), Obstacles: append([]Obstacle(nil), a.Config.Map.Obstacles...), Events: e, Zone: zone, Announcements: ann, Overtime: a.overtime()}
 }
 func (a *Arena) event(e Event) Event { e.Tick = a.TickNumber; return e }
 func (a *Arena) robot(id string) *RobotState {

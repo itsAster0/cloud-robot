@@ -1,9 +1,15 @@
+-- Example robot: aggressive brawler. Mirrors internal/scripts/templates/aggressive.lua.
+-- Vision: enemies, items, projectiles, and mines beyond the vision range
+-- (default 320 units) never appear in observations; this robot fires only at
+-- targets it can fully see. The rare `scope` pickup doubles vision for 150 ticks.
 local arena = require "arena"
 
--- Brawler: hunts the nearest enemy, leads shots based on their heading,
--- detours for heals when hurt, and strafes unpredictably in close range.
--- Randomness is seeded from the robot ID so two boxes behave differently
--- without wall-clock time.
+-- Brawler: hunts the nearest enemy it can see, leads shots based on their
+-- heading, detours for heals when hurt, and strafes unpredictably in close
+-- range. Firing is gated on full sight: inside the vision range with clear
+-- line of sight. When nothing is in sight it sweeps loot, then pushes toward
+-- the map center instead of roaming blind. Randomness is seeded from the
+-- robot ID so two boxes behave differently without wall-clock time.
 
 local seed = 0
 local robot_id = os.getenv("ROBOT_ID") or "brawler"
@@ -15,7 +21,8 @@ math.randomseed(seed)
 -- Projectile speeds mirror the server weapon table; railgun is hitscan.
 local PROJECTILE_SPEED = { plasma = 24, cannon = 14, machine_gun = 32, incendiary = 20, cryo = 20, emp = 18, railgun = 0 }
 local ITEM_SCORE = {
-  heal = 90, ["repair-core"] = 60, shield = 70, overdrive = 65, rapid_fire = 65,
+  heal = 90, medkit = 85, ["repair-core"] = 60, nano_repair = 65, scope = 60,
+  shield = 70, overdrive = 65, rapid_fire = 65,
   weapon_railgun = 100, weapon_cannon = 80, weapon_incendiary = 55,
   weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30,
 }
@@ -67,10 +74,11 @@ end
 local function item_score(obs, item)
   local self, base = obs.self, ITEM_SCORE[item.type]
   if not base then return 0 end
-  if item.type == "heal" or item.type == "repair-core" then
+  if item.type == "heal" or item.type == "repair-core" or item.type == "medkit" then
     if obs.overtime or self.hp >= self.maxHp then return 0 end
     if self.hp < self.maxHp * 0.5 then base = base * 2 end
   end
+  if item.type == "nano_repair" and self.hp >= self.maxHp then return 0 end
   if item.type == "shield" and self.shield >= 50 then return 0 end
   if self.weapon ~= "" and item.type == "weapon_" .. self.weapon then return 0 end
   return base
@@ -93,14 +101,15 @@ local function best_item(obs, max_distance)
   return best
 end
 
--- Prefers enemies in line of sight; falls back to the nearest heard enemy so
--- the brawler hunts around cover instead of spinning in place.
+-- Prefers enemies we can actually see: inside the vision range with clear
+-- line of sight. Falls back to the nearest known enemy so the brawler still
+-- has a direction when everyone is hidden, but it never fires at one.
 local function pick_enemy(obs)
   local seen, unseen, seen_distance, unseen_distance
   for _, robot in ipairs(obs.robots or {}) do
     if robot.alive and robot.team ~= obs.self.team then
       local distance = arena.distance(obs.self, robot)
-      if arena.line_of_sight(obs.self.x, obs.self.y, robot.x, robot.y, obs.obstacles) then
+      if arena.can_see(obs, robot) then
         if not seen_distance or distance < seen_distance then seen, seen_distance = robot, distance end
       elseif not unseen_distance or distance < unseen_distance then
         unseen, unseen_distance = robot, distance
@@ -140,7 +149,8 @@ local function decide(observation)
 
   -- Detour for heals when genuinely hurt and no enemy is breathing on us.
   if self.hp < self.maxHp * 0.45 and (not enemy or not visible or distance > 60) then
-    local heal = arena.nearest_item(observation, "heal") or arena.nearest_item(observation, "repair-core")
+    local heal = arena.nearest_item(observation, "heal") or arena.nearest_item(observation, "medkit")
+      or arena.nearest_item(observation, "repair-core") or arena.nearest_item(observation, "nano_repair")
     if heal then
       local held = unstick(observation, { moving = true })
       if held then return held end
@@ -168,7 +178,8 @@ local function decide(observation)
     return arena.action({ move = 6, turn = 14 * state.strafe, fire = visible, target_x = x, target_y = y, logs = { "brawling " .. enemy.name } })
   end
 
-  -- No enemy: sweep up items, then wander. Overdrive pushes the pace.
+  -- No enemy in sight: sweep up items, then push toward the middle of the map
+  -- where fights happen. Overdrive pushes the pace.
   local item = best_item(observation)
   if item then
     local held = unstick(observation, { moving = true })
@@ -176,7 +187,7 @@ local function decide(observation)
     return navigate(observation, item.x, item.y, has_effect(self, "overdrive") and 8 or 7, "looting " .. item.type)
   end
   if not state.wander or arena.distance(self, state.wander) < 40 then
-    state.wander = { x = 60 + math.random() * (observation.arenaWidth - 120), y = 60 + math.random() * (observation.arenaHeight - 120) }
+    state.wander = arena.random_safe_point(observation, observation.arenaWidth / 2, observation.arenaHeight / 2, 120, 8)
   end
   local held = unstick(observation, { moving = true })
   if held then return held end

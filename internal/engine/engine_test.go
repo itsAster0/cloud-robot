@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"reflect"
 	"strings"
@@ -45,7 +46,7 @@ func TestCustomArenaScalesMapGeometry(t *testing.T) {
 	arena := NewWithConfig("scaled", nil, nil, config)
 	spawn := arena.Config.Map.SpawnPoints["blue"][0]
 	zone := arena.Config.Map.ItemSpawnZones[0]
-	if spawn.X != 1050 || spawn.Y != 400 || zone.X != 360 || zone.Width != 480 {
+	if spawn.X != 1100 || spawn.Y != 400 || zone.X != 360 || zone.Width != 480 {
 		t.Fatalf("map geometry did not scale: spawn=%+v zone=%+v", spawn, zone)
 	}
 }
@@ -206,7 +207,7 @@ func TestWeaponsAndBotController(t *testing.T) {
 		t.Fatal("weapon table incomplete")
 	}
 	bot := NewBotController("bot", BotSharpshooter, PersonalityAggressive, DefaultMap(800, 500))
-	self := RobotState{RobotID: "bot", Team: "red", X: 100, Y: 100, Heading: 0, Alive: true, Weapon: "plasma"}
+	self := RobotState{RobotID: "bot", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma"}
 	enemy := RobotState{RobotID: "enemy", Team: "blue", X: 300, Y: 100, Alive: true}
 	intent, err := bot.Tick(context.Background(), self, []RobotState{self, enemy})
 	if err != nil || !intent.Fire || intent.TargetX == nil {
@@ -1298,5 +1299,1158 @@ func TestProtocolV3FeaturesProduceByteStableEventLogs(t *testing.T) {
 		if !seen[kind] {
 			t.Fatalf("expected %s events in the v3 match log", kind)
 		}
+	}
+}
+
+// zoneStageFixture builds a three-stage zone over a small window so stage
+// math is easy to check by hand: segment = (400-100)/3 = 100 ticks, of which
+// 85 shrink and 15 hold. Arena 800x500 puts the initial radius at
+// hypot(800,500)/2.
+func zoneStageFixture(t *testing.T, stageCount int) *Arena {
+	t.Helper()
+	config := DefaultConfig()
+	config.Width, config.Height = 800, 500
+	config.Map = DefaultMap(800, 500)
+	config.Zone = ZoneConfig{Enabled: true, StartTick: 100, EndTick: 400, EndRadius: 100, Damage: 2, StageCount: stageCount, DamageInterval: 10}
+	return NewWithConfig("stages", []RobotState{{RobotID: "a", Team: "red", X: 20, Y: 20, HP: 100, Alive: true}}, map[string]Controller{"a": &fixedController{}}, config)
+}
+
+func TestZoneStagesPiecewiseRadiusDamageAndAnnouncements(t *testing.T) {
+	a := zoneStageFixture(t, 3)
+	initial := math.Hypot(800, 500) / 2
+	radiusAt := func(n int) float64 { return initial + (100-initial)*float64(n)/3 }
+	closeEnough := func(got, want float64, label string) {
+		if math.Abs(got-want) > 1e-9 {
+			t.Fatalf("%s: got radius %v want %v", label, got, want)
+		}
+	}
+	zoneAt := func(tick int) *ZoneState {
+		a.TickNumber = tick
+		return a.zoneState()
+	}
+	if zone := zoneAt(99); zone.Active || zone.Stage != 0 || zone.Radius != initial {
+		t.Fatalf("pre-zone state wrong: %+v", zone)
+	}
+	if zone := zoneAt(100); !zone.Active || zone.Stage != 1 || math.Abs(zone.Radius-initial) > 1e-9 {
+		t.Fatalf("stage 1 should start at the full radius: %+v", zone)
+	}
+	// Mid-shrink stage 1: 42 of 85 shrink ticks toward stage 1's radius.
+	if zone := zoneAt(142); zone.Stage != 1 {
+		t.Fatalf("tick 142 must be stage 1: %+v", zone)
+	} else {
+		closeEnough(zone.Radius, initial+(radiusAt(1)-initial)*(42.0/85.0), "stage 1 shrink")
+	}
+	// Hold phases park on the stage radius: ticks 185 and 199 sit on R1,
+	// tick 200 opens stage 2 still at R1 before it shrinks toward R2.
+	closeEnough(zoneAt(185).Radius, radiusAt(1), "stage 1 hold")
+	if zone := zoneAt(199); zone.Stage != 1 {
+		t.Fatalf("tick 199 must still be stage 1: %+v", zone)
+	} else {
+		closeEnough(zone.Radius, radiusAt(1), "stage 1 hold tail")
+	}
+	if zone := zoneAt(200); zone.Stage != 2 || math.Abs(zone.Radius-radiusAt(1)) > 1e-9 {
+		t.Fatalf("stage 2 must open on R1: %+v", zone)
+	}
+	closeEnough(zoneAt(285).Radius, radiusAt(2), "stage 2 hold")
+	if zone := zoneAt(300); zone.Stage != 3 || math.Abs(zone.Radius-radiusAt(2)) > 1e-9 {
+		t.Fatalf("stage 3 must open on R2: %+v", zone)
+	}
+	closeEnough(zoneAt(385).Radius, 100, "final stage end")
+	if zone := zoneAt(400); zone.Stage != 3 || math.Abs(zone.Radius-100) > 1e-9 {
+		t.Fatalf("zone must rest on EndRadius: %+v", zone)
+	}
+	if zone := zoneAt(430); zone.Stage != 3 || math.Abs(zone.Radius-100) > 1e-9 {
+		t.Fatalf("post-window zone must hold EndRadius: %+v", zone)
+	}
+	// Damage escalates by stage: 2/3/4 for base damage 2.
+	for _, check := range []struct {
+		tick, want int
+	}{{100, 2}, {200, 3}, {385, 4}} {
+		if zone := zoneAt(check.tick); zone.Damage != check.want {
+			t.Fatalf("tick %d damage: got %d want %d", check.tick, zone.Damage, check.want)
+		}
+	}
+	// applyZone lands the stage damage outside the ring: tick 200 = stage 2.
+	a.TickNumber = 200
+	events := a.applyZone()
+	if !hasEvent(events, "zone_damage") {
+		t.Fatal("robot outside the stage-2 ring took no zone damage")
+	}
+	for _, event := range events {
+		if event.Type == "zone_damage" && event.Damage != 3 {
+			t.Fatalf("stage 2 zone damage must be 3: %+v", event)
+		}
+	}
+	if a.Robots[0].HP != 97 {
+		t.Fatalf("expected 3 zone damage applied, got HP %d", a.Robots[0].HP)
+	}
+	// Announcements: stage 1 says closing, the last stage says final.
+	a.TickNumber = 150
+	if snap := a.snapshot(nil); !containsString(snap.Announcements, "ZONE CLOSING") || containsString(snap.Announcements, "FINAL ZONE") {
+		t.Fatalf("stage 1 announcements wrong: %v", snap.Announcements)
+	}
+	a.TickNumber = 385
+	if snap := a.snapshot(nil); !containsString(snap.Announcements, "FINAL ZONE") {
+		t.Fatalf("final stage must announce FINAL ZONE: %v", snap.Announcements)
+	}
+	a.TickNumber = 50
+	if snap := a.snapshot(nil); containsString(snap.Announcements, "ZONE CLOSING") || containsString(snap.Announcements, "FINAL ZONE") {
+		t.Fatalf("pre-zone must not announce zone banners: %v", snap.Announcements)
+	}
+}
+
+// TestZoneStageCountOneMatchesLegacyFormula pins the single-stage zone to the
+// pre-staging continuous lerp, tick for tick, so old replays stay identical.
+func TestZoneStageCountOneMatchesLegacyFormula(t *testing.T) {
+	a := zoneStageFixture(t, 1)
+	initial := math.Hypot(800, 500) / 2
+	for _, tick := range []int{99, 100, 130, 175, 250, 325, 399, 400, 450} {
+		a.TickNumber = tick
+		zone := a.zoneState()
+		progress := clamp(float64(tick-100)/float64(300), 0, 1)
+		want := initial + (100-initial)*progress
+		if tick < 100 {
+			if zone.Active || zone.Stage != 0 {
+				t.Fatalf("tick %d must be pre-zone: %+v", tick, zone)
+			}
+			continue
+		}
+		if zone.Radius != want || zone.Damage != 2 {
+			t.Fatalf("tick %d legacy drift: radius %v want %v damage %d", tick, zone.Radius, want, zone.Damage)
+		}
+		if zone.Stage != 1 {
+			t.Fatalf("tick %d single-stage zone must report stage 1: %+v", tick, zone)
+		}
+	}
+	a.TickNumber = 150
+	if snap := a.snapshot(nil); !containsString(snap.Announcements, "ZONE CLOSING") {
+		t.Fatalf("legacy zone must keep the plain closing banner: %v", snap.Announcements)
+	}
+}
+
+func TestDefaultConfigEnablesZoneAndSurge(t *testing.T) {
+	config := DefaultConfig()
+	if !config.Zone.Enabled || config.Zone.StageCount != 3 || config.Zone.StartTick != 1200 || config.Zone.EndTick != 1800 {
+		t.Fatalf("zone must default on with three stages: %+v", config.Zone)
+	}
+	if config.PowerSurgeEveryTicks != 300 {
+		t.Fatalf("power surge must default to 300 ticks, got %d", config.PowerSurgeEveryTicks)
+	}
+	// normalize fills in the stage count for enabled zones only.
+	bare := DefaultConfig()
+	bare.Zone = ZoneConfig{Enabled: true}
+	bare.normalize()
+	if bare.Zone.StageCount != 3 {
+		t.Fatalf("normalize must default the stage count to 3, got %d", bare.Zone.StageCount)
+	}
+	off := DefaultConfig()
+	off.Zone = ZoneConfig{Enabled: false, StageCount: 0}
+	off.normalize()
+	if off.Zone.StageCount != 0 {
+		t.Fatalf("disabled zones must not gain a stage count, got %d", off.Zone.StageCount)
+	}
+}
+
+func TestStreakRewardsGrantShieldAndFrenzy(t *testing.T) {
+	robots := []RobotState{{RobotID: "k", Team: "red", X: 100, Y: 100, HP: 100, Alive: true}}
+	for _, id := range []string{"v1", "v2", "v3", "v4", "v5"} {
+		robots = append(robots, RobotState{RobotID: id, Team: "blue", X: 700, Y: 400, HP: 100, Alive: true})
+	}
+	a := New("streaks", robots, map[string]Controller{})
+	killer := arenaRobot(a, "k")
+	rewards := []Event{}
+	for _, id := range []string{"v1", "v2", "v3", "v4", "v5"} {
+		rewards = append(rewards, a.destroy(arenaRobot(a, id), killer)...)
+		if killer.KillStreak == 3 {
+			if killer.Shield != 50 || !effectActive(*killer, "shield_decay") || effectMultiplier(*killer, "shield_decay", 0) != 0.25 {
+				t.Fatalf("third kill must grant a decaying 50 shield: %+v", killer)
+			}
+		}
+	}
+	if killer.Kills != 5 || killer.KillStreak != 5 {
+		t.Fatalf("killer stats wrong: %+v", killer)
+	}
+	if len(rewards) == 0 {
+		t.Fatal("no events from kills")
+	}
+	shield, frenzy := false, false
+	for _, event := range rewards {
+		if event.Type != "streak_reward" {
+			continue
+		}
+		switch event.Value {
+		case 3:
+			shield = event.RobotID == "k" && event.Message == "shield"
+		case 5:
+			frenzy = event.RobotID == "k" && event.Message == "frenzy"
+		}
+	}
+	if !shield || !frenzy {
+		t.Fatalf("missing streak rewards: shield=%v frenzy=%v events=%+v", shield, frenzy, rewards)
+	}
+	if !effectActive(*killer, "overdrive") || effectMultiplier(*killer, "overdrive", 0) != 1.5 || !effectActive(*killer, "rapid_fire") || effectMultiplier(*killer, "rapid_fire", 0) != 0.5 {
+		t.Fatalf("fifth kill must grant frenzy overdrive+rapid_fire: %+v", killer.Effects)
+	}
+	if killer.StreakName != "UNSTOPPABLE" {
+		t.Fatalf("five kills should be UNSTOPPABLE: %+v", killer.StreakName)
+	}
+}
+
+func TestPowerSurgeSpawnsDeterministicSequence(t *testing.T) {
+	config := DefaultConfig()
+	config.Zone.Enabled = false
+	a := NewWithConfig("surge", []RobotState{{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true}}, map[string]Controller{"a": &fixedController{}}, config)
+	if events := a.powerSurge(); events != nil {
+		t.Fatalf("tick 0 must not surge: %+v", events)
+	}
+	a.TickNumber = 300
+	events := a.powerSurge()
+	if len(events) != 1 || events[0].Type != "power_surge" || events[0].Message != "berserker_charm" {
+		t.Fatalf("tick 300 surge wrong: %+v", events)
+	}
+	item := a.Items[len(a.Items)-1]
+	if item.Type != "berserker_charm" || item.Source != "surge" || !item.Active || item.X != 600 || item.Y != 375 || events[0].ItemID != item.ItemID {
+		t.Fatalf("surge item must land at the arena center: %+v", item)
+	}
+	a.TickNumber = 600
+	if events = a.powerSurge(); len(events) != 1 || events[0].Message != "vampiric_fang" {
+		t.Fatalf("tick 600 surge wrong: %+v", events)
+	}
+	a.TickNumber = 900
+	if events = a.powerSurge(); len(events) != 1 || events[0].Message != "teleport_beacon" {
+		t.Fatalf("tick 900 surge wrong: %+v", events)
+	}
+	// Disabled surge never spawns.
+	off := DefaultConfig()
+	off.PowerSurgeEveryTicks = 0
+	b := NewWithConfig("surge-off", []RobotState{{RobotID: "a", Team: "red", HP: 100, Alive: true}}, map[string]Controller{"a": &fixedController{}}, off)
+	b.TickNumber = 300
+	if events := b.powerSurge(); events != nil {
+		t.Fatalf("disabled surge must not spawn: %+v", events)
+	}
+	// Announcements land on the snapshot covering the surge tick.
+	a.TickNumber = 301
+	if snap := a.snapshot(nil); !containsString(snap.Announcements, "POWER SURGE") {
+		t.Fatalf("surge tick must announce: %v", snap.Announcements)
+	}
+	a.TickNumber = 302
+	if snap := a.snapshot(nil); containsString(snap.Announcements, "POWER SURGE") {
+		t.Fatalf("non-surge tick must not announce: %v", snap.Announcements)
+	}
+}
+
+func TestPowerSurgeFiresThroughStep(t *testing.T) {
+	config := DefaultConfig()
+	config.Zone.Enabled = false
+	config.PowerSurgeEveryTicks = 5
+	config.MaxTicks = 12
+	config.OvertimeTicks = 0
+	robots := SpawnPositionsForMap([]RobotState{{RobotID: "a", Team: "solo-01"}}, DefaultMap(800, 500), 800, 500)
+	a := NewWithConfig("surge-step", robots, map[string]Controller{"a": &fixedController{}}, config)
+	for !a.Finished() {
+		a.Step(context.Background())
+	}
+	surges := []Event{}
+	for _, event := range a.EventLog() {
+		if event.Type == "power_surge" {
+			surges = append(surges, event)
+		}
+	}
+	if len(surges) != 2 || surges[0].Tick != 5 || surges[0].Message != "berserker_charm" || surges[1].Tick != 10 || surges[1].Message != "vampiric_fang" {
+		t.Fatalf("step wiring must surge every 5 ticks in order: %+v", surges)
+	}
+}
+
+// turretFixture builds an open arena with one turret at (100,250) plus the
+// given robots, all engine extras off so turret math is exact.
+func turretFixture(t *testing.T, robots []RobotState, obstacles []Obstacle) *Arena {
+	t.Helper()
+	m := DefaultMap(800, 500)
+	m.Obstacles = obstacles
+	m.Turrets = []TurretSpec{{TurretID: "turret-t1", X: 100, Y: 250, HP: 60, Range: 220, Damage: 8, CooldownTicks: 12}}
+	config := DefaultConfig()
+	config.Map = m
+	config.CriticalChance = 0
+	config.Zone.Enabled = false
+	config.PowerSurgeEveryTicks = 0
+	controllers := map[string]Controller{}
+	for _, r := range robots {
+		controllers[r.RobotID] = &fixedController{}
+	}
+	return NewWithConfig("turrets", robots, controllers, config)
+}
+
+func TestTurretAcquiresTargetFiresAndRespectsCooldown(t *testing.T) {
+	// The cloaked robot sorts first and sits inside the range arc, but is
+	// parked off the firing lane so it can only be skipped, not hit.
+	robots := []RobotState{
+		{RobotID: "cloaked-one", Team: "blue", X: 150, Y: 200, HP: 100, Alive: true},
+		{RobotID: "target-one", Team: "blue", X: 250, Y: 250, HP: 100, Alive: true},
+	}
+	a := turretFixture(t, robots, nil)
+	upsertEffect(arenaRobot(a, "cloaked-one"), "cloak", 90, 1, "")
+	snapshot := a.Step(context.Background())
+	turret := a.Turrets[0]
+	if !turret.Alive || turret.NextFireTick != 12 || len(a.Projectiles) != 1 {
+		t.Fatalf("turret should fire once with a 12-tick cooldown: %+v projectiles=%+v", turret, a.Projectiles)
+	}
+	shot := a.Projectiles[0]
+	if shot.OwnerID != "turret-t1" || shot.Team != "turret" || shot.Kind != "plasma" || shot.Damage != 8 || shot.VX != 20 || shot.VY != 0 {
+		t.Fatalf("turret projectile profile wrong: %+v", shot)
+	}
+	if !hasEvent(snapshot.Events, "turret_shot") {
+		t.Fatal("turret_shot event missing")
+	}
+	for _, event := range snapshot.Events {
+		if event.Type == "turret_shot" && event.TargetID != "target-one" {
+			t.Fatalf("cloaked robot must be skipped for the nearer-sorted target: %+v", event)
+		}
+	}
+	// The unowned projectile still damages the robot through the nil-source
+	// damage path, then the turret refires exactly at tick 12.
+	for len(a.Projectiles) > 0 {
+		a.Step(context.Background())
+	}
+	if arenaRobot(a, "target-one").HP != 92 {
+		t.Fatalf("turret plasma should deal 8 damage, got HP %d", arenaRobot(a, "target-one").HP)
+	}
+	hits := 0
+	for _, event := range a.EventLog() {
+		if event.Type == "hit" && event.TargetID == "target-one" {
+			if event.RobotID != "" {
+				t.Fatalf("turret hit must have no robot source: %+v", event)
+			}
+			hits++
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("expected exactly one turret hit, got %d", hits)
+	}
+	for a.TickNumber < 12 {
+		a.Step(context.Background())
+	}
+	if len(a.EventLog()) == 0 {
+		t.Fatal("event log missing")
+	}
+	shotsBefore := 0
+	for _, event := range a.EventLog() {
+		if event.Type == "turret_shot" {
+			shotsBefore++
+		}
+	}
+	if shotsBefore != 1 {
+		t.Fatalf("turret must hold fire during cooldown, got %d shots", shotsBefore)
+	}
+	a.Step(context.Background())
+	shotsAfter := 0
+	for _, event := range a.EventLog() {
+		if event.Type == "turret_shot" {
+			shotsAfter++
+		}
+	}
+	if shotsAfter != 2 {
+		t.Fatalf("turret must refire at tick 12, got %d shots", shotsAfter)
+	}
+}
+
+func TestTurretHoldsFireWithoutTargetLOSOrWhenCloaked(t *testing.T) {
+	// A cloaked robot alone in range draws no shot.
+	cloaked := []RobotState{{RobotID: "sneaky", Team: "blue", X: 150, Y: 250, HP: 100, Alive: true}}
+	a := turretFixture(t, cloaked, nil)
+	upsertEffect(arenaRobot(a, "sneaky"), "cloak", 90, 1, "")
+	snapshot := a.Step(context.Background())
+	if hasEvent(snapshot.Events, "turret_shot") || len(a.Projectiles) != 0 || a.Turrets[0].NextFireTick != 0 {
+		t.Fatalf("cloaked robot must be invisible to the turret: %+v", a.Turrets[0])
+	}
+	// A wall between turret and target blocks the shot.
+	blocked := []RobotState{{RobotID: "sneaky", Team: "blue", X: 250, Y: 250, HP: 100, Alive: true}}
+	wall := []Obstacle{{ID: "wall", Shape: "aabb", X: 170, Y: 0, Width: 10, Height: 500}}
+	b := turretFixture(t, blocked, wall)
+	if snapshot := b.Step(context.Background()); hasEvent(snapshot.Events, "turret_shot") || len(b.Projectiles) != 0 {
+		t.Fatal("line of sight must gate turret fire")
+	}
+	// Out-of-range robots are ignored too.
+	far := []RobotState{{RobotID: "sneaky", Team: "blue", X: 700, Y: 250, HP: 100, Alive: true}}
+	c := turretFixture(t, far, nil)
+	if snapshot := c.Step(context.Background()); hasEvent(snapshot.Events, "turret_shot") || len(c.Projectiles) != 0 {
+		t.Fatal("turret must not fire beyond its range")
+	}
+}
+
+func TestRobotsDamageAndDestroyTurretDroppingShield(t *testing.T) {
+	robots := []RobotState{{RobotID: "a", Team: "red", X: 100, Y: 250, HP: 100, Alive: true}}
+	a := turretFixture(t, robots, nil)
+	// Move the turret far from the robot so only the crafted shots interact.
+	a.Turrets[0].X, a.Turrets[0].Y = 400, 250
+	a.Turrets[0].Range = 100
+	collected := []Event{}
+	for i := 0; i < 3; i++ {
+		a.Projectiles = append(a.Projectiles, Projectile{ProjectileID: "probe-" + itoa(i), OwnerID: "a", Team: "red", Kind: "plasma", X: 380, Y: 250, VX: 24, Damage: 25, TTL: 5})
+		collected = append(collected, a.advanceProjectiles()...)
+		if i < 2 && !hasEvent(collected, "turret_damaged") {
+			t.Fatalf("shot %d must damage the turret: %+v", i, collected)
+		}
+	}
+	turret := a.Turrets[0]
+	if turret.Alive || turret.HP > 0 {
+		t.Fatalf("three plasma hits (75) must destroy a 60 HP turret: %+v", turret)
+	}
+	destroyed := false
+	for _, event := range collected {
+		if event.Type == "turret_destroyed" {
+			destroyed = true
+			if event.RobotID != "a" || event.TargetID != "turret-t1" || event.X != 400 || event.Y != 250 {
+				t.Fatalf("bad turret_destroyed event: %+v", event)
+			}
+		}
+	}
+	if !destroyed {
+		t.Fatal("turret_destroyed event missing")
+	}
+	item := a.Items[len(a.Items)-1]
+	if item.Type != "shield" || item.Source != "drop" || item.X != 400 || item.Y != 250 {
+		t.Fatalf("destroyed turret must drop a shield: %+v", item)
+	}
+}
+
+func TestTurretProjectilesIgnoreTurrets(t *testing.T) {
+	m := DefaultMap(800, 500)
+	m.Turrets = []TurretSpec{
+		{TurretID: "turret-t1", X: 100, Y: 250, HP: 60, Range: 220, Damage: 8, CooldownTicks: 12},
+		{TurretID: "turret-t2", X: 300, Y: 250, HP: 60, Range: 220, Damage: 8, CooldownTicks: 12},
+	}
+	config := DefaultConfig()
+	config.Map = m
+	config.CriticalChance = 0
+	a := NewWithConfig("turret-vs-turret", nil, nil, config)
+	a.Projectiles = append(a.Projectiles, Projectile{ProjectileID: "turret-t1-0", OwnerID: "turret-t1", Team: "turret", Kind: "plasma", X: 90, Y: 250, VX: 24, Damage: 8, TTL: 20})
+	collected := []Event{}
+	for i := 0; i < 20; i++ {
+		collected = append(collected, a.advanceProjectiles()...)
+	}
+	if a.Turrets[1].HP != 60 || !a.Turrets[1].Alive {
+		t.Fatalf("turret projectiles must not damage turrets: %+v", a.Turrets[1])
+	}
+	for _, event := range collected {
+		if event.Type == "turret_damaged" || event.Type == "turret_destroyed" {
+			t.Fatalf("no turret-to-turret events allowed: %+v", event)
+		}
+	}
+}
+
+func TestHandcraftedMapsCarrySymmetricTurrets(t *testing.T) {
+	for _, mapID := range []string{"bunker-line", "crossing-fire", "vault"} {
+		m := StarterMaps()[mapID]
+		if len(m.Turrets) != 2 {
+			t.Fatalf("%s must place exactly two turrets, got %d", mapID, len(m.Turrets))
+		}
+		centerX, centerY := m.Width/2, m.Height/2
+		if math.Abs(m.Turrets[0].X+m.Turrets[1].X-2*centerX) > 0.01 || math.Abs(m.Turrets[0].Y+m.Turrets[1].Y-2*centerY) > 0.01 {
+			t.Fatalf("%s turrets are not symmetric about the arena center: %+v", mapID, m.Turrets)
+		}
+		for _, turret := range m.Turrets {
+			if turret.HP != 60 || turret.Range != 220 || turret.Damage != 8 || turret.CooldownTicks != 12 {
+				t.Fatalf("%s turret %s has the wrong profile: %+v", mapID, turret.TurretID, turret)
+			}
+			if collidesRobot(m.Obstacles, turret.X, turret.Y) {
+				t.Fatalf("%s turret %s is buried in an obstacle at (%.0f, %.0f)", mapID, turret.TurretID, turret.X, turret.Y)
+			}
+		}
+	}
+	// Legacy maps stay turret-free so their layouts are unchanged.
+	for _, mapID := range []string{"open-field", "four-corners", "corridors", "pillars", "crater"} {
+		if len(StarterMaps()[mapID].Turrets) != 0 {
+			t.Fatalf("%s must not gain turrets", mapID)
+		}
+	}
+}
+
+func TestScaleMapScalesTurrets(t *testing.T) {
+	m := MapDefinition{ID: "turret-map", Width: 800, Height: 500, Turrets: []TurretSpec{{TurretID: "t1", X: 100, Y: 250, HP: 60, Range: 220, Damage: 8, CooldownTicks: 12}}}
+	uniform := ScaleMap(m, 1600, 1000)
+	if uniform.Turrets[0].X != 200 || uniform.Turrets[0].Y != 500 || uniform.Turrets[0].Range != 440 || uniform.Turrets[0].HP != 60 {
+		t.Fatalf("uniform scale wrong: %+v", uniform.Turrets[0])
+	}
+	stretched := ScaleMap(m, 1600, 500)
+	if stretched.Turrets[0].X != 200 || stretched.Turrets[0].Y != 250 || stretched.Turrets[0].Range != 220 {
+		t.Fatalf("non-uniform scale must use the min axis for range: %+v", stretched.Turrets[0])
+	}
+}
+
+// TestDeepGameLoopScenarioIsByteStable runs one short match through every new
+// system at once — staged zone, neutral turrets, power surges, and streak
+// rewards — and requires identical event-log bytes across same-seed runs.
+func TestDeepGameLoopScenarioIsByteStable(t *testing.T) {
+	m := DefaultMap(800, 500)
+	m.Turrets = []TurretSpec{
+		// Off the Y=250 firing lane so a1's plasma can never reach them;
+		// turret-1 still covers the decoy robot d1.
+		{TurretID: "turret-1", X: 650, Y: 300, HP: 60, Range: 150, Damage: 8, CooldownTicks: 12},
+		{TurretID: "turret-2", X: 650, Y: 350, HP: 60, Range: 150, Damage: 8, CooldownTicks: 12},
+	}
+	config := DefaultConfig()
+	config.Map = m
+	config.MaxTicks = 60
+	config.OvertimeTicks = 0
+	config.CriticalChance = 0
+	config.Zone = ZoneConfig{Enabled: true, StartTick: 10, EndTick: 40, EndRadius: 100, Damage: 1, DamageInterval: 5, StageCount: 3}
+	config.PowerSurgeEveryTicks = 7
+	robots := []RobotState{
+		{RobotID: "a1", Team: "red", X: 100, Y: 250, Heading: 0, HP: 100, Alive: true},
+		{RobotID: "b1", Team: "blue", X: 200, Y: 250, HP: 30, Alive: true},
+		{RobotID: "b2", Team: "blue", X: 240, Y: 250, HP: 30, Alive: true},
+		{RobotID: "b3", Team: "blue", X: 280, Y: 250, HP: 30, Alive: true},
+		{RobotID: "d1", Team: "solo-03", X: 520, Y: 250, HP: 30, Alive: true},
+	}
+	controllers := map[string]Controller{
+		"a1": &fixedController{intent: Intent{Move: 2, Fire: true}},
+		"b1": &fixedController{}, "b2": &fixedController{}, "b3": &fixedController{}, "d1": &fixedController{},
+	}
+	run := func() []byte {
+		a := NewWithConfig("deep-loop", robots, controllers, config)
+		for !a.Finished() {
+			a.Step(context.Background())
+		}
+		encoded, err := json.Marshal(a.EventLog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	first := run()
+	if second := run(); !reflect.DeepEqual(first, second) {
+		t.Fatalf("deep game loop event logs differ across same-seed runs:\n%s\n%s", first, second)
+	}
+	var events []Event
+	if err := json.Unmarshal(first, &events); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, event := range events {
+		seen[event.Type] = true
+	}
+	for _, kind := range []string{"streak_reward", "power_surge", "turret_shot", "zone_damage", "robot_destroyed"} {
+		if !seen[kind] {
+			t.Fatalf("expected %s events in the deep-loop log: %v", kind, seen)
+		}
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+type failController struct{ fixedController }
+
+func (c *failController) Tick(context.Context, RobotState, []RobotState) (Intent, error) {
+	return Intent{}, errors.New("controller exploded")
+}
+
+func TestVisionDefaultsAndOpticsRadarMultipliers(t *testing.T) {
+	if DefaultVisionRange != 320 || DefaultConfig().VisionRange != 320 {
+		t.Fatalf("vision must default to 320: default=%v config=%v", DefaultVisionRange, DefaultConfig().VisionRange)
+	}
+	empty := Config{}
+	empty.normalize()
+	if empty.VisionRange != 320 {
+		t.Fatalf("normalize must default zero vision to 320, got %v", empty.VisionRange)
+	}
+	a := New("vision", []RobotState{{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true}}, map[string]Controller{"a": &fixedController{}})
+	a.Step(context.Background())
+	if got := a.Robots[0].VisionRange; got != 320 {
+		t.Fatalf("stock vision must be 320, got %v", got)
+	}
+	upsertEffect(&a.Robots[0], "radar", 150, 1, "")
+	a.Step(context.Background())
+	if got := a.Robots[0].VisionRange; got != 560 {
+		t.Fatalf("radar vision must be 320*1.75 = 560, got %v", got)
+	}
+	upsertEffect(&a.Robots[0], "optics", 150, 1, "")
+	a.Step(context.Background())
+	if got := a.Robots[0].VisionRange; got != 640 {
+		t.Fatalf("optics must beat radar at 320*2 = 640, got %v", got)
+	}
+	for range 160 {
+		a.Step(context.Background())
+	}
+	if got := a.Robots[0].VisionRange; got != 320 {
+		t.Fatalf("vision effects must expire back to 320, got %v", got)
+	}
+}
+
+func TestScopeItemGrantsOpticsEffect(t *testing.T) {
+	if itemRarity("scope") != "rare" {
+		t.Fatalf("scope must be rare, got %q", itemRarity("scope"))
+	}
+	a := New("scope", []RobotState{{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true}}, map[string]Controller{"a": &fixedController{}})
+	r := &a.Robots[0]
+	if value, _ := a.applyItemArena(r, "scope"); value != 150 || !effectActive(*r, "optics") {
+		t.Fatalf("scope must upsert optics for 150: value=%d effects=%+v", value, r.Effects)
+	}
+	if visionMult(*r) != 2.0 {
+		t.Fatalf("optics must double vision, got %v", visionMult(*r))
+	}
+}
+
+func TestWorldStateFiltersByVisionRangeButSnapshotsStayFull(t *testing.T) {
+	config := DefaultConfig()
+	config.Zone.Enabled = false
+	a := NewWithConfig("vision-world", []RobotState{
+		{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true},
+		{RobotID: "b", Team: "blue", X: 120, Y: 100, HP: 100, Alive: true},
+	}, map[string]Controller{"a": &fixedController{}, "b": &fixedController{}}, config)
+	a.Items = []Item{
+		{ItemID: "item-far", Type: "heal", X: 600, Y: 100, Active: true},
+		{ItemID: "item-near", Type: "heal", X: 150, Y: 100, Active: true},
+		{ItemID: "item-off", Type: "heal", X: 120, Y: 100, Active: false},
+	}
+	a.Projectiles = []Projectile{
+		{ProjectileID: "p-far", OwnerID: "b", Team: "blue", Kind: "plasma", X: 600, Y: 100, TTL: 10},
+		{ProjectileID: "p-near", OwnerID: "b", Team: "blue", Kind: "plasma", X: 120, Y: 100, TTL: 10},
+	}
+	a.Mines = []MineState{
+		{MineID: "mine-far", OwnerID: "b", Team: "blue", X: 600, Y: 100, SpawnTick: 0, ArmTick: 5, Active: true},
+		{MineID: "mine-near", OwnerID: "b", Team: "blue", X: 120, Y: 100, SpawnTick: 0, ArmTick: 5, Active: true},
+	}
+	observer := *arenaRobot(a, "a")
+	observer.VisionRange = 320
+	world := a.worldFor(observer)
+	if world.VisionRange != 320 {
+		t.Fatalf("world state must echo the observer range, got %v", world.VisionRange)
+	}
+	if len(world.Items) != 1 || world.Items[0].ItemID != "item-near" {
+		t.Fatalf("items outside vision must drop and sort by ID: %+v", world.Items)
+	}
+	if len(world.Projectiles) != 1 || world.Projectiles[0].ProjectileID != "p-near" {
+		t.Fatalf("projectiles outside vision must drop: %+v", world.Projectiles)
+	}
+	if len(world.Mines) != 1 || world.Mines[0].MineID != "mine-near" {
+		t.Fatalf("mines outside vision must drop: %+v", world.Mines)
+	}
+	if len(world.Obstacles) != len(a.Config.Map.Obstacles) || len(world.Hazards) != len(a.Config.Map.Hazards) || world.Zone != nil {
+		t.Fatalf("obstacles and hazards stay full, zone off here: obs=%d hazards=%+v zone=%+v", len(world.Obstacles), world.Hazards, world.Zone)
+	}
+	// Browser snapshots intentionally stay full-visibility.
+	snapshot := a.snapshot(nil)
+	if len(snapshot.Items) != 3 || len(snapshot.Projectiles) != 2 || len(snapshot.Mines) != 2 {
+		t.Fatalf("snapshot must not be vision-filtered: items=%d projectiles=%d mines=%d", len(snapshot.Items), len(snapshot.Projectiles), len(snapshot.Mines))
+	}
+}
+
+func TestVisionRangeHidesFarEnemiesButNotTeammates(t *testing.T) {
+	robots := []RobotState{
+		{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true},
+		{RobotID: "enemy-near", Team: "blue", X: 300, Y: 100, HP: 100, Alive: true},
+		{RobotID: "enemy-far", Team: "blue", X: 800, Y: 100, HP: 100, Alive: true},
+		{RobotID: "mate-far", Team: "red", X: 1100, Y: 100, HP: 100, Alive: true},
+	}
+	a := New("vision-robots", robots, map[string]Controller{})
+	observer := *arenaRobot(a, "a")
+	observer.VisionRange = 320
+	ids := func(view []RobotState) map[string]bool {
+		out := map[string]bool{}
+		for _, r := range view {
+			out[r.RobotID] = true
+		}
+		return out
+	}
+	view := ids(a.visibleRobots(observer))
+	if view["enemy-far"] {
+		t.Fatalf("alive enemy beyond vision must be dropped: %v", view)
+	}
+	if !view["enemy-near"] || !view["mate-far"] {
+		t.Fatalf("near enemy and far teammate must stay visible: %v", view)
+	}
+	// Zero range (direct helper callers) means unlimited, not blind.
+	observer.VisionRange = 0
+	if view := ids(a.visibleRobots(observer)); !view["enemy-far"] {
+		t.Fatalf("zero vision range must not filter: %v", view)
+	}
+	// The Step loop feeds controllers the same filtered view.
+	capture := &viewCaptureController{}
+	a.controllers["a"] = capture
+	arenaRobot(a, "a").VisionRange = 320
+	a.Step(context.Background())
+	if view := ids(capture.seen[len(capture.seen)-1]); view["enemy-far"] || !view["mate-far"] {
+		t.Fatalf("controller view must honor vision range: %v", view)
+	}
+}
+
+func TestCloakedEnemyNeedsRangeAndRadar(t *testing.T) {
+	robots := []RobotState{
+		{RobotID: "a", Team: "red", X: 100, Y: 100, HP: 100, Alive: true},
+		{RobotID: "near", Team: "blue", X: 250, Y: 100, HP: 100, Alive: true},
+		{RobotID: "far", Team: "blue", X: 800, Y: 100, HP: 100, Alive: true},
+	}
+	a := New("vision-cloak", robots, map[string]Controller{})
+	upsertEffect(arenaRobot(a, "near"), "cloak", 90, 1, "")
+	upsertEffect(arenaRobot(a, "far"), "cloak", 90, 1, "")
+	observer := *arenaRobot(a, "a")
+	observer.VisionRange = 320
+	ids := func(view []RobotState) map[string]bool {
+		out := map[string]bool{}
+		for _, r := range view {
+			out[r.RobotID] = true
+		}
+		return out
+	}
+	if view := ids(a.visibleRobots(observer)); view["near"] || view["far"] {
+		t.Fatalf("cloaked enemies hidden without radar at any range: %v", view)
+	}
+	upsertEffect(arenaRobot(a, "a"), "radar", 150, 1, "")
+	observer = *arenaRobot(a, "a")
+	observer.VisionRange = 320
+	view := ids(a.visibleRobots(observer))
+	if !view["near"] || view["far"] {
+		t.Fatalf("radar must reveal cloaked enemies only inside vision range: %v", view)
+	}
+}
+
+func TestSoloHumanDeathEndsMatchWithHPWinner(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxTicks = 100
+	config.OvertimeTicks = 0
+	config.SoloRobotID = "h"
+	// Solo free-for-all: the human and two bots each field their own team, so
+	// the check must fire outside the single-team sandbox branch. The human
+	// controller fails: death by failure ends the match on the same tick with
+	// the best-HP surviving team as winner.
+	robots := []RobotState{
+		{RobotID: "h", Team: "solo-01", X: 100, Y: 100, HP: 100, Alive: true},
+		{RobotID: "b1", Team: "solo-02", X: 200, Y: 100, HP: 40, Alive: true},
+		{RobotID: "b2", Team: "solo-03", X: 300, Y: 100, HP: 70, Alive: true},
+	}
+	arena := NewWithConfig("solo-death", robots, map[string]Controller{"h": &failController{}, "b1": &fixedController{}, "b2": &fixedController{}}, config)
+	snapshot := arena.Step(context.Background())
+	if !arena.Finished() || snapshot.Tick != 1 || snapshot.Status != "finished" {
+		t.Fatalf("dead solo human must end the match on the same tick: finished=%v tick=%d status=%s", arena.Finished(), snapshot.Tick, snapshot.Status)
+	}
+	if winner := arena.Winner(); winner != "solo-03" {
+		t.Fatalf("winnerByHP among survivors must pick solo-03 (70 HP), got %q", winner)
+	}
+}
+
+func TestSoloHumanDrawWhenNobodySurvives(t *testing.T) {
+	config := DefaultConfig()
+	config.SoloRobotID = "h"
+	robots := []RobotState{{RobotID: "h", Team: "solo-01", X: 100, Y: 100, HP: 1, Alive: true}}
+	arena := NewWithConfig("solo-draw", robots, map[string]Controller{"h": &failController{}}, config)
+	arena.Step(context.Background())
+	if !arena.Finished() || arena.Winner() != "draw" {
+		t.Fatalf("no survivors must be a draw: finished=%v winner=%q", arena.Finished(), arena.Winner())
+	}
+}
+
+func TestSoloWithdrawEndsMatchWithHPWinner(t *testing.T) {
+	config := DefaultConfig()
+	config.SoloRobotID = "h"
+	robots := []RobotState{
+		{RobotID: "h", Team: "solo-01", X: 100, Y: 100, HP: 100, Alive: true},
+		{RobotID: "b1", Team: "solo-02", X: 200, Y: 100, HP: 100, Alive: true},
+	}
+	arena := NewWithConfig("solo-withdraw", robots, map[string]Controller{"h": &fixedController{}, "b1": &fixedController{}}, config)
+	if !arena.RequestWithdraw("h") {
+		t.Fatal("withdraw request rejected")
+	}
+	snapshot := arena.Step(context.Background())
+	if !arena.Finished() || snapshot.Tick != 1 || arena.Winner() != "solo-02" {
+		t.Fatalf("withdrawn solo human must end the match: finished=%v tick=%d winner=%q", arena.Finished(), snapshot.Tick, arena.Winner())
+	}
+}
+
+func TestSoloHumanAliveRunsToTickLimit(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxTicks = 3
+	config.OvertimeTicks = 0
+	config.SoloRobotID = "h"
+	robots := SpawnPositionsForMap([]RobotState{{RobotID: "h", Team: "solo-01"}}, DefaultMap(1200, 750), 1200, 750)
+	arena := NewWithConfig("solo-alive", robots, map[string]Controller{"h": &fixedController{}}, config)
+	var snap Snapshot
+	for !arena.Finished() {
+		snap = arena.Step(context.Background())
+	}
+	if snap.Tick != 3 || snap.WinnerTeam != "solo-01" {
+		t.Fatalf("living solo human must run to the tick limit: tick=%d winner=%q", snap.Tick, snap.WinnerTeam)
+	}
+}
+
+func TestNonSoloUnaffectedWithoutSoloRobotID(t *testing.T) {
+	// The worker never sets SoloRobotID outside solo mode; a plain two-team
+	// duel keeps the last-team-standing rules with the field empty.
+	config := DefaultConfig()
+	robots := []RobotState{
+		{RobotID: "red-1", Team: "red", X: 100, Y: 100, HP: 100, Alive: true},
+		{RobotID: "red-2", Team: "red", X: 160, Y: 100, HP: 100, Alive: true},
+		{RobotID: "blue-1", Team: "blue", X: 700, Y: 400, HP: 100, Alive: true},
+	}
+	arena := NewWithConfig("non-solo", robots, map[string]Controller{}, config)
+	arena.damage(nil, arenaRobot(arena, "red-1"), 1000, Weapon{})
+	arena.checkFinished()
+	if arena.Finished() {
+		t.Fatalf("duel with empty SoloRobotID must keep last-team-standing: winner=%q", arena.Winner())
+	}
+	arena.damage(nil, arenaRobot(arena, "red-2"), 1000, Weapon{})
+	arena.checkFinished()
+	if !arena.Finished() || arena.Winner() != "blue" {
+		t.Fatalf("eliminating red must finish the duel: finished=%v winner=%q", arena.Finished(), arena.Winner())
+	}
+}
+
+func TestStarterMapsEnlargedWithWallComplexity(t *testing.T) {
+	previous := map[string]int{"open-field": 0, "four-corners": 1, "corridors": 2, "pillars": 4, "crater": 2, "bunker-line": 10, "crossing-fire": 13, "vault": 15}
+	for id, m := range StarterMaps() {
+		if m.Width < 1200 {
+			t.Fatalf("%s must be at least 1200 wide, got %v", id, m.Width)
+		}
+		if len(m.Obstacles) <= previous[id] {
+			t.Fatalf("%s must gain wall complexity: %d obstacles, want more than %d", id, len(m.Obstacles), previous[id])
+		}
+		spawns := []Point{}
+		for _, points := range m.SpawnPoints {
+			spawns = append(spawns, points...)
+		}
+		if len(spawns) == 0 {
+			t.Fatalf("%s has no spawn points", id)
+		}
+		clearance := func(p Point) float64 {
+			best := math.Inf(1)
+			for _, o := range m.Obstacles {
+				var d float64
+				if o.Shape == "circle" {
+					d = math.Hypot(p.X-o.X, p.Y-o.Y) - o.Radius
+				} else {
+					dx := math.Max(o.X-p.X, math.Max(0, p.X-(o.X+o.Width)))
+					dy := math.Max(o.Y-p.Y, math.Max(0, p.Y-(o.Y+o.Height)))
+					d = math.Hypot(dx, dy)
+				}
+				best = math.Min(best, d)
+			}
+			return best
+		}
+		for _, s := range spawns {
+			if s.X < 0 || s.X > m.Width || s.Y < 0 || s.Y > m.Height {
+				t.Fatalf("%s spawn (%.0f, %.0f) outside the arena", id, s.X, s.Y)
+			}
+			if d := clearance(s); d < 30 {
+				t.Fatalf("%s spawn (%.0f, %.0f) has only %.1f clearance to obstacles, want >= 30", id, s.X, s.Y, d)
+			}
+		}
+		for i := 0; i < len(spawns); i++ {
+			for j := i + 1; j < len(spawns); j++ {
+				if math.Hypot(spawns[i].X-spawns[j].X, spawns[i].Y-spawns[j].Y) < RobotRadius*2 {
+					t.Fatalf("%s spawn points overlap: (%.0f, %.0f) vs (%.0f, %.0f)", id, spawns[i].X, spawns[i].Y, spawns[j].X, spawns[j].Y)
+				}
+			}
+		}
+	}
+}
+
+// TestVisionScopeAndSoloByteStable runs a solo sandbox where the robot drives
+// over a scope pickup (vision multipliers active) with SoloRobotID set, and
+// requires byte-identical event logs across same-seed runs.
+func TestVisionScopeAndSoloByteStable(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxTicks = 40
+	config.OvertimeTicks = 0
+	config.SoloRobotID = "solo-1"
+	robots := []RobotState{{RobotID: "solo-1", Team: "solo-01", X: 100, Y: 375, Heading: 0, HP: 100, Alive: true}}
+	run := func() (*Arena, []byte) {
+		a := NewWithConfig("vision-solo", robots, map[string]Controller{"solo-1": &fixedController{intent: Intent{Move: 8}}}, config)
+		a.addItem("scope", 130, 375, "drop")
+		for !a.Finished() {
+			a.Step(context.Background())
+		}
+		encoded, err := json.Marshal(a.EventLog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a, encoded
+	}
+	first, firstLog := run()
+	if _, secondLog := run(); !reflect.DeepEqual(firstLog, secondLog) {
+		t.Fatalf("vision+solo event logs differ across same-seed runs:\n%s\n%s", firstLog, secondLog)
+	}
+	picked := false
+	for _, event := range first.EventLog() {
+		if event.Type == "item_picked_up" && event.Message == "scope" {
+			picked = true
+		}
+	}
+	if !picked {
+		t.Fatal("scope pickup never happened in the stability run")
+	}
+	if !effectActive(*arenaRobot(first, "solo-1"), "optics") {
+		t.Fatalf("optics must stay active at the 40-tick mark: %+v", first.Robots[0].Effects)
+	}
+}
+
+func TestBotDifficultiesTierAimLead(t *testing.T) {
+	enemy := RobotState{RobotID: "enemy", Team: "blue", X: 300, Y: 100, Heading: 0, HP: 100, Alive: true}
+	aimX := func(id string, difficulty BotDifficulty) float64 {
+		bot := NewBotController(id, difficulty, PersonalityAggressive, DefaultMap(800, 500))
+		self := RobotState{RobotID: id, Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma"}
+		intent, err := bot.Tick(context.Background(), self, []RobotState{self, enemy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if intent.TargetX == nil || intent.TargetY != nil && *intent.TargetY != 100 {
+			t.Fatalf("%s bot did not aim along the firing line: %+v", difficulty, intent)
+		}
+		return *intent.TargetX
+	}
+	rookie, fighter, sharp := aimX("tier-rookie", BotRookie), aimX("tier-fighter", BotFighter), aimX("tier-sharp", BotSharpshooter)
+	if math.Abs(rookie-300) > .01 {
+		t.Fatalf("rookie must aim directly at the enemy, got %v", rookie)
+	}
+	fullLead := 300 + MaxMovePerTick*(200/ProjectileSpeed)
+	if fighter <= rookie || fighter >= fullLead {
+		t.Fatalf("fighter lead must be partial: rookie=%v fighter=%v full=%v", rookie, fighter, fullLead)
+	}
+	if math.Abs(sharp-fullLead) > .01 {
+		t.Fatalf("sharpshooter must apply the full lead %v, got %v", fullLead, sharp)
+	}
+}
+
+func TestBotHidesNearCoverWhenUnderFire(t *testing.T) {
+	m := DefaultMap(800, 500)
+	m.Obstacles = []Obstacle{{ID: "crate", Shape: "aabb", X: 200, Y: 300, Width: 60, Height: 80}}
+	bot := NewBotController("hider-1", BotFighter, PersonalityAggressive, m)
+	enemy := RobotState{RobotID: "enemy", Team: "blue", X: 400, Y: 250, Heading: 180, HP: 50, Alive: true}
+	self := RobotState{RobotID: "hider-1", Team: "red", X: 100, Y: 250, Heading: 0, HP: 55, Alive: true, Weapon: "plasma"}
+	if _, err := bot.Tick(context.Background(), self, []RobotState{self, enemy}); err != nil {
+		t.Fatal(err)
+	}
+	self.HP = 45 // the HP drop marks the bot as under fire
+	intent, err := bot.Tick(context.Background(), self, []RobotState{self, enemy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.state != stateHide {
+		t.Fatalf("damaged bot must retreat to cover, state=%q", bot.state)
+	}
+	if intent.TargetX != nil {
+		t.Fatalf("hiding bot must not chase: %+v", intent)
+	}
+	if intent.Move <= 0 {
+		t.Fatalf("hiding bot must drive toward cover: %+v", intent)
+	}
+	// The only cover ring sits south of the firing line while the enemy is
+	// due east, so the resulting heading must bend off the enemy bearing.
+	intended := self.Heading + clamp(intent.Turn, -MaxTurnPerTick, MaxTurnPerTick)
+	if math.Sin(intended*math.Pi/180) < .15 {
+		t.Fatalf("hide movement must steer off the enemy bearing: %+v", intent)
+	}
+}
+
+func TestBotEscapesLowHPWithDashAndMine(t *testing.T) {
+	bot := NewBotController("escaper-1", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+	enemy := RobotState{RobotID: "enemy", Team: "blue", X: 300, Y: 100, Heading: 180, HP: 100, Alive: true}
+	self := RobotState{RobotID: "escaper-1", Team: "red", X: 100, Y: 100, Heading: 180, HP: 15, Alive: true, Weapon: "plasma", DashCharges: 2, MineCharges: 1}
+	intent, err := bot.Tick(context.Background(), self, []RobotState{self, enemy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.state != stateEscape {
+		t.Fatalf("critically damaged bot must flee, state=%q", bot.state)
+	}
+	if !intent.Dash || intent.Move <= 0 || intent.TargetX != nil {
+		t.Fatalf("escaping bot must dash away without a chase target: %+v", intent)
+	}
+	if intent.Deploy != "mine" {
+		t.Fatalf("escaping bot with mine charges must drop a rear mine: %+v", intent)
+	}
+	if math.Abs(intent.Turn) > 30 {
+		t.Fatalf("escape heading should stay roughly away from the threat: %+v", intent)
+	}
+	// The rookie tier keeps no escape finesse: same situation, plain retreat.
+	rookie := NewBotController("escaper-2", BotRookie, PersonalityAggressive, DefaultMap(800, 500))
+	rookieIntent, err := rookie.Tick(context.Background(), self, []RobotState{self, enemy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rookie.state != stateEscape || rookieIntent.Dash || rookieIntent.Deploy != "" {
+		t.Fatalf("rookie retreat must stay plain: %+v", rookieIntent)
+	}
+}
+
+func TestBotSeeksHealingAndUpgradeItems(t *testing.T) {
+	bot := NewBotController("forager-1", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+	self := RobotState{RobotID: "forager-1", Team: "red", X: 100, Y: 100, Heading: 0, HP: 50, Alive: true, Weapon: "plasma"}
+	bot.SetWorld(WorldState{Tick: 1, Width: 800, Height: 500, VisionRange: 320, Items: []Item{{ItemID: "item-1", Type: "medkit", X: 220, Y: 100, Active: true}}})
+	intent, err := bot.Tick(context.Background(), self, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.state != stateItem {
+		t.Fatalf("hurt bot must fetch the medkit, state=%q", bot.state)
+	}
+	if intent.Move <= 0 || intent.TargetX != nil || intent.Fire {
+		t.Fatalf("item run must be a plain move: %+v", intent)
+	}
+	if math.Abs(intent.Turn) > 8 {
+		t.Fatalf("item run should steer straight at the pickup: %+v", intent)
+	}
+	// A full-HP bot ignores the medkit but wants the scope upgrade.
+	self.HP = 100
+	upgrader := NewBotController("forager-2", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+	upgrader.SetWorld(WorldState{Tick: 1, Width: 800, Height: 500, VisionRange: 320, Items: []Item{
+		{ItemID: "item-1", Type: "medkit", X: 140, Y: 100, Active: true},
+		{ItemID: "item-2", Type: "scope", X: 220, Y: 100, Active: true},
+	}})
+	intent, err = upgrader.Tick(context.Background(), self, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgrader.state != stateItem {
+		t.Fatalf("stock-weapon bot must chase the scope, state=%q", upgrader.state)
+	}
+	if math.Abs(intent.Turn) > 8 {
+		t.Fatalf("scope run should head east past the medkit: %+v", intent)
+	}
+	// With optics already active the scope loses value and the bot patrols.
+	self.Effects = []StatusEffect{{Type: "optics", Ticks: 100}}
+	content := NewBotController("forager-3", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+	content.SetWorld(WorldState{Tick: 1, Width: 800, Height: 500, VisionRange: 320, Items: []Item{{ItemID: "item-2", Type: "scope", X: 220, Y: 100, Active: true}}})
+	if intent, err = content.Tick(context.Background(), self, nil); err != nil {
+		t.Fatal(err)
+	}
+	if content.state != statePatrol {
+		t.Fatalf("optics holder must not chase another scope, state=%q", content.state)
+	}
+}
+
+func TestBotHuntsLastKnownEnemyAndScans(t *testing.T) {
+	bot := NewBotController("hunter-1", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+	self := RobotState{RobotID: "hunter-1", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma"}
+	enemy := RobotState{RobotID: "enemy", Team: "blue", X: 300, Y: 100, Heading: 180, HP: 100, Alive: true}
+	if _, err := bot.Tick(context.Background(), self, []RobotState{self, enemy}); err != nil {
+		t.Fatal(err)
+	}
+	// The enemy breaks contact: the bot must chase the last known position
+	// and sweep the quadrant with a scan.
+	intent, err := bot.Tick(context.Background(), self, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.state != stateHunt {
+		t.Fatalf("fresh memory must drive the hunt, state=%q", bot.state)
+	}
+	if intent.Scan == nil || intent.Scan.X != 300 || intent.Scan.Y != 100 || intent.Scan.Radius != 300 {
+		t.Fatalf("hunter must scan the last known quadrant: %+v", intent.Scan)
+	}
+	if intent.Move <= 0 || intent.TargetX != nil {
+		t.Fatalf("hunt must be a plain move toward memory: %+v", intent)
+	}
+	// The scan report lands on the robot state the following tick.
+	self.ScanResult = &ScanReport{X: 300, Y: 100, Radius: 300, Enemies: []ScannedRobot{{RobotID: "enemy", Team: "blue", X: 340, Y: 120, HP: 100, Distance: 244}}}
+	intent, err = bot.Tick(context.Background(), self, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.state != stateHunt {
+		t.Fatalf("scan contact must refresh the hunt, state=%q", bot.state)
+	}
+	intended := self.Heading + clamp(intent.Turn, -MaxTurnPerTick, MaxTurnPerTick)
+	want := normalizeDegrees(math.Atan2(20, 240) * 180 / math.Pi)
+	if math.Abs(shortestTurn(intended, want)) > 8 {
+		t.Fatalf("hunt must steer toward the scanned contact: got %v want %v", intended, want)
+	}
+}
+
+func TestBotPatrolsAnchorsWhenIdle(t *testing.T) {
+	bot := NewBotController("patrol-1", BotRookie, PersonalityAggressive, DefaultMap(800, 500))
+	self := RobotState{RobotID: "patrol-1", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma"}
+	intent, err := bot.Tick(context.Background(), self, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.state != statePatrol {
+		t.Fatalf("idle bot must patrol, state=%q", bot.state)
+	}
+	if len(bot.anchors) != 4 {
+		t.Fatalf("patrol loop needs four anchors: %v", bot.anchors)
+	}
+	if intent.Move <= 0 || intent.Fire || intent.TargetX != nil || intent.Scan != nil {
+		t.Fatalf("patrol must be a plain wander: %+v", intent)
+	}
+}
+
+func TestBotDodgesIncomingProjectiles(t *testing.T) {
+	bot := NewBotController("dodger-1", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+	self := RobotState{RobotID: "dodger-1", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma"}
+	enemy := RobotState{RobotID: "enemy", Team: "blue", X: 300, Y: 100, Heading: 180, HP: 100, Alive: true}
+	bot.SetWorld(WorldState{Tick: 1, Width: 800, Height: 500, VisionRange: 320, Projectiles: []Projectile{{ProjectileID: "p1", OwnerID: "enemy", Team: "blue", Kind: "plasma", X: 220, Y: 100, VX: -24, TTL: 10}}})
+	intent, err := bot.Tick(context.Background(), self, []RobotState{self, enemy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bot.state != stateCombat || bot.dodgeTicks <= 0 {
+		t.Fatalf("incoming shot must trigger a dodge episode: state=%q ticks=%d", bot.state, bot.dodgeTicks)
+	}
+	if intent.TargetX != nil || intent.Fire {
+		t.Fatalf("dodge must drop the aim lock: %+v", intent)
+	}
+	// A quarter-turn sidestep takes several ticks at the 18°/tick turn limit;
+	// accumulate clamped turns while the commitment lasts and require the
+	// heading to end up perpendicular to the east-west shot lane.
+	intended := self.Heading
+	for range 5 {
+		intended += clamp(intent.Turn, -MaxTurnPerTick, MaxTurnPerTick)
+		if intent, err = bot.Tick(context.Background(), self, []RobotState{self, enemy}); err != nil {
+			t.Fatal(err)
+		}
+		if bot.dodgeTicks <= 0 || intent.TargetX != nil {
+			t.Fatalf("dodge commitment must persist: ticks=%d intent=%+v", bot.dodgeTicks, intent)
+		}
+	}
+	intended += clamp(intent.Turn, -MaxTurnPerTick, MaxTurnPerTick)
+	if math.Abs(math.Cos(intended*math.Pi/180)) > .4 {
+		t.Fatalf("dodge must sidestep perpendicular to the shot: heading %v", intended)
+	}
+}
+
+func TestBotStatefulRunRemainsDeterministicPerSeed(t *testing.T) {
+	run := func() []Intent {
+		bot := NewBotController("bot-state-1", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+		self := RobotState{RobotID: "bot-state-1", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma"}
+		enemy := RobotState{RobotID: "enemy", Team: "blue", X: 300, Y: 220, Heading: 90, HP: 100, Alive: true}
+		intents := []Intent{}
+		// Scripted 90-tick scenario: contact with an incoming shot, damage,
+		// a critical escape window, healing items, then silence so the run
+		// walks through combat, dodge, hide, escape, hunt, item, and patrol.
+		for tick := 1; tick <= 90; tick++ {
+			switch tick {
+			case 30:
+				self.HP = 45
+			case 50:
+				self.HP = 22
+			case 70:
+				self.HP = 90
+			}
+			view := []RobotState{self}
+			world := WorldState{Tick: tick, Width: 800, Height: 500, VisionRange: 320}
+			if tick%2 == 0 {
+				world.Items = []Item{{ItemID: "item-1", Type: "medkit", X: 200, Y: 150, Active: true}}
+			}
+			if tick > 20 && tick < 24 {
+				view = append(view, enemy)
+				world.Projectiles = []Projectile{{ProjectileID: "p1", OwnerID: "enemy", Team: "blue", Kind: "plasma", X: 260, Y: 180, VX: -20, VY: 10, TTL: 10}}
+			}
+			bot.SetWorld(world)
+			intent, err := bot.Tick(context.Background(), self, view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			intents = append(intents, intent)
+		}
+		return intents
+	}
+	if !reflect.DeepEqual(run(), run()) {
+		t.Fatal("stateful bot run diverged for identical seeds")
 	}
 }

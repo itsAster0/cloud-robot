@@ -1,9 +1,15 @@
+-- Example robot: evasive kiter. Mirrors internal/scripts/templates/evasive.lua.
+-- Vision: enemies, items, projectiles, and mines beyond the vision range
+-- (default 320 units) never appear in observations; the rare `scope` pickup
+-- doubles vision for 150 ticks so a runner spots threats early.
 local arena = require "arena"
 
 -- Kiter: keeps enemies in a 70-160 unit band, flips strafe direction on
--- random intervals, grabs heals when hurt and upgrades when safe, and flees
--- to the farthest corner when critical. Randomness is seeded from the robot
--- ID so two boxes dodge differently without wall-clock time.
+-- random intervals, grabs heals and scopes when hurt (spotting threats early
+-- is worth a lot to a runner), and flees to the farthest corner when critical.
+-- Incoming fire while hurt sends it behind cover that breaks line of sight,
+-- falling back to the SDK dodge point. Randomness is seeded from the robot ID
+-- so two boxes dodge differently without wall-clock time.
 
 local seed = 0
 local robot_id = os.getenv("ROBOT_ID") or "kiter"
@@ -13,7 +19,8 @@ end
 math.randomseed(seed)
 
 local PROJECTILE_SPEED = { plasma = 24, cannon = 14, machine_gun = 32, incendiary = 20, cryo = 20, emp = 18, railgun = 0 }
-local UPGRADE_SCORE = { shield = 70, overdrive = 65, rapid_fire = 65, weapon_railgun = 100, weapon_cannon = 80, weapon_incendiary = 55, weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30 }
+-- Scope ranks high: a runner that spots threats early lives longer.
+local UPGRADE_SCORE = { scope = 80, shield = 70, medkit = 75, overdrive = 65, nano_repair = 60, rapid_fire = 65, weapon_railgun = 100, weapon_cannon = 80, weapon_incendiary = 55, weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30 }
 
 local state = { strafe = 1, flip_at = 0, last_x = nil, last_y = nil, stuck = 0, escape = 0, escape_turn = 0, wander = nil }
 
@@ -54,11 +61,38 @@ local function best_upgrade(obs, max_distance)
       if (item.type == "shield" and obs.self.shield >= 50) or (obs.self.weapon ~= "" and item.type == "weapon_" .. obs.self.weapon) then
         score = 0
       end
+      -- Heals are worthless at full HP; the server skips them in overtime.
+      if (item.type == "medkit" and (obs.overtime or obs.self.hp >= obs.self.maxHp)) or (item.type == "nano_repair" and obs.self.hp >= obs.self.maxHp) then
+        score = 0
+      end
       local distance = arena.distance(obs.self, item)
-      if score > 0 and distance <= max_distance then
+      if score > 0 and distance <= (max_distance or math.huge) then
         local value = score / (distance + 20)
         if not best_value or value > best_value then best, best_value = item, value end
       end
+    end
+  end
+  return best
+end
+
+-- Finds the closest point behind an obstacle that breaks line of sight to the
+-- shooter: the obstacle center pushed slightly past, away from the shooter,
+-- kept only when the segment from there back to the shooter is really blocked.
+local function cover_point(obs, shooter)
+  local self, best, best_distance = obs.self, nil, nil
+  for _, obstacle in ipairs(obs.obstacles or {}) do
+    local cx, cy
+    if obstacle.radius then
+      cx, cy = obstacle.x, obstacle.y
+    else
+      cx, cy = obstacle.x + (obstacle.width or 0) / 2, obstacle.y + (obstacle.height or 0) / 2
+    end
+    local x, y = cx + (cx - shooter.x) * 0.35, cy + (cy - shooter.y) * 0.35
+    if obs.arenaWidth then x = math.max(20, math.min(obs.arenaWidth - 20, x)) end
+    if obs.arenaHeight then y = math.max(20, math.min(obs.arenaHeight - 20, y)) end
+    if not arena.line_of_sight(x, y, shooter.x, shooter.y, obs.obstacles) then
+      local distance = arena.distance(self, { x = x, y = y })
+      if not best_distance or distance < best_distance then best, best_distance = { x = x, y = y }, distance end
     end
   end
   return best
@@ -97,9 +131,22 @@ local function decide(observation)
     end
   end
 
+  -- Incoming fire while hurt: slip behind cover that breaks line of sight to
+  -- the shooter, or take the SDK dodge point when no obstacle cooperates.
+  -- A healthy kiter just strafes through the danger.
+  if arena.danger_level(observation) > 0 and self.hp < self.maxHp * 0.6 and enemy then
+    local target = cover_point(observation, enemy) or arena.dodge(observation)
+    if target then
+      local held = unstick(observation, { moving = true })
+      if held then return held end
+      return navigate(observation, target.x, target.y, 8, "breaking line of sight")
+    end
+  end
+
   -- Critical: sprint for the nearest heal, or open the gap with retreat fire.
   if self.hp < self.maxHp * 0.6 then
-    local heal = arena.nearest_item(observation, "heal") or arena.nearest_item(observation, "repair-core")
+    local heal = arena.nearest_item(observation, "heal") or arena.nearest_item(observation, "medkit")
+      or arena.nearest_item(observation, "repair-core") or arena.nearest_item(observation, "nano_repair")
     if heal and not observation.overtime then
       local held = unstick(observation, { moving = true })
       if held then return held end

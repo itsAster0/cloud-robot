@@ -7,8 +7,8 @@ import (
 
 func TestListReturnsCuratedTemplates(t *testing.T) {
 	templates := List()
-	if len(templates) != 4 {
-		t.Fatalf("expected 4 templates, got %d: %+v", len(templates), templates)
+	if len(templates) != 6 {
+		t.Fatalf("expected 6 templates, got %d: %+v", len(templates), templates)
 	}
 	for _, template := range templates {
 		if template.Description == "" {

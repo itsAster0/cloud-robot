@@ -68,6 +68,7 @@ func GenerateMap(seed uint64, style string, width, height float64) (MapDefinitio
 	m.ItemSpawnZones = proceduralItemZones(width, height)
 	m.Hazards = proceduralHazards(style, width, height)
 	carveForConnectivity(&m)
+	ensureSpawnCover(&m)
 	return m, nil
 }
 
@@ -114,88 +115,219 @@ func (b *obstacleBuilder) piece(horizontal bool, fixed, a, z, thickness float64)
 	}
 }
 
-// proceduralMazeWalls builds the left half of a wall-segment maze: vertical
-// dividers with door gaps plus horizontal cross walls. The last vertical line
-// sits on the mirror axis and maps onto itself, acting as the team divider
-// whose doors are the only crossings besides carved lanes.
+// proceduralMazeWalls builds the left half of a braided recursive-division
+// maze: the cell grid is divided with door-bearing walls, seeded avenues open
+// long lanes, and every dead-end cell gets a second exit so robots keep loops
+// to escape through instead of single-lane culs. Pillar circles at cell
+// centers add anchor cover away from the walls.
 func proceduralMazeWalls(rng *rand.Rand, half, height float64) []Obstacle {
-	b := &obstacleBuilder{prefix: "maze"}
-	cols := clampInt(int(math.Round(half/90)), 2, 7)
-	rows := clampInt(int(math.Round(height/90)), 2, 7)
+	cols := clampInt(int(math.Round(half/90)), 3, 9)
+	rows := clampInt(int(math.Round(height/90)), 3, 10)
 	cw, ch := half/float64(cols), height/float64(rows)
-	thickness := func() float64 { return 16 + rng.Float64()*6 }
-	for line := 1; line <= cols; line++ {
-		// Skipping a few dividers leaves open lanes; the mirror-line divider is
-		// always kept so the halves meet only through its doors.
-		if line != cols && rng.Float64() < 0.25 {
-			continue
-		}
-		perm := rng.Perm(rows)
-		gaps := make([][2]float64, 0, 3)
-		for _, row := range perm[:2+rng.IntN(2)] {
-			gaps = append(gaps, [2]float64{float64(row)*ch + ch*0.15, float64(row+1)*ch - ch*0.15})
-		}
-		b.segmentedWall(false, float64(line)*cw-thickness()/2, 0, height, thickness(), gaps)
+	// vOpen[c][r] marks the wall between cells (c,r) and (c+1,r) as open;
+	// hOpen[r][c] the wall between (c,r) and (c,r+1).
+	vOpen := make([][]bool, cols-1)
+	for c := range vOpen {
+		vOpen[c] = make([]bool, rows)
 	}
-	for line := 1; line < rows; line++ {
-		if rng.Float64() < 0.45 {
-			continue
+	hOpen := make([][]bool, rows-1)
+	for r := range hOpen {
+		hOpen[r] = make([]bool, cols)
+	}
+	var divide func(x0, y0, x1, y1 int)
+	divide = func(x0, y0, x1, y1 int) {
+		w, h := x1-x0+1, y1-y0+1
+		if w < 2 && h < 2 {
+			return
 		}
-		perm := rng.Perm(cols)
-		gaps := make([][2]float64, 0, 2)
-		for _, col := range perm[:2] {
-			gaps = append(gaps, [2]float64{float64(col)*cw + cw*0.15, float64(col+1)*cw - cw*0.15})
+		if (w > h || (w == h && rng.IntN(2) == 0)) && w >= 2 {
+			c := x0 + rng.IntN(w-1)
+			door := y0 + rng.IntN(h)
+			for r := y0; r <= y1; r++ {
+				vOpen[c][r] = r == door
+			}
+			divide(x0, y0, c, y1)
+			divide(c+1, y0, x1, y1)
+			return
 		}
-		b.segmentedWall(true, float64(line)*ch-thickness()/2, 0, half, thickness(), gaps)
+		if h >= 2 {
+			r := y0 + rng.IntN(h-1)
+			door := x0 + rng.IntN(w)
+			for c := x0; c <= x1; c++ {
+				hOpen[r][c] = c == door
+			}
+			divide(x0, y0, x1, r)
+			divide(x0, r+1, x1, y1)
+		}
+	}
+	divide(0, 0, cols-1, rows-1)
+	// Avenues: fully open rows (and sometimes a column) give the maze long
+	// highways that double as escape and flank routes.
+	for _, r := range rng.Perm(rows)[:1+rng.IntN(2)] {
+		for c := range vOpen {
+			vOpen[c][r] = true
+		}
+	}
+	if rng.IntN(2) == 0 {
+		c := rng.IntN(cols - 1)
+		for r := range hOpen {
+			hOpen[r][c] = true
+		}
+	}
+	// Braid: open one extra wall per dead-end cell so every pocket keeps a
+	// second exit; the scan order is fixed for determinism.
+	openEdges := func(c, r int) int {
+		n := 0
+		if c > 0 && vOpen[c-1][r] {
+			n++
+		}
+		if c < cols-2 && vOpen[c][r] {
+			n++
+		}
+		if r > 0 && hOpen[r-1][c] {
+			n++
+		}
+		if r < rows-2 && hOpen[r][c] {
+			n++
+		}
+		return n
+	}
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			if openEdges(c, r) != 1 {
+				continue
+			}
+			candidates := [][2]int{}
+			if c > 0 && !vOpen[c-1][r] {
+				candidates = append(candidates, [2]int{c - 1, r})
+			}
+			if c < cols-2 && !vOpen[c][r] {
+				candidates = append(candidates, [2]int{c + 1, r})
+			}
+			if r > 0 && !hOpen[r-1][c] {
+				candidates = append(candidates, [2]int{c, r - 1})
+			}
+			if r < rows-2 && !hOpen[r][c] {
+				candidates = append(candidates, [2]int{c, r + 1})
+			}
+			if len(candidates) == 0 {
+				continue
+			}
+			pick := candidates[rng.IntN(len(candidates))]
+			if pick[0] != c {
+				vOpen[min(pick[0], c)][r] = true
+			} else {
+				hOpen[min(pick[1], r)][c] = true
+			}
+		}
+	}
+	b := &obstacleBuilder{prefix: "maze"}
+	for c := 0; c < cols-1; c++ {
+		thickness := 16 + rng.Float64()*6
+		fixed := float64(c+1)*cw - thickness/2
+		r := 0
+		for r < rows {
+			if vOpen[c][r] {
+				r++
+				continue
+			}
+			start := r
+			for r < rows && !vOpen[c][r] {
+				r++
+			}
+			b.aabb(fixed, float64(start)*ch, thickness, float64(r-start)*ch)
+		}
+	}
+	for r := 0; r < rows-1; r++ {
+		thickness := 16 + rng.Float64()*6
+		fixed := float64(r+1)*ch - thickness/2
+		c := 0
+		for c < cols {
+			if hOpen[r][c] {
+				c++
+				continue
+			}
+			start := c
+			for c < cols && !hOpen[r][c] {
+				c++
+			}
+			b.aabb(float64(start)*cw, fixed, float64(c-start)*cw, thickness)
+		}
+	}
+	for i, n := 0, 4+rng.IntN(5); i < n; i++ {
+		cx := (float64(rng.IntN(cols)) + .5) * cw
+		cy := (float64(rng.IntN(rows)) + .5) * ch
+		radius := 12 + rng.Float64()*6
+		if pointClear(b.obstacles, cx, cy, radius+8) {
+			b.circle(cx, cy, radius)
+		}
 	}
 	return b.obstacles
 }
 
-// proceduralRooms lays 4-8 rooms on a coarse grid over the left half. Each
-// room is either a solid block or a wall ring with two door gaps; the gaps in
-// the ring plus the open lanes between rooms form the corridors.
+type bspLeaf struct{ x0, y0, x1, y1 float64 }
+
+// proceduralRooms BSP-splits the left half into 4+ rooms with doored wall
+// rings, links them with a minimum spanning tree of carved corridors, and
+// drops interior cover into the larger rooms. Corridor carving only removes
+// geometry inside the two rooms it joins, so rooms keep their shape.
 func proceduralRooms(rng *rand.Rand, half, height float64) []Obstacle {
 	b := &obstacleBuilder{prefix: "rooms"}
-	cols := clampInt(int(math.Round(half/110)), 2, 3)
-	rows := clampInt(int(math.Round(height/110)), 2, 3)
-	cw, ch := half/float64(cols), height/float64(rows)
-	cells := make([][2]int, 0, cols*rows)
-	for row := 0; row < rows; row++ {
-		for col := 0; col < cols; col++ {
-			cells = append(cells, [2]int{col, row})
+	const minLeafSide = 150.0
+	target := 8 + rng.IntN(7)
+	leaves := []bspLeaf{{0, 0, half, height}}
+	for len(leaves) < target {
+		bestIndex, bestLongest := -1, 0.0
+		for i, leaf := range leaves {
+			w, h := leaf.x1-leaf.x0, leaf.y1-leaf.y0
+			longest := math.Max(w, h)
+			if math.Min(w, h) < minLeafSide*2-40 || longest <= bestLongest {
+				continue
+			}
+			bestIndex, bestLongest = i, longest
 		}
+		if bestIndex < 0 {
+			break
+		}
+		leaf := leaves[bestIndex]
+		w, h := leaf.x1-leaf.x0, leaf.y1-leaf.y0
+		var a, c bspLeaf
+		if w >= h {
+			split := clamp(leaf.x0+w*(0.35+rng.Float64()*0.3), leaf.x0+minLeafSide, leaf.x1-minLeafSide)
+			a, c = bspLeaf{leaf.x0, leaf.y0, split, leaf.y1}, bspLeaf{split, leaf.y0, leaf.x1, leaf.y1}
+		} else {
+			split := clamp(leaf.y0+h*(0.35+rng.Float64()*0.3), leaf.y0+minLeafSide, leaf.y1-minLeafSide)
+			a, c = bspLeaf{leaf.x0, leaf.y0, leaf.x1, split}, bspLeaf{leaf.x0, split, leaf.x1, leaf.y1}
+		}
+		leaves[bestIndex] = a
+		leaves = append(leaves, c)
 	}
-	rng.Shuffle(len(cells), func(i, j int) { cells[i], cells[j] = cells[j], cells[i] })
-	count := clampInt(4+rng.IntN(5), 4, len(cells))
-	thickness := 18.0
-	for _, cell := range cells[:count] {
-		side := math.Min(60+rng.Float64()*80, math.Min(cw*0.55, ch*0.55))
-		side = math.Max(side, 48)
-		x := float64(cell[0])*cw + (cw-side)/2
-		y := float64(cell[1])*ch + (ch-side)/2
-		if rng.Float64() < 0.3 {
-			b.aabb(x, y, side, side)
+	roomRects := make([]bspLeaf, 0, len(leaves))
+	for _, leaf := range leaves {
+		room := bspLeaf{leaf.x0 + 12, leaf.y0 + 12, leaf.x1 - 12, leaf.y1 - 12}
+		if room.x1-room.x0 < 90 || room.y1-room.y0 < 90 {
 			continue
 		}
-		// Two of the four ring walls get a centered door gap; the rest stay
-		// solid so rooms read as rooms, not rubble.
+		rb := &obstacleBuilder{prefix: fmt.Sprintf("rooms-r%d", len(roomRects))}
 		doors := map[int]bool{}
-		for _, wall := range rng.Perm(4)[:2] {
+		for _, wall := range rng.Perm(4)[:1+rng.IntN(2)] {
 			doors[wall] = true
 		}
-		midX, midY := x+side/2, y+side/2
+		thickness := 18.0
+		gapHalf := 28.0 + rng.Float64()*6
+		midX, midY := (room.x0+room.x1)/2, (room.y0+room.y1)/2
 		for wall := 0; wall < 4; wall++ {
 			var horizontal bool
 			var fixed, start, end float64
 			switch wall {
 			case 0: // top
-				horizontal, fixed, start, end = true, y, x, x+side
+				horizontal, fixed, start, end = true, room.y0, room.x0, room.x1
 			case 1: // right
-				fixed, start, end = x+side-thickness, y, y+side
+				fixed, start, end = room.x1-thickness, room.y0, room.y1
 			case 2: // bottom
-				horizontal, fixed, start, end = true, y+side-thickness, x, x+side
+				horizontal, fixed, start, end = true, room.y1-thickness, room.x0, room.x1
 			default: // left
-				fixed, start, end = x, y, y+side
+				fixed, start, end = room.x0, room.y0, room.y1
 			}
 			gaps := [][2]float64{}
 			if doors[wall] {
@@ -203,21 +335,99 @@ func proceduralRooms(rng *rand.Rand, half, height float64) []Obstacle {
 				if !horizontal {
 					center = midY
 				}
-				gaps = append(gaps, [2]float64{center - 28, center + 28})
+				gaps = append(gaps, [2]float64{center - gapHalf, center + gapHalf})
 			}
-			b.segmentedWall(horizontal, fixed, start, end, thickness, gaps)
+			rb.segmentedWall(horizontal, fixed, start, end, thickness, gaps)
+		}
+		w, h := room.x1-room.x0, room.y1-room.y0
+		if math.Min(w, h) >= 150 {
+			for p, pieces := 0, 1+rng.IntN(2); p < pieces; p++ {
+				if rng.IntN(2) == 0 {
+					cw, ch := 40+rng.Float64()*20, 40+rng.Float64()*20
+					x := room.x0 + 26 + rng.Float64()*math.Max(1, w-52-cw)
+					y := room.y0 + 26 + rng.Float64()*math.Max(1, h-52-ch)
+					if pointClear(append([]Obstacle(nil), rb.obstacles...), x+cw/2, y+ch/2, 26) {
+						rb.aabb(x, y, cw, ch)
+					}
+				} else {
+					cx := room.x0 + 34 + rng.Float64()*math.Max(1, w-68)
+					cy := room.y0 + 34 + rng.Float64()*math.Max(1, h-68)
+					if pointClear(append([]Obstacle(nil), rb.obstacles...), cx, cy, 30) {
+						rb.circle(cx, cy, 14+rng.Float64()*5)
+					}
+				}
+			}
+		}
+		b.obstacles = append(b.obstacles, rb.obstacles...)
+		roomRects = append(roomRects, room)
+	}
+	// Minimum spanning tree over room centers (deterministic Prim) — every
+	// room is reachable through carved corridors.
+	if len(roomRects) > 1 {
+		connected := []int{0}
+		remaining := make([]int, 0, len(roomRects)-1)
+		for i := 1; i < len(roomRects); i++ {
+			remaining = append(remaining, i)
+		}
+		for len(remaining) > 0 {
+			bestDist, bestA, bestB := math.MaxFloat64, 0, 0
+			for _, a := range connected {
+				for _, c := range remaining {
+					ac, cc := roomRects[a], roomRects[c]
+					d := math.Hypot((ac.x0+ac.x1)/2-(cc.x0+cc.x1)/2, (ac.y0+ac.y1)/2-(cc.y0+cc.y1)/2)
+					if d < bestDist {
+						bestDist, bestA, bestB = d, a, c
+					}
+				}
+			}
+			carveRoomCorridor(&b.obstacles, roomRects[bestA], roomRects[bestB])
+			for i, c := range remaining {
+				if c == bestB {
+					remaining = append(remaining[:i], remaining[i+1:]...)
+					break
+				}
+			}
+			connected = append(connected, bestB)
 		}
 	}
 	return b.obstacles
 }
 
-// proceduralBunkers scatters crates and pillars over the left half, kept clear
-// of the center vault ring added after mirroring.
+// carveRoomCorridor opens a 70-unit L-shaped strip between two room centers,
+// clamped to the union of the two room rects so unrelated rooms keep their
+// walls. Cutting only removes geometry, so it can never seal a room.
+func carveRoomCorridor(obstacles *[]Obstacle, a, c bspLeaf) {
+	const half = 35.0
+	ax, ay := (a.x0+a.x1)/2, (a.y0+a.y1)/2
+	cx, cy := (c.x0+c.x1)/2, (c.y0+c.y1)/2
+	ux0, uy0 := math.Min(a.x0, c.x0), math.Min(a.y0, c.y0)
+	ux1, uy1 := math.Max(a.x1, c.x1), math.Max(a.y1, c.y1)
+	hx0, hx1 := clamp(math.Min(ax, cx)-half, ux0, ux1), clamp(math.Max(ax, cx)+half, ux0, ux1)
+	hy0, hy1 := clamp(ay-half, uy0, uy1), clamp(ay+half, uy0, uy1)
+	carveRectList(obstacles, hx0, hy0, hx1-hx0, hy1-hy0)
+	vx0, vx1 := clamp(cx-half, ux0, ux1), clamp(cx+half, ux0, ux1)
+	vy0, vy1 := clamp(math.Min(ay, cy)-half, uy0, uy1), clamp(math.Max(ay, cy)+half, uy0, uy1)
+	carveRectList(obstacles, vx0, vy0, vx1-vx0, vy1-vy0)
+}
+
+func carveRectList(obstacles *[]Obstacle, x, y, w, h float64) {
+	kept := (*obstacles)[:0]
+	for _, o := range *obstacles {
+		if !obstacleIntersectsRect(o, x, y, w, h) {
+			kept = append(kept, o)
+		}
+	}
+	*obstacles = kept
+}
+
+// proceduralBunkers scatters crates, L-shaped cover corners, broken trench
+// lines, and side pockets over the left half, kept clear of the center vault
+// ring added after mirroring.
 func proceduralBunkers(rng *rand.Rand, half, height float64) []Obstacle {
 	b := &obstacleBuilder{prefix: "bunkers"}
 	margin := 40.0
 	vaultKeepOut := 100.0
-	for i, crates := 0, 8+rng.IntN(7); i < crates; i++ {
+	for i, crates := 0, 6+rng.IntN(5); i < crates; i++ {
 		w, h := 40+rng.Float64()*50, 40+rng.Float64()*50
 		for attempt := 0; attempt < 24; attempt++ {
 			x := margin + rng.Float64()*(half-vaultKeepOut-margin-w)
@@ -228,6 +438,36 @@ func proceduralBunkers(rng *rand.Rand, half, height float64) []Obstacle {
 			b.aabb(x, y, w, h)
 			break
 		}
+	}
+	// Trench lines: broken horizontal walls with staggered gaps give mid-field
+	// cover without sealing lanes.
+	for i := 0; i < 2; i++ {
+		y := height*(0.33+0.34*float64(i)) - 8
+		gapA := half * (0.25 + rng.Float64()*0.2)
+		gapB := half * (0.6 + rng.Float64()*0.2)
+		b.segmentedWall(true, y, 40, half-110, 14+rng.Float64()*4, [][2]float64{{gapA, gapA + 70}, {gapB, gapB + 70}})
+	}
+	// L-shaped double crates read as cover corners to hide behind.
+	for i, n := 0, 3+rng.IntN(2); i < n; i++ {
+		w := 44 + rng.Float64()*18
+		x := 60 + rng.Float64()*(half-260)
+		y := 60 + rng.Float64()*(height-180)
+		if bunkersOverlap(b.obstacles, x, y, w, w) {
+			continue
+		}
+		b.aabb(x, y, w, w*0.5)
+		b.aabb(x, y, w*0.5, w)
+	}
+	// Side pockets: three-wall alcoves open toward the center — deliberate
+	// hiding spots near the flanks.
+	for _, py := range []float64{height * 0.24, height * 0.76} {
+		x, depth, thickness := 46.0, 80.0, 16.0
+		if bunkersOverlap(b.obstacles, x, py-depth/2, depth+40, depth) {
+			continue
+		}
+		b.aabb(x, py-depth/2, depth, thickness)
+		b.aabb(x, py+depth/2-thickness, depth, thickness)
+		b.aabb(x, py-depth/2, thickness, depth)
 	}
 	for i, pillars := 0, 2+rng.IntN(3); i < pillars; i++ {
 		r := 20 + rng.Float64()*15
@@ -297,6 +537,88 @@ func mirrorObstacles(left []Obstacle, width float64) []Obstacle {
 		out = append(out, mirror)
 	}
 	return out
+}
+
+// nearestObstacleDistance reports the distance from a point to the closest
+// obstacle surface (0 when the point is inside one).
+func nearestObstacleDistance(obstacles []Obstacle, x, y float64) float64 {
+	best := math.MaxFloat64
+	for _, o := range obstacles {
+		var d float64
+		if o.Shape == "circle" {
+			d = math.Abs(math.Hypot(x-o.X, y-o.Y) - o.Radius)
+		} else {
+			nx, ny := clamp(x, o.X, o.X+o.Width), clamp(y, o.Y, o.Y+o.Height)
+			d = math.Hypot(x-nx, y-ny)
+		}
+		best = math.Min(best, d)
+	}
+	return best
+}
+
+// ensureSpawnCover guarantees every spawn point has cover within ~90 units so
+// robots spawn next to a hiding spot instead of in the open. When the nudged
+// spawn landed in open space, a small crate is placed at a fixed offset toward
+// the arena center and mirrored for the opposing team. The crate is small on
+// purpose: corridor-style spawns may only have a ~70-unit gap to fit it in.
+func ensureSpawnCover(m *MapDefinition) {
+	const coverReach = 90.0
+	placed := 0
+	for _, p := range m.SpawnPoints["red"] {
+		if nearestObstacleDistance(m.Obstacles, p.X, p.Y) <= coverReach {
+			continue
+		}
+		base := math.Atan2(m.Height/2-p.Y, m.Width/2-p.X)
+		for attempt := 0; attempt < 16; attempt++ {
+			angle := base + float64(attempt)*math.Pi/8
+			distance := 55 + float64(attempt%2)*10
+			crate := Obstacle{ID: fmt.Sprintf("cover-%d", placed+1), Shape: "aabb", X: p.X + math.Cos(angle)*distance - 18, Y: p.Y + math.Sin(angle)*distance - 14, Width: 36, Height: 28}
+			crate.X = clamp(crate.X, 1, m.Width/2-37)
+			crate.Y = clamp(crate.Y, 1, m.Height-29)
+			if overlapsObstacleSolid(m.Obstacles, crate.X, crate.Y, crate.Width, crate.Height) {
+				continue
+			}
+			candidate := append(append([]Obstacle(nil), m.Obstacles...), crate, Obstacle{ID: crate.ID + "-m", Shape: "aabb", X: m.Width - crate.X - crate.Width, Y: crate.Y, Width: crate.Width, Height: crate.Height})
+			clear := true
+			for _, points := range m.SpawnPoints {
+				for _, sp := range points {
+					if !pointClear(candidate, sp.X, sp.Y, spawnClearance) {
+						clear = false
+						break
+					}
+				}
+				if !clear {
+					break
+				}
+			}
+			if !clear {
+				continue
+			}
+			probe := *m
+			probe.Obstacles = candidate
+			if !mapConnectivity(probe) {
+				continue
+			}
+			m.Obstacles = candidate
+			placed++
+			break
+		}
+	}
+}
+
+// overlapsObstacleSolid reports whether the box intersects any obstacle with
+// no margin — cover crates are allowed to hug walls so they fit corridors.
+func overlapsObstacleSolid(existing []Obstacle, x, y, w, h float64) bool {
+	for _, o := range existing {
+		ox, oy, ow, oh := o.X, o.Y, o.Width, o.Height
+		if o.Shape == "circle" {
+			ox, oy, ow, oh = o.X-o.Radius, o.Y-o.Radius, o.Radius*2, o.Radius*2
+		}
+		if x < ox+ow && x+w > ox && y < oy+oh && y+h > oy {
+			return true
+		}
+	}
+	return false
 }
 
 func proceduralSpawnPoints(obstacles []Obstacle, width, height float64) map[string][]Point {
@@ -510,13 +832,7 @@ func carveLPath(m *MapDefinition, from, to Point, channel float64) {
 }
 
 func carveRect(m *MapDefinition, x, y, w, h float64) {
-	kept := m.Obstacles[:0]
-	for _, o := range m.Obstacles {
-		if !obstacleIntersectsRect(o, x, y, w, h) {
-			kept = append(kept, o)
-		}
-	}
-	m.Obstacles = kept
+	carveRectList(&m.Obstacles, x, y, w, h)
 }
 
 func obstacleIntersectsRect(o Obstacle, x, y, w, h float64) bool {
