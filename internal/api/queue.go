@@ -197,7 +197,7 @@ func (s *Server) fillQueueWithBotAfterWait(userID, mode string) {
 
 func (s *Server) createQueuedMatch(ctx context.Context, entries ...*queueEntry) (model.Match, error) {
 	now := time.Now().UTC()
-	match := model.Match{MatchID: uuid.NewString(), OwnerID: entries[0].UserID, Status: model.MatchLobby, Mode: entries[0].Request.Mode, MapID: "open-field", ArenaWidth: 800, ArenaHeight: 500, Seed: now.UnixNano(), TickRate: 10, CreatedAt: now, Robots: []model.RobotSubmission{}}
+	match := model.Match{MatchID: uuid.NewString(), OwnerID: entries[0].UserID, Status: model.MatchLobby, Mode: entries[0].Request.Mode, MapID: "random-bunkers", ArenaWidth: 1200, ArenaHeight: 750, Seed: now.UnixNano(), TickRate: 10, CreatedAt: now, Robots: []model.RobotSubmission{}}
 	for index, entry := range entries {
 		robotID := uuid.NewString()
 		token, err := randomToken()

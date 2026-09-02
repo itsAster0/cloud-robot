@@ -195,7 +195,9 @@ func (s *Server) createMatch(w http.ResponseWriter, r *http.Request) {
 		if input.Mode == "squad" {
 			input.MapID = "corridors"
 		} else {
-			input.MapID = "open-field"
+			// Procedural cover walls by default: duels and solo runs spawn on
+			// a seed-stable bunker layout unless a mapId is given.
+			input.MapID = "random-bunkers"
 		}
 	}
 	selected, ok := engine.StarterMaps()[input.MapID]
@@ -206,7 +208,7 @@ func (s *Server) createMatch(w http.ResponseWriter, r *http.Request) {
 		}
 		// Procedural maps generate in the worker from the persisted match seed;
 		// only the default arena size is needed here.
-		selected = engine.DefaultMap(900, 600)
+		selected = engine.DefaultMap(1200, 750)
 	}
 	if input.ArenaWidth == 0 {
 		input.ArenaWidth = selected.Width
@@ -992,6 +994,7 @@ func (s *Server) watchMatch(w http.ResponseWriter, r *http.Request) {
 	cancelInitial()
 	channel, unsubscribe := s.hub.Subscribe(matchID)
 	defer unsubscribe()
+	sentArenaLayout := false
 	for {
 		select {
 		case <-r.Context().Done():
@@ -1001,6 +1004,11 @@ func (s *Server) watchMatch(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			// Obstacles never change during a match. Send them on this viewer's
+			// first snapshot, then omit them from the 10 Hz stream. Large
+			// procedural maps otherwise spend most browser time parsing and
+			// copying the same layout over and over.
+			event, sentArenaLayout = viewerEvent(event, sentArenaLayout)
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 			err := wsjson.Write(ctx, connection, event)
 			cancel()
@@ -1009,6 +1017,15 @@ func (s *Server) watchMatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func viewerEvent(event any, sentArenaLayout bool) (any, bool) {
+	snapshot, ok := event.(engine.Snapshot)
+	if !ok || !sentArenaLayout {
+		return event, sentArenaLayout || ok
+	}
+	snapshot.Obstacles = nil
+	return snapshot, true
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {

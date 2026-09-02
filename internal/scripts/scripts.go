@@ -23,9 +23,11 @@ type Template struct {
 // not deployable even if a .lua file somehow lands in the directory.
 var descriptions = map[string]string{
 	"aggressive": "Hunts the nearest enemy, leads shots, detours for heals, and strafes unpredictably up close.",
+	"demolisher": "Plants mines on approaching enemies, hunts the grenade launcher, scans for loot, and dashes clear of incoming fire.",
 	"evasive":    "Kites at long range with random strafe flips, grabs heals and shields, and flees when critical.",
-	"sniper":     "Holds mid range, fires only with line of sight, sidesteps randomly, and races for railguns.",
 	"patroller":  "Walks a randomized corner loop, detours for nearby items, and engages on sight.",
+	"sentinel":   "Holds map center, sweeps radar scans and cloaks to control the field, dodges fire, and relays enemy positions to teammates.",
+	"sniper":     "Holds mid range, fires only with line of sight, sidesteps randomly, and races for railguns.",
 }
 
 func List() []Template {

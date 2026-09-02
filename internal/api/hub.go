@@ -47,8 +47,20 @@ func (h *Hub) Subscribe(matchID string) (<-chan any, func()) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		delete(h.subscribers[matchID], channel)
+		if len(h.subscribers[matchID]) == 0 {
+			delete(h.subscribers, matchID)
+		}
 		close(channel)
 	}
+}
+
+// Forget drops the cached event for a completed match. Match state, results,
+// and replays already live in the store, so retaining a terminal websocket
+// event for every match only grows the API process over time.
+func (h *Hub) Forget(matchID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.last, matchID)
 }
 
 func (h *Hub) ViewerCounts() map[string]int {

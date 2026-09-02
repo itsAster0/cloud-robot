@@ -14,12 +14,16 @@ type ItemConfig struct {
 	PickupRadius    float64 `json:"pickupRadius"`
 }
 type ZoneConfig struct {
-	Enabled        bool    `json:"enabled"`
-	StartTick      int     `json:"startTick"`
-	EndTick        int     `json:"endTick"`
-	EndRadius      float64 `json:"endRadius"`
-	Damage         int     `json:"damage"`
-	DamageInterval int     `json:"damageInterval"`
+	Enabled   bool    `json:"enabled"`
+	StartTick int     `json:"startTick"`
+	EndTick   int     `json:"endTick"`
+	EndRadius float64 `json:"endRadius"`
+	Damage    int     `json:"damage"`
+	// StageCount splits the shrink window into that many equal segments
+	// separated by short hold pauses. Values <= 1 keep the legacy single
+	// continuous shrink; normalize() defaults it to 3 when the zone is on.
+	StageCount     int `json:"stageCount"`
+	DamageInterval int `json:"damageInterval"`
 }
 type Config struct {
 	Width           float64       `json:"width"`
@@ -39,10 +43,20 @@ type Config struct {
 	// CriticalChance is the percent of weapon hits that deal 1.5x damage.
 	// Zero disables crits; burn, ramming, and hazard damage never crit.
 	CriticalChance int `json:"criticalChance"`
+	// PowerSurgeEveryTicks drops one epic item at the arena center every N
+	// ticks; zero (or negative) disables the surge entirely.
+	PowerSurgeEveryTicks int `json:"powerSurgeEveryTicks"`
+	// VisionRange is the base perception radius for controller/agent world
+	// views; zero normalizes to DefaultVisionRange.
+	VisionRange float64 `json:"visionRange"`
+	// SoloRobotID names the single human robot in solo matches; the engine
+	// ends the match as soon as that robot stops being alive. Empty disables
+	// the check (plain solo sandbox still runs to the tick limit).
+	SoloRobotID string `json:"soloRobotId,omitempty"`
 }
 
 func DefaultConfig() Config {
-	return Config{Width: ArenaWidth, Height: ArenaHeight, Map: DefaultMap(ArenaWidth, ArenaHeight), MaxTicks: DefaultMaxTicks, Items: ItemConfig{SpawnMinTicks: 100, SpawnMaxTicks: 200, RespawnMinTicks: 100, RespawnMaxTicks: 150, MaxConcurrent: 3, PickupRadius: 20}, DropOnDeath: true, DropWeapons: true, Zone: ZoneConfig{StartTick: 1200, EndTick: 1800, EndRadius: 80, Damage: 2, DamageInterval: 10}, OvertimeTicks: 100, CriticalChance: 10}
+	return Config{Width: ArenaWidth, Height: ArenaHeight, Map: DefaultMap(ArenaWidth, ArenaHeight), MaxTicks: DefaultMaxTicks, Items: ItemConfig{SpawnMinTicks: 100, SpawnMaxTicks: 200, RespawnMinTicks: 100, RespawnMaxTicks: 150, MaxConcurrent: 3, PickupRadius: 20}, DropOnDeath: true, DropWeapons: true, Zone: ZoneConfig{Enabled: true, StartTick: 1200, EndTick: 1800, EndRadius: 80, Damage: 2, DamageInterval: 10, StageCount: 3}, OvertimeTicks: 100, CriticalChance: 10, PowerSurgeEveryTicks: 300, VisionRange: DefaultVisionRange}
 }
 func (c *Config) normalize() {
 	mapWidth, mapHeight := c.Map.Width, c.Map.Height
@@ -95,8 +109,14 @@ func (c *Config) normalize() {
 	if c.Zone.Damage <= 0 {
 		c.Zone.Damage = 2
 	}
+	if c.Zone.Enabled && c.Zone.StageCount <= 0 {
+		c.Zone.StageCount = 3
+	}
 	if c.RegenDelayTicks <= 0 {
 		c.RegenDelayTicks = 50
+	}
+	if c.VisionRange <= 0 {
+		c.VisionRange = DefaultVisionRange
 	}
 }
 
@@ -119,8 +139,10 @@ type Item struct {
 // grenade 3% each, cannon 2%, and the 1% railgun jackpot robots race for.
 func (a *Arena) rollItemKind() string {
 	switch roll := a.rng.IntN(100); {
-	case roll < 30:
+	case roll < 28:
 		return "heal"
+	case roll < 30:
+		return "scope"
 	case roll < 40:
 		return "shield"
 	case roll < 46:
@@ -173,7 +195,13 @@ func (a *Arena) rollItemKind() string {
 func (a *Arena) spawnInZone(zone SpawnZone) Item {
 	x := zone.X + a.rng.Float64()*zone.Width
 	y := zone.Y + a.rng.Float64()*zone.Height
-	a.addItem(a.rollItemKind(), x, y, "spawner")
+	kind := a.rollItemKind()
+	if !zone.Accepts(kind) {
+		// Keep one IntN(100) draw per spawn for byte-stable replays; typed
+		// zones fall back to their first listed kind.
+		kind = zone.Types[0]
+	}
+	a.addItem(kind, x, y, "spawner")
 	return a.Items[len(a.Items)-1]
 }
 
@@ -227,6 +255,25 @@ func (a *Arena) addItem(kind string, x, y float64, source string) {
 	a.Items = append(a.Items, Item{ItemID: "item-" + itoa(a.nextItem), Type: kind, X: x, Y: y, SpawnTick: a.TickNumber, Active: true, PickupRadius: a.Config.Items.PickupRadius, Source: source, Rarity: itemRarity(kind)})
 }
 func (a *Arena) dropItem(kind string, x, y float64) { a.addItem(kind, x, y, "drop") }
+
+// powerSurgeSurgeKinds is the fixed epic rotation; the surge kind is derived
+// from the tick counter, never the RNG, so repeated matches stay identical.
+var powerSurgeKinds = []string{"cloak", "berserker_charm", "vampiric_fang", "teleport_beacon", "frenzy", "weapon_grenade", "weapon_railgun"}
+
+// powerSurge drops one epic item at the arena center on every Nth tick
+// (Config.PowerSurgeEveryTicks). The kind rotates through a fixed list keyed
+// by the surge counter, making the whole schedule deterministic.
+func (a *Arena) powerSurge() []Event {
+	every := a.Config.PowerSurgeEveryTicks
+	if every <= 0 || a.TickNumber <= 0 || a.TickNumber%every != 0 {
+		return nil
+	}
+	kind := powerSurgeKinds[(a.TickNumber/every)%len(powerSurgeKinds)]
+	x, y := a.safeDrop(a.Config.Width/2, a.Config.Height/2)
+	a.addItem(kind, x, y, "surge")
+	item := a.Items[len(a.Items)-1]
+	return []Event{a.event(Event{Type: "power_surge", ItemID: item.ItemID, Message: kind, X: item.X, Y: item.Y})}
+}
 func (a *Arena) safeDrop(x, y float64) (float64, float64) {
 	x = clamp(x, RobotRadius, a.Config.Width-RobotRadius)
 	y = clamp(y, RobotRadius, a.Config.Height-RobotRadius)
@@ -346,6 +393,9 @@ func applyItem(r *RobotState, kind string) int {
 	case "scanner":
 		upsertEffect(r, "radar", 150, 1, "")
 		return 150
+	case "scope":
+		upsertEffect(r, "optics", 150, 1, "")
+		return 150
 	case "berserker_charm":
 		upsertEffect(r, "berserk", 80, 1, "")
 		return 80
@@ -385,7 +435,7 @@ func applyItem(r *RobotState, kind string) int {
 }
 func itemRarity(kind string) string {
 	switch kind {
-	case "shield", "overdrive", "rapid_fire", "medkit", "nano_repair", "armor_plate", "scanner", "dash_cell", "weapon_shotgun":
+	case "shield", "overdrive", "rapid_fire", "medkit", "nano_repair", "armor_plate", "scanner", "dash_cell", "scope", "weapon_shotgun":
 		return "rare"
 	case "weapon_railgun", "weapon_grenade", "weapon_mine_layer", "cloak", "teleport_beacon", "berserker_charm", "vampiric_fang", "frenzy":
 		return "epic"
@@ -468,6 +518,18 @@ func effectMultiplier(r RobotState, kind string, fallback float64) float64 {
 // Observation filtering for cloaked robots lives with the vision pass.
 func isCloaked(r RobotState) bool { return effectActive(r, "cloak") }
 
+// visionMult is the per-tick vision multiplier granted by perception effects:
+// optics (the scope pickup) beats radar, otherwise the base range applies.
+func visionMult(r RobotState) float64 {
+	if effectActive(r, "optics") {
+		return 2.0
+	}
+	if effectActive(r, "radar") {
+		return 1.75
+	}
+	return 1
+}
+
 // breakCloak removes an active cloak early: firing a shot or taking any hit
 // reveals the robot.
 func breakCloak(r *RobotState) {
@@ -485,8 +547,15 @@ type ZoneState struct {
 	Y      float64 `json:"y"`
 	Radius float64 `json:"radius"`
 	Damage int     `json:"damage"`
+	// Stage is 0 before the zone starts, 1..StageCount while collapsing
+	// (StageCount = final ring), so browsers can render the current phase.
+	Stage int `json:"stage,omitempty"`
 }
 
+// zoneState builds the shared zone view for the current tick. With
+// StageCount <= 1 it reproduces the legacy single linear shrink exactly;
+// otherwise the window splits into equal stages whose first 85% shrinks and
+// last 15% holds, so each stage damage bump lands on a visible pause.
 func (a *Arena) zoneState() *ZoneState {
 	z := a.Config.Zone
 	if !z.Enabled {
@@ -498,12 +567,45 @@ func (a *Arena) zoneState() *ZoneState {
 	}
 	initial := math.Hypot(a.Config.Width, a.Config.Height) / 2
 	radius := initial
-	active := a.TickNumber >= start
-	if active {
-		progress := clamp(float64(a.TickNumber-start)/float64(max(1, end-start)), 0, 1)
-		radius = initial + (z.EndRadius-initial)*progress
+	stage := 0
+	if a.TickNumber >= start {
+		stage = 1
+		if z.StageCount <= 1 {
+			progress := clamp(float64(a.TickNumber-start)/float64(max(1, end-start)), 0, 1)
+			radius = initial + (z.EndRadius-initial)*progress
+		} else {
+			stage, radius = zoneStage(z, initial, start, end, a.TickNumber)
+		}
 	}
-	return &ZoneState{Active: active, X: a.Config.Width / 2, Y: a.Config.Height / 2, Radius: radius, Damage: z.Damage}
+	damage := z.Damage
+	if stage > 1 {
+		// Later stages squeeze harder: +1 damage per stage past the first.
+		damage = z.Damage + stage - 1
+	}
+	return &ZoneState{Active: a.TickNumber >= start, X: a.Config.Width / 2, Y: a.Config.Height / 2, Radius: radius, Damage: damage, Stage: stage}
+}
+
+// zoneStage computes the active stage and piecewise-linear radius for a
+// multi-stage collapse. Stage n lerps from radiusAt(n-1) to radiusAt(n)
+// across the shrink slice, then holds until the next stage begins; at the
+// final stage's end the radius rests exactly on EndRadius.
+func zoneStage(z ZoneConfig, initial float64, start, end, tick int) (int, float64) {
+	stages := z.StageCount
+	segment := float64(end-start) / float64(stages)
+	shrink := segment * 0.85
+	progressed := float64(tick - start)
+	stage := int(progressed/segment) + 1
+	if stage > stages {
+		stage = stages
+	}
+	radiusAt := func(n int) float64 { return initial + (z.EndRadius-initial)*float64(n)/float64(stages) }
+	local := progressed - float64(stage-1)*segment
+	radius := radiusAt(stage)
+	if local < shrink {
+		previous := radiusAt(stage - 1)
+		radius = previous + (radiusAt(stage)-previous)*(local/shrink)
+	}
+	return stage, radius
 }
 func (a *Arena) applyZone() []Event {
 	z := a.zoneState()
@@ -524,14 +626,35 @@ func (a *Arena) applyZone() []Event {
 func (a *Arena) applyHazards() []Event {
 	events := []Event{}
 	for _, hazard := range a.Config.Map.Hazards {
-		if (hazard.Type != "damage" && hazard.Type != "damage-edge") || hazard.Damage <= 0 || a.TickNumber%10 != 0 {
-			continue
+		inside := func(r *RobotState) bool {
+			return r.Alive && r.X >= hazard.X && r.X <= hazard.X+hazard.Width && r.Y >= hazard.Y && r.Y <= hazard.Y+hazard.Height
 		}
-		for i := range a.Robots {
-			r := &a.Robots[i]
-			if r.Alive && r.X >= hazard.X && r.X <= hazard.X+hazard.Width && r.Y >= hazard.Y && r.Y <= hazard.Y+hazard.Height {
-				events = append(events, a.damage(nil, r, hazard.Damage, Weapon{})...)
-				events = append(events, a.event(Event{Type: "hazard_damage", TargetID: r.RobotID, Damage: hazard.Damage, Message: hazard.ID}))
+		switch hazard.Type {
+		case "slow-field":
+			for i := range a.Robots {
+				if r := &a.Robots[i]; inside(r) {
+					upsertEffect(r, "slow", 60, 0.5, "")
+				}
+			}
+		case "spike":
+			if a.TickNumber%6 != 0 {
+				continue
+			}
+			for i := range a.Robots {
+				if r := &a.Robots[i]; inside(r) {
+					events = append(events, a.damage(nil, r, hazard.Damage, Weapon{})...)
+					events = append(events, a.event(Event{Type: "hazard_damage", TargetID: r.RobotID, Damage: hazard.Damage, Message: hazard.ID}))
+				}
+			}
+		case "damage", "damage-edge":
+			if hazard.Damage <= 0 || a.TickNumber%10 != 0 {
+				continue
+			}
+			for i := range a.Robots {
+				if r := &a.Robots[i]; inside(r) {
+					events = append(events, a.damage(nil, r, hazard.Damage, Weapon{})...)
+					events = append(events, a.event(Event{Type: "hazard_damage", TargetID: r.RobotID, Damage: hazard.Damage, Message: hazard.ID}))
+				}
 			}
 		}
 	}

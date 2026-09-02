@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/kryxen/cloud-robot/internal/engine"
@@ -80,6 +81,24 @@ func (s *Server) runMatch(ctx context.Context, matchID string) error {
 	controllers := make(map[string]engine.Controller, len(match.Robots))
 	config := engineConfigFor(match)
 	personality := botPersonalityFor(match)
+	// Solo matches end when the single human robot stops being alive; with
+	// zero or multiple humans the id stays empty and the sandbox rules apply.
+	if match.Mode == "solo" {
+		humanID, ambiguous := "", false
+		for _, submission := range match.Robots {
+			if submission.Bot || strings.HasPrefix(submission.StartCommand, "bot:") {
+				continue
+			}
+			if humanID != "" {
+				ambiguous = true
+				break
+			}
+			humanID = submission.RobotID
+		}
+		if !ambiguous {
+			config.SoloRobotID = humanID
+		}
+	}
 	for _, submission := range match.Robots {
 		if submission.Bot {
 			difficulty := engine.BotFighter
@@ -147,6 +166,7 @@ func (s *Server) runMatch(ctx context.Context, matchID string) error {
 		s.updatePlayerStats(ctx, match)
 	}
 	s.hub.Publish(matchID, map[string]any{"type": "match_finished", "version": 1, "matchId": matchID, "winnerTeam": match.WinnerTeam, "match": match})
+	s.hub.Forget(matchID)
 	return nil
 }
 
@@ -285,6 +305,7 @@ func (s *Server) failMatch(ctx context.Context, match model.Match, failure error
 	_ = s.store.PutMatch(ctx, match)
 	s.releaseBoxes(ctx, match)
 	s.hub.Publish(match.MatchID, map[string]any{"type": "error", "version": 1, "matchId": match.MatchID, "error": failure.Error()})
+	s.hub.Forget(match.MatchID)
 	s.requeueIfQueued(ctx, match)
 	return fmt.Errorf("match %s failed: %w", match.MatchID, failure)
 }

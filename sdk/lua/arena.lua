@@ -2,9 +2,10 @@ local websocket = require "http.websocket"
 local cqueues = require "cqueues"
 local json = require "dkjson"
 
-local arena = { VERSION = "0.2.0" }
+local arena = { VERSION = "0.3.1" }
 local pickup_config = { auto_pickup = true, pickup_types = {} }
 local latest_observation
+local zone_history
 
 local function clamp(value, low, high)
   return math.max(low, math.min(high, value))
@@ -133,7 +134,7 @@ end
 
 function arena.action(options)
   options = options or {}
-  return {
+  local action = {
     move = clamp(options.move or 0, -4, 8),
     turn = clamp(options.turn or 0, -18, 18),
     fire = options.fire == true,
@@ -146,6 +147,11 @@ function arena.action(options)
     autoPickup = pickup_config.auto_pickup,
     pickupTypes = pickup_config.pickup_types,
   }
+  if options.dash then action.dash = true end
+  if options.deploy then action.deploy = options.deploy end
+  if options.scan then action.scan = options.scan end
+  if options.message then action.message = options.message end
+  return action
 end
 
 function arena.fire_at(target, options)
@@ -172,6 +178,326 @@ function arena.strafe(observation, target, direction)
   local desired = arena.bearing(observation.self, target) + (direction or 1) * 75
   local turn = ((desired - observation.self.heading + 540) % 360) - 180
   return arena.action({ move = 6, turn = turn, fire = true, equipment = { "cannon", "light-armor" } })
+end
+
+-- Server relays at most 128 bytes per message; trim on a UTF-8 character
+-- boundary so multibyte text is never cut mid-sequence.
+local function trim_message(text)
+  text = tostring(text)
+  if #text <= 128 then return text end
+  local bytes, index = 0, 1
+  while index <= #text do
+    local byte = text:byte(index)
+    local size = byte >= 0xF0 and 4 or byte >= 0xE0 and 3 or byte >= 0xC0 and 2 or 1
+    if bytes + size > 128 then break end
+    bytes, index = bytes + size, index + size
+  end
+  return text:sub(1, index - 1)
+end
+
+function arena.dash(options)
+  options = options or {}
+  local action = arena.action(options)
+  action.dash = true
+  return action
+end
+
+function arena.deploy_mine(options)
+  options = options or {}
+  local action = arena.action(options)
+  action.deploy = "mine"
+  return action
+end
+
+function arena.scan(x, y, radius, options)
+  options = options or {}
+  local action = arena.action(options)
+  action.scan = { x = x, y = y, radius = clamp(radius or 200, 40, 400) }
+  return action
+end
+
+function arena.send_message(text, options)
+  options = options or {}
+  if text == nil then return arena.action(options) end
+  local action = arena.action(options)
+  action.message = trim_message(text)
+  return action
+end
+
+-- Query helpers are pure reads on one observation. They copy entries and
+-- attach a distance field instead of mutating the server payload.
+
+local function with_distance(origin, entry)
+  local copy = {}
+  for key, value in pairs(entry) do copy[key] = value end
+  local dx, dy = entry.x - origin.x, entry.y - origin.y
+  copy.distance = math.sqrt(dx * dx + dy * dy)
+  return copy
+end
+
+local function sort_by_distance(list, id_key)
+  table.sort(list, function(a, b)
+    if a.distance ~= b.distance then return a.distance < b.distance end
+    return (a[id_key] or "") < (b[id_key] or "")
+  end)
+  return list
+end
+
+function arena.items_in_area(observation, x, y, radius)
+  local origin = { x = x, y = y }
+  local found = {}
+  for _, item in ipairs(observation.items or {}) do
+    if item.active ~= false then
+      local entry = with_distance(origin, item)
+      if entry.distance <= radius then found[#found + 1] = entry end
+    end
+  end
+  return sort_by_distance(found, "itemId")
+end
+
+function arena.enemies_in_area(observation, x, y, radius)
+  local origin = { x = x, y = y }
+  local found = {}
+  for _, robot in ipairs(observation.robots or {}) do
+    if robot.alive and robot.team ~= observation.self.team then
+      local entry = with_distance(origin, robot)
+      if entry.distance <= radius then found[#found + 1] = entry end
+    end
+  end
+  return sort_by_distance(found, "robotId")
+end
+
+-- Robots perceive enemies, items, projectiles, and mines only inside a
+-- per-tick vision range (engine default 320). The server already filtered the
+-- observation; these helpers let scripts reason about the same boundary
+-- locally. A range of 0 means the observation carried none: treat sight as
+-- unlimited. Teammates and map geometry (obstacles, hazards, zone) are never
+-- vision-filtered.
+
+function arena.vision_range(observation)
+  local range = observation.visionRange
+  if range == nil then range = (observation.self or {}).visionRange end
+  if range == nil or range <= 0 then return 0 end
+  return range
+end
+
+function arena.in_vision(observation, x, y)
+  local range = arena.vision_range(observation)
+  if range <= 0 then return true end
+  local self = observation.self
+  if not self or self.x == nil or y == nil then return true end
+  return arena.distance(self, { x = x, y = y }) <= range
+end
+
+-- Sight = inside the vision range and not blocked by map geometry.
+function arena.can_see(observation, robot)
+  if not robot or not observation.self or observation.self.x == nil then return false end
+  return arena.in_vision(observation, robot.x, robot.y)
+    and arena.line_of_sight(observation.self.x, observation.self.y, robot.x, robot.y, observation.obstacles)
+end
+
+function arena.visible_enemies(observation)
+  local self = observation.self
+  local range = arena.vision_range(observation)
+  return arena.enemies_in_area(observation, self.x, self.y, range > 0 and range or math.huge)
+end
+
+local function hazard_center(hazard)
+  return { x = hazard.x + (hazard.width or 0) / 2, y = hazard.y + (hazard.height or 0) / 2 }
+end
+
+local function mines_in_radius(observation, origin, radius)
+  local source = observation.mines
+  if source == nil and observation.scanResult then source = observation.scanResult.mines end
+  local found = {}
+  for _, mine in ipairs(source or {}) do
+    if mine.active ~= false then
+      local entry = with_distance(origin, mine)
+      if entry.distance <= radius then
+        if mine.armed ~= nil then
+          entry.armed = mine.armed == true
+        else
+          entry.armed = observation.tick ~= nil and mine.armTick ~= nil and observation.tick >= mine.armTick
+        end
+        found[#found + 1] = entry
+      end
+    end
+  end
+  return sort_by_distance(found, "mineId")
+end
+
+function arena.area_report(observation, x, y, radius)
+  local origin = { x = x, y = y }
+  local hazards = {}
+  for _, hazard in ipairs(observation.hazards or {}) do
+    local entry = with_distance(origin, hazard)
+    entry.distance = arena.distance(origin, hazard_center(hazard))
+    if entry.distance <= radius then hazards[#hazards + 1] = entry end
+  end
+  return {
+    items = arena.items_in_area(observation, x, y, radius),
+    enemies = arena.enemies_in_area(observation, x, y, radius),
+    mines = mines_in_radius(observation, origin, radius),
+    hazards = sort_by_distance(hazards, "id"),
+  }
+end
+
+-- Snapshots carry projectiles at the top level; agent observations omit them
+-- today, so read both shapes and treat missing arrays as empty.
+local function observation_projectiles(observation)
+  local self = observation.self or {}
+  return observation.projectiles or self.projectiles or {}
+end
+
+function arena.projectiles_near(observation, radius)
+  local found = {}
+  for _, projectile in ipairs(observation_projectiles(observation)) do
+    local entry = with_distance(observation.self, projectile)
+    if entry.distance <= radius then found[#found + 1] = entry end
+  end
+  return sort_by_distance(found, "projectileId")
+end
+
+function arena.mines_near(observation, radius)
+  return mines_in_radius(observation, observation.self, radius)
+end
+
+-- Linear lead: flight time is distance over projectile speed and the target
+-- drifts targetVX/targetVY per tick. Observations carry no robot velocity, so
+-- callers estimate it (heading * speed) or accept the current position.
+function arena.aim_predict(from, target, projectile_speed, target_vx, target_vy)
+  if not from or not target then return nil end
+  local vx, vy = target_vx or target.vx or 0, target_vy or target.vy or 0
+  local speed = projectile_speed or 0
+  if speed <= 0 or (vx == 0 and vy == 0) then return { x = target.x, y = target.y } end
+  local flight = arena.distance(from, target) / speed
+  return { x = target.x + vx * flight, y = target.y + vy * flight }
+end
+
+-- Closest approach of a projectile to self along its velocity: returns the
+-- flight time to the closest point and the miss distance, or nil when it
+-- recedes.
+local function closest_approach(self, projectile)
+  local vx, vy = projectile.vx or 0, projectile.vy or 0
+  local speed_squared = vx * vx + vy * vy
+  if speed_squared <= 0 then return nil end
+  local time = ((self.x - projectile.x) * vx + (self.y - projectile.y) * vy) / speed_squared
+  if time <= 0 then return nil end
+  local miss = arena.distance(self, { x = projectile.x + vx * time, y = projectile.y + vy * time })
+  return time, miss
+end
+
+-- Counts projectiles whose flight path passes within 30 units of us while
+-- still approaching; 0 means nothing is aimed at our current position.
+function arena.danger_level(observation)
+  local threats = 0
+  for _, projectile in ipairs(observation_projectiles(observation)) do
+    local _, miss = closest_approach(observation.self, projectile)
+    if miss and miss <= 30 then threats = threats + 1 end
+  end
+  return threats
+end
+
+-- Perpendicular escape point from the most imminent projectile (smallest time
+-- to closest approach). Nil when nothing threatens.
+function arena.dodge(observation)
+  local self = observation.self
+  local threat, threat_time
+  for _, projectile in ipairs(observation_projectiles(observation)) do
+    local time, miss = closest_approach(self, projectile)
+    if time and miss <= 30 and (threat_time == nil or time < threat_time) then
+      threat, threat_time = projectile, time
+    end
+  end
+  if not threat then return nil end
+  local vx, vy = threat.vx or 0, threat.vy or 0
+  local offset_x, offset_y = self.x - (threat.x + vx * threat_time), self.y - (threat.y + vy * threat_time)
+  if offset_x * offset_x + offset_y * offset_y < 0.0001 then
+    -- Dead center on the flight path: either perpendicular escapes.
+    offset_x, offset_y = -vy, vx
+  end
+  local length = math.max(math.sqrt(offset_x * offset_x + offset_y * offset_y), 0.001)
+  local x, y = self.x + offset_x / length * 60, self.y + offset_y / length * 60
+  if observation.arenaWidth then x = clamp(x, 20, observation.arenaWidth - 20) end
+  if observation.arenaHeight then y = clamp(y, 20, observation.arenaHeight - 20) end
+  return { x = x, y = y }
+end
+
+-- closing compares this tick's zone radius with the previous observed tick,
+-- so the first call of a match reports false. Repeated calls within one tick
+-- replay the stored verdict; history is keyed by matchId to survive restarts.
+function arena.zone_status(observation)
+  local zone = observation.zone
+  if not zone then return nil end
+  local self = observation.self or {}
+  local distance = self.x and arena.distance(self, zone) or 0
+  local history = zone_history
+  local closing
+  local fresh = history and history.matchId == observation.matchId and history.tick == observation.tick
+  if fresh then
+    closing = history.closing
+  elseif history and history.matchId == observation.matchId and history.tick ~= nil and observation.tick ~= nil then
+    closing = zone.radius < history.radius
+  else
+    closing = false
+  end
+  if not fresh then
+    zone_history = { tick = observation.tick, radius = zone.radius, matchId = observation.matchId, closing = closing }
+  end
+  return { inside = distance <= zone.radius, distanceToEdge = zone.radius - distance, radius = zone.radius, x = zone.x, y = zone.y, closing = closing }
+end
+
+function arena.hazard_at(observation, x, y)
+  for _, hazard in ipairs(observation.hazards or {}) do
+    if x >= hazard.x and x <= hazard.x + (hazard.width or 0) and y >= hazard.y and y <= hazard.y + (hazard.height or 0) then
+      return hazard
+    end
+  end
+  return nil
+end
+
+function arena.teammates(observation)
+  local found = {}
+  for _, robot in ipairs(observation.robots or {}) do
+    if robot.alive and robot.team == observation.self.team and robot.robotId ~= observation.self.robotId then
+      found[#found + 1] = robot
+    end
+  end
+  return found
+end
+
+local function point_blocked(x, y, obstacles)
+  for _, obstacle in ipairs(obstacles) do
+    if obstacle.shape == "circle" or obstacle.radius ~= nil then
+      if (x - obstacle.x) ^ 2 + (y - obstacle.y) ^ 2 <= (obstacle.radius or 0) ^ 2 then return true end
+    elseif x >= obstacle.x and x <= obstacle.x + (obstacle.width or 0) and y >= obstacle.y and y <= obstacle.y + (obstacle.height or 0) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Deterministic ring sampling around (x, y): a small LCG seeded from the
+-- request coordinates keeps the result stable across calls and reconnects
+-- without wall-clock time.
+function arena.random_safe_point(observation, x, y, radius, tries)
+  local obstacles = observation.obstacles or {}
+  local state = (math.floor(x * 1024) * 73856093 + math.floor(y * 1024) * 19349663) % 2147483647
+  local function random_unit()
+    state = (state * 48271) % 2147483647
+    return state / 2147483647
+  end
+  for _ = 1, tries or 8 do
+    local angle = random_unit() * 2 * math.pi
+    local distance = math.sqrt(random_unit()) * (radius or 60)
+    local point = { x = x + math.cos(angle) * distance, y = y + math.sin(angle) * distance }
+    if observation.arenaWidth then point.x = clamp(point.x, 20, observation.arenaWidth - 20) end
+    if observation.arenaHeight then point.y = clamp(point.y, 20, observation.arenaHeight - 20) end
+    if not point_blocked(point.x, point.y, obstacles) and arena.line_of_sight(x, y, point.x, point.y, obstacles) then
+      return point
+    end
+  end
+  return { x = x, y = y }
 end
 
 local function connect(config)

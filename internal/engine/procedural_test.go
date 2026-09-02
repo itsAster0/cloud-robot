@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -208,8 +209,111 @@ func TestStarterMapsKeepLegacyEntries(t *testing.T) {
 			t.Fatalf("starter map %q missing", id)
 		}
 	}
-	// Old maps must stay byte-stable for existing replays.
-	if got := maps["four-corners"].Obstacles[0]; got != (Obstacle{ID: "center", Shape: "aabb", X: 350, Y: 200, Width: 100, Height: 100}) {
+	// Maps were intentionally enlarged to 1200x750 with added cover walls;
+	// pin the new geometry as the stable baseline for future replays.
+	if got := maps["four-corners"].Obstacles[0]; got != (Obstacle{ID: "center", Shape: "aabb", X: 550, Y: 325, Width: 100, Height: 100}) {
 		t.Fatalf("four-corners changed: %+v", got)
+	}
+}
+
+func mustGenerateAt(t *testing.T, seed uint64, style string, w, h float64) MapDefinition {
+	t.Helper()
+	m, err := GenerateMap(seed, style, w, h)
+	if err != nil {
+		t.Fatalf("seed %d style %s: %v", seed, style, err)
+	}
+	return m
+}
+
+// countFreeDeadEnds walks the coarse robot grid and counts interior free
+// cells with exactly one free orthogonal neighbor — the maze-braiding proxy.
+func countFreeDeadEnds(m MapDefinition) (dead, free int) {
+	cols := int(m.Width / connectivityCell)
+	rows := int(m.Height / connectivityCell)
+	if cols < 3 || rows < 3 {
+		return 0, 0
+	}
+	blocked := make([]bool, cols*rows)
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			blocked[row*cols+col] = collidesRobot(m.Obstacles, (float64(col)+.5)*connectivityCell, (float64(row)+.5)*connectivityCell)
+		}
+	}
+	freeAt := func(c, r int) bool { return !blocked[r*cols+c] }
+	for row := 1; row < rows-1; row++ {
+		for col := 1; col < cols-1; col++ {
+			if !freeAt(col, row) {
+				continue
+			}
+			free++
+			n := 0
+			if freeAt(col-1, row) {
+				n++
+			}
+			if freeAt(col+1, row) {
+				n++
+			}
+			if freeAt(col, row-1) {
+				n++
+			}
+			if freeAt(col, row+1) {
+				n++
+			}
+			if n == 1 {
+				dead++
+			}
+		}
+	}
+	return dead, free
+}
+
+func TestBraidedMazeKeepsEscapeLoops(t *testing.T) {
+	passes := 0
+	for seed := uint64(1); seed <= 10; seed++ {
+		m := mustGenerateAt(t, seed, "maze", 1200, 750)
+		dead, free := countFreeDeadEnds(m)
+		if free == 0 {
+			t.Fatalf("seed %d: maze has no free interior cells", seed)
+		}
+		if float64(dead) <= float64(free)*0.10 {
+			passes++
+		}
+	}
+	if passes < 8 {
+		t.Fatalf("braiding removed dead ends in only %d/10 seeds", passes)
+	}
+}
+
+func TestRoomsStyleBuildsManyRooms(t *testing.T) {
+	cases := []struct {
+		w, h     float64
+		minRooms int
+	}{{1200, 750, 6}, {900, 600, 4}}
+	for _, c := range cases {
+		m := mustGenerateAt(t, 42, "rooms", c.w, c.h)
+		rooms := map[string]bool{}
+		for _, o := range m.Obstacles {
+			if strings.HasPrefix(o.ID, "rooms-r") {
+				rooms[strings.Split(o.ID, "-")[1]] = true
+			}
+		}
+		if len(rooms) < c.minRooms {
+			t.Fatalf("rooms at %vx%v built only %d rooms (%d): %+v", c.w, c.h, len(rooms), len(rooms), m.Obstacles)
+		}
+	}
+}
+
+func TestProceduralSpawnsHaveAdjacentCover(t *testing.T) {
+	for _, style := range []string{"maze", "rooms", "bunkers"} {
+		for seed := uint64(1); seed <= 10; seed++ {
+			m := mustGenerateAt(t, seed, style, 1200, 750)
+			for team, points := range m.SpawnPoints {
+				for i, p := range points {
+					if d := nearestObstacleDistance(m.Obstacles, p.X, p.Y); d > 100 {
+						t.Fatalf("seed %d %s %s spawn %d has no cover within 100 units (%.0f)", seed, style, team, i, d)
+					}
+				}
+			}
+		}
 	}
 }

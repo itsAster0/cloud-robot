@@ -28,6 +28,7 @@ type agentObservation struct {
 	ArenaHeight float64             `json:"arenaHeight"`
 	Obstacles   []engine.Obstacle   `json:"obstacles"`
 	Items       []engine.Item       `json:"items"`
+	Projectiles []engine.Projectile `json:"projectiles,omitempty"`
 	Hazards     []engine.Hazard     `json:"hazards"`
 	Zone        *engine.ZoneState   `json:"zone,omitempty"`
 	Overtime    bool                `json:"overtime"`
@@ -36,6 +37,7 @@ type agentObservation struct {
 	// without digging into the self object.
 	DashCharges int                `json:"dashCharges,omitempty"`
 	MineCharges int                `json:"mineCharges,omitempty"`
+	VisionRange float64            `json:"visionRange,omitempty"`
 	ScanResult  *engine.ScanReport `json:"scanResult,omitempty"`
 	Events      []engine.Event     `json:"events,omitempty"`
 	Messages    []string           `json:"messages,omitempty"`
@@ -104,7 +106,7 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 	defer s.requestMu.Unlock()
 	requestID := uuid.NewString()
 	sent := time.Now()
-	observation := agentObservation{Type: "observation", Version: 3, RequestID: requestID, MatchID: s.matchID, SentAt: sent.UnixMilli(), Self: self, Robots: robots, Tick: world.Tick, MapID: world.MapID, ArenaWidth: world.Width, ArenaHeight: world.Height, Obstacles: world.Obstacles, Items: world.Items, Hazards: world.Hazards, Zone: world.Zone, Overtime: world.Overtime, Mines: world.Mines, DashCharges: self.DashCharges, MineCharges: self.MineCharges, ScanResult: self.ScanResult, Events: self.RecentEvents, Messages: self.Messages}
+	observation := agentObservation{Type: "observation", Version: 3, RequestID: requestID, MatchID: s.matchID, SentAt: sent.UnixMilli(), Self: self, Robots: robots, Tick: world.Tick, MapID: world.MapID, ArenaWidth: world.Width, ArenaHeight: world.Height, Obstacles: world.Obstacles, Items: world.Items, Projectiles: world.Projectiles, Hazards: world.Hazards, Zone: world.Zone, Overtime: world.Overtime, Mines: world.Mines, DashCharges: self.DashCharges, MineCharges: self.MineCharges, VisionRange: world.VisionRange, ScanResult: self.ScanResult, Events: self.RecentEvents, Messages: self.Messages}
 
 	writeCtx, cancelWrite := context.WithTimeout(ctx, 100*time.Millisecond)
 	s.writeMu.Lock()

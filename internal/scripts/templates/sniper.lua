@@ -1,8 +1,9 @@
 local arena = require "arena"
 
--- Marksman: holds a 40-130 unit band, only fires with line of sight, leads
--- shots from the enemy heading, sidesteps randomly so it never sits still,
--- and races for railguns when the field is quiet.
+-- Marksman: holds a 40-130 unit band, only fires when the target is inside
+-- its vision range with clear line of sight, leads shots from the enemy
+-- heading, sidesteps randomly so it never sits still, grabs scopes and heals
+-- when hurt, and races for railguns when the field is quiet.
 
 local seed = 0
 local robot_id = os.getenv("ROBOT_ID") or "marksman"
@@ -12,8 +13,12 @@ end
 math.randomseed(seed)
 
 local PROJECTILE_SPEED = { plasma = 24, cannon = 14, machine_gun = 32, incendiary = 20, cryo = 20, emp = 18, railgun = 0 }
--- Weapon pickups worth breaking stance for, in priority order.
-local WEAPON_VALUE = { weapon_railgun = 100, weapon_cannon = 80, weapon_incendiary = 55, weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30 }
+-- Upgrades worth breaking stance for, plus heals that only matter when hurt.
+local ITEM_VALUE = {
+  scope = 60, medkit = 75, heal = 70, nano_repair = 55, ["repair-core"] = 50,
+  weapon_railgun = 100, weapon_cannon = 80, weapon_incendiary = 55,
+  weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30,
+}
 
 local state = { last_x = nil, last_y = nil, stuck = 0, escape = 0, escape_turn = 0, sidestep = 0, sidestep_turn = 0, wander = nil }
 
@@ -61,11 +66,19 @@ local function zone_safe(obs)
   return arena.distance(obs.self, zone) < zone.radius - 40
 end
 
-local function best_weapon(obs, max_distance)
+local function best_pickup(obs, max_distance)
   local best, best_value
   for _, item in ipairs(obs.items or {}) do
-    if item.active ~= false and obs.self.weapon ~= string.sub(item.type, 8) then
-      local score = WEAPON_VALUE[item.type] or 0
+    if item.active ~= false then
+      local score, self = ITEM_VALUE[item.type] or 0, obs.self
+      if item.type == "heal" or item.type == "medkit" or item.type == "repair-core" then
+        -- The server skips these at full HP and in overtime anyway.
+        if obs.overtime or self.hp >= self.maxHp then score = 0 end
+      elseif item.type == "nano_repair" and self.hp >= self.maxHp then
+        score = 0
+      elseif self.weapon ~= "" and item.type == "weapon_" .. self.weapon then
+        score = 0
+      end
       local distance = arena.distance(obs.self, item)
       if score > 0 and distance <= (max_distance or math.huge) then
         local value = score / (distance + 20)
@@ -93,18 +106,31 @@ local function decide(observation)
     end
   end
 
-  -- Grab a real weapon upgrade whenever the field is quiet enough.
-  if enemy_distance == nil or enemy_distance > 120 then
-    local weapon = best_weapon(observation, enemy_distance == nil and math.huge or 160)
-    if weapon then
+  -- Hurt: grab the nearest heal before rejoining the duel.
+  if self.hp < self.maxHp * 0.45 then
+    local heal = arena.nearest_item(observation, "heal") or arena.nearest_item(observation, "medkit")
+      or arena.nearest_item(observation, "repair-core") or arena.nearest_item(observation, "nano_repair")
+    if heal and not observation.overtime then
       local held = unstick(observation, { moving = true })
       if held then return held end
-      return navigate(observation, weapon.x, weapon.y, 6, "claiming " .. weapon.type)
+      return navigate(observation, heal.x, heal.y, 6, "grabbing " .. heal.type)
+    end
+  end
+
+  -- Grab an upgrade whenever the field is quiet enough.
+  if enemy_distance == nil or enemy_distance > 120 then
+    local pickup = best_pickup(observation, enemy_distance == nil and math.huge or 160)
+    if pickup then
+      local held = unstick(observation, { moving = true })
+      if held then return held end
+      return navigate(observation, pickup.x, pickup.y, 6, "claiming " .. pickup.type)
     end
   end
 
   if enemy then
-    local visible = arena.line_of_sight(self.x, self.y, enemy.x, enemy.y, observation.obstacles)
+    -- Full sight, not just line of sight: outside the vision range a robot
+    -- is not in the list at all, so this mainly refuses cover-blind shots.
+    local visible = arena.can_see(observation, enemy)
     if not visible then
       -- Cover between us: push toward the enemy until the angle opens.
       local held = unstick(observation, { moving = true })

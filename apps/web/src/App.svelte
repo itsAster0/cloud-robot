@@ -18,7 +18,9 @@
   let startCommand = $state('lua main.lua');
   let match = $state<Match | null>(null);
   let enrollment = $state<AgentEnrollment | null>(null);
-  let snapshot = $state<Snapshot | null>(null);
+  // Raw on purpose: snapshots are immutable per-tick payloads read at up to
+  // 60 fps by the arena renderer — a deep proxy here taxes every property read.
+  let snapshot = $state.raw<Snapshot | null>(null);
   let cloud = $state<CloudStatus | null>(null);
   let user = $state<User | null>(null);
   let signingIn = $state(redirectCallbackPending());

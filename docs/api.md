@@ -96,8 +96,9 @@ requeue their human players automatically instead of dropping them.
 
 `GET /ws/matches/{matchId}` is anonymous. The server sends current match state
 on connection, then versioned snapshots while the match runs. Snapshot version
-2 includes robots, projectiles, map bounds, obstacles, items, recent events,
-zone state, announcements, and overtime state.
+3 includes robots, projectiles, map bounds, obstacles, items, mines, turrets,
+recent events, zone state with collapse stage, announcements, and overtime
+state.
 
 ## Agent WebSocket
 
@@ -106,9 +107,11 @@ bearer token. The token belongs to one robot and never reaches the browser.
 
 The server sends an observation every tick. The agent returns an action with the
 same `requestId`. Actions may contain movement, turning, targeting, firing,
-telemetry, equipment, SDK version, and pickup preferences. The server clamps
-movement and remains authoritative for position, damage, score, items, and match
-state.
+telemetry, equipment, SDK version, pickup preferences, dash, mine deployment,
+area scans, and team messages. Observations add mines, projectiles, scan
+reports, charge counts, recent per-robot events, and relayed team messages on
+top of the shared world state. The server clamps movement and remains
+authoritative for position, damage, score, items, and match state.
 
 The response deadline is 150 ms. A missed deadline reuses the last action. A
 disconnected agent has a 30-second reconnect window before the engine fails it.
