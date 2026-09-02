@@ -1,6 +1,8 @@
 package scripts
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,6 +29,19 @@ func TestListReturnsCuratedTemplates(t *testing.T) {
 		}
 		if len(template.Source) > 16*1024 {
 			t.Fatalf("template %q exceeds the 16 KiB snapshot cap", template.Name)
+		}
+	}
+}
+
+func TestExamplesMatchDeployableTemplates(t *testing.T) {
+	for _, template := range List() {
+		examplePath := filepath.Join("..", "..", "examples", "lua-"+template.Name, "main.lua")
+		example, err := os.ReadFile(examplePath)
+		if err != nil {
+			t.Fatalf("read %s: %v", examplePath, err)
+		}
+		if string(example) != template.Source {
+			t.Fatalf("example %q drifted from its deployable template", template.Name)
 		}
 	}
 }

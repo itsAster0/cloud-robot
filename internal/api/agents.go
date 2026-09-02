@@ -14,6 +14,8 @@ import (
 	"github.com/kryxen/cloud-robot/internal/engine"
 )
 
+var errAgentDisconnected = errors.New("robot agent disconnected")
+
 type agentObservation struct {
 	Type        string              `json:"type"`
 	Version     int                 `json:"version"`
@@ -26,10 +28,10 @@ type agentObservation struct {
 	MapID       string              `json:"mapId"`
 	ArenaWidth  float64             `json:"arenaWidth"`
 	ArenaHeight float64             `json:"arenaHeight"`
-	Obstacles   []engine.Obstacle   `json:"obstacles"`
+	Obstacles   []engine.Obstacle   `json:"obstacles,omitempty"`
 	Items       []engine.Item       `json:"items"`
 	Projectiles []engine.Projectile `json:"projectiles,omitempty"`
-	Hazards     []engine.Hazard     `json:"hazards"`
+	Hazards     []engine.Hazard     `json:"hazards,omitempty"`
 	Zone        *engine.ZoneState   `json:"zone,omitempty"`
 	Overtime    bool                `json:"overtime"`
 	Mines       []engine.MineState  `json:"mines,omitempty"`
@@ -65,14 +67,15 @@ type agentAction struct {
 }
 
 type AgentSession struct {
-	robotID    string
-	matchID    string
-	connection *websocket.Conn
-	responses  chan agentAction
-	closed     chan struct{}
-	writeMu    sync.Mutex
-	requestMu  sync.Mutex
-	last       engine.Intent
+	robotID          string
+	matchID          string
+	connection       *websocket.Conn
+	responses        chan agentAction
+	closed           chan struct{}
+	writeMu          sync.Mutex
+	requestMu        sync.Mutex
+	last             engine.Intent
+	omitStaticLayout bool
 }
 
 func newAgentSession(robotID, matchID string, connection *websocket.Conn) *AgentSession {
@@ -106,7 +109,11 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 	defer s.requestMu.Unlock()
 	requestID := uuid.NewString()
 	sent := time.Now()
-	observation := agentObservation{Type: "observation", Version: 3, RequestID: requestID, MatchID: s.matchID, SentAt: sent.UnixMilli(), Self: self, Robots: robots, Tick: world.Tick, MapID: world.MapID, ArenaWidth: world.Width, ArenaHeight: world.Height, Obstacles: world.Obstacles, Items: world.Items, Projectiles: world.Projectiles, Hazards: world.Hazards, Zone: world.Zone, Overtime: world.Overtime, Mines: world.Mines, DashCharges: self.DashCharges, MineCharges: self.MineCharges, VisionRange: world.VisionRange, ScanResult: self.ScanResult, Events: self.RecentEvents, Messages: self.Messages}
+	observation := agentObservation{Type: "observation", Version: 3, RequestID: requestID, MatchID: s.matchID, SentAt: sent.UnixMilli(), Self: self, Robots: robots, Tick: world.Tick, MapID: world.MapID, ArenaWidth: world.Width, ArenaHeight: world.Height, Items: world.Items, Projectiles: world.Projectiles, Zone: world.Zone, Overtime: world.Overtime, Mines: world.Mines, DashCharges: self.DashCharges, MineCharges: self.MineCharges, VisionRange: world.VisionRange, ScanResult: self.ScanResult, Events: self.RecentEvents, Messages: self.Messages}
+	if !s.omitStaticLayout {
+		observation.Obstacles = world.Obstacles
+		observation.Hazards = world.Hazards
+	}
 
 	writeCtx, cancelWrite := context.WithTimeout(ctx, 100*time.Millisecond)
 	s.writeMu.Lock()
@@ -114,7 +121,7 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 	s.writeMu.Unlock()
 	cancelWrite()
 	if err != nil {
-		return engine.Intent{}, errors.New("robot agent disconnected")
+		return engine.Intent{}, errAgentDisconnected
 	}
 
 	timer := time.NewTimer(150 * time.Millisecond)
@@ -124,7 +131,7 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 		case <-ctx.Done():
 			return engine.Intent{}, ctx.Err()
 		case <-s.closed:
-			return engine.Intent{}, errors.New("robot agent disconnected")
+			return engine.Intent{}, errAgentDisconnected
 		case <-timer.C:
 			fallback := s.last
 			fallback.ResponseMS = 150
@@ -151,6 +158,7 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 				AutoPickup: action.AutoPickup, PickupTypes: action.PickupTypes,
 				Dash: action.Dash, Deploy: action.Deploy, Scan: action.Scan, Message: message,
 			}
+			s.omitStaticLayout = action.SDKVersion != "" && !sdkVersionOlder(action.SDKVersion, "0.3.2")
 			s.last = intent
 			return intent, nil
 		}
@@ -210,6 +218,18 @@ func (m *AgentManager) Controller(robotID string) engine.Controller {
 	return &remoteController{manager: m, robotID: robotID}
 }
 
+func (m *AgentManager) reconnectIntent(robotID string) (engine.Intent, bool) {
+	m.mu.RLock()
+	last := m.last[robotID]
+	disconnectedAt, disconnected := m.disconnectedAt[robotID]
+	m.mu.RUnlock()
+	if !disconnected || time.Since(disconnectedAt) > 30*time.Second {
+		return engine.Intent{}, false
+	}
+	last.Logs = append(last.Logs, "agent disconnected; reusing last action during reconnect grace")
+	return last, true
+}
+
 func (m *AgentManager) Count() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -234,12 +254,7 @@ func (r *remoteController) Tick(ctx context.Context, self engine.RobotState, rob
 	session := r.manager.sessions[r.robotID]
 	r.manager.mu.RUnlock()
 	if session == nil {
-		r.manager.mu.RLock()
-		last, hasLast := r.manager.last[r.robotID]
-		disconnectedAt := r.manager.disconnectedAt[r.robotID]
-		r.manager.mu.RUnlock()
-		if hasLast && time.Since(disconnectedAt) <= 30*time.Second {
-			last.Logs = append(last.Logs, "agent disconnected; reusing last action during reconnect grace")
+		if last, ok := r.manager.reconnectIntent(r.robotID); ok {
 			return last, nil
 		}
 		return engine.Intent{}, errors.New("robot agent reconnect grace expired")
@@ -247,7 +262,19 @@ func (r *remoteController) Tick(ctx context.Context, self engine.RobotState, rob
 	r.worldMu.RLock()
 	world := r.world
 	r.worldMu.RUnlock()
-	return session.Tick(ctx, self, robots, world)
+	intent, err := session.Tick(ctx, self, robots, world)
+	if !errors.Is(err, errAgentDisconnected) {
+		return intent, err
+	}
+	// A socket may close while this tick is waiting for an action. Detach it
+	// here, then use the same grace path as a disconnect noticed between ticks.
+	// Without this handoff the engine treats one transient reconnect as a fatal
+	// controller error before the 30-second grace can take effect.
+	r.manager.Detach(r.robotID, session)
+	if last, ok := r.manager.reconnectIntent(r.robotID); ok {
+		return last, nil
+	}
+	return engine.Intent{}, errors.New("robot agent reconnect grace expired")
 }
 
 func (r *remoteController) Close() {}

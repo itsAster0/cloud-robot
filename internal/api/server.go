@@ -239,8 +239,8 @@ func (s *Server) createMatch(w http.ResponseWriter, r *http.Request) {
 	if input.BotPersonality == "" {
 		input.BotPersonality = "aggressive"
 	}
-	if input.BotPersonality != "aggressive" && input.BotPersonality != "evasive" && input.BotPersonality != "camper" {
-		writeError(w, http.StatusBadRequest, "botPersonality must be aggressive, evasive, or camper")
+	if input.BotPersonality != "aggressive" && input.BotPersonality != "evasive" && input.BotPersonality != "camper" && input.BotPersonality != "mixed" {
+		writeError(w, http.StatusBadRequest, "botPersonality must be aggressive, evasive, camper, or mixed")
 		return
 	}
 	if input.RegenPerTick < 0 || input.RegenPerTick > 10 {
@@ -1004,28 +1004,21 @@ func (s *Server) watchMatch(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			// Obstacles never change during a match. Send them on this viewer's
-			// first snapshot, then omit them from the 10 Hz stream. Large
-			// procedural maps otherwise spend most browser time parsing and
-			// copying the same layout over and over.
-			event, sentArenaLayout = viewerEvent(event, sentArenaLayout)
 			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-			err := wsjson.Write(ctx, connection, event)
+			if !sentArenaLayout && len(event.layout) > 0 {
+				if err := connection.Write(ctx, websocket.MessageText, event.layout); err != nil {
+					cancel()
+					return
+				}
+				sentArenaLayout = true
+			}
+			err := connection.Write(ctx, websocket.MessageText, event.payload)
 			cancel()
 			if err != nil {
 				return
 			}
 		}
 	}
-}
-
-func viewerEvent(event any, sentArenaLayout bool) (any, bool) {
-	snapshot, ok := event.(engine.Snapshot)
-	if !ok || !sentArenaLayout {
-		return event, sentArenaLayout || ok
-	}
-	snapshot.Obstacles = nil
-	return snapshot, true
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {

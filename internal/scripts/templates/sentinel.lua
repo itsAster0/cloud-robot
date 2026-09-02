@@ -1,10 +1,12 @@
 local arena = require "arena"
 
--- Sentinel: anchors the map center, sweeps radar scans to expose cloaked
+-- Sentinel: a guardian that plants itself on defensible ground near the
+-- middle of the map, hugs cover, sweeps radar scans to expose cloaked
 -- enemies, slips into cloak when hurt, sidesteps incoming fire, and relays
--- enemy positions to teammates over the team channel. It only engages robots
--- inside its vision range (scopes rank high: sight is its weapon). Randomness
--- is seeded from the robot ID without wall-clock time.
+-- enemy positions to teammates over the team channel. It only leaves the
+-- post for prey that is close or already bleeding; everything else is fired
+-- on from where it stands. Terse robot-speech only. Randomness is seeded
+-- from the robot ID without wall-clock time.
 
 local seed = 0
 local robot_id = os.getenv("ROBOT_ID") or "sentinel"
@@ -22,8 +24,12 @@ local ITEM_SCORE = {
   weapon_cryo = 50, weapon_emp = 45, weapon_machine_gun = 35, weapon_plasma = 30,
 }
 local RELAY_INTERVAL = 30
+local DOWN_LINES = { "target down.", "threat removed.", "silenced." }
 
-local state = { last_x = nil, last_y = nil, stuck = 0, escape = 0, escape_turn = 0, anchor = nil, relay_at = 0, next_scan = 0, scanned_at = nil }
+local state = {
+  last_x = nil, last_y = nil, stuck = 0, escape = 0, escape_turn = 0, anchor = nil,
+  relay_at = 0, next_scan = 0, scanned_at = nil, kills = 0, line = nil,
+}
 
 local function has_effect(self, name)
   for _, effect in ipairs(self.effects or {}) do
@@ -78,7 +84,7 @@ local function item_score(obs, item)
   if item.type == "shield" and self.shield >= 50 then return 0 end
   if item.type == "scanner" and has_effect(self, "radar") then return 0 end
   if item.type == "cloak" and has_effect(self, "cloak") then return 0 end
-  if self.weapon ~= "" and item.type == "weapon_" .. self.weapon then return 0 end
+  if item.type == "weapon_" .. (self.weapon or "plasma") then return 0 end
   return base
 end
 
@@ -99,15 +105,32 @@ end
 
 -- Aims where the enemy will be; damped because enemies rarely hold a line.
 local function aim_point(obs, enemy)
-  local speed = PROJECTILE_SPEED[obs.self.weapon] or 14
+  local speed = PROJECTILE_SPEED[obs.self.weapon or "plasma"] or 14
   if speed <= 0 then return enemy.x, enemy.y end
   local radians = enemy.heading * math.pi / 180
   local lead = arena.aim_predict(obs.self, enemy, speed, math.cos(radians) * 5.6, math.sin(radians) * 5.6)
   return lead.x, lead.y
 end
 
+-- The post is defensible ground: hugging the obstacle nearest the map center
+-- gives one covered flank, with the center itself as the fallback.
+local function pick_anchor(obs)
+  local center = { x = obs.arenaWidth / 2, y = obs.arenaHeight / 2 }
+  local cover, cover_distance
+  for _, obstacle in ipairs(obs.obstacles or {}) do
+    local ox, oy = obstacle.x + (obstacle.width or 0) / 2, obstacle.y + (obstacle.height or 0) / 2
+    if obstacle.radius then ox, oy = obstacle.x, obstacle.y end
+    local distance = arena.distance(center, { x = ox, y = oy })
+    if not cover_distance or distance < cover_distance then cover, cover_distance = { x = ox, y = oy }, distance end
+  end
+  if cover and cover_distance < 220 then
+    return arena.random_safe_point(obs, cover.x, cover.y, 90, 12)
+  end
+  return arena.random_safe_point(obs, center.x, center.y, 80, 12)
+end
+
 -- Cloak discipline: firing or taking a hit breaks the cloak, so while hidden
--- the sentinel holds fire and drifts back to its anchor.
+-- the sentinel holds fire and drifts back to its post.
 local function cloaked_hold(obs)
   local self = obs.self
   local turn = ((arena.bearing(self, state.anchor) - self.heading + 540) % 360) - 180
@@ -115,11 +138,21 @@ local function cloaked_hold(obs)
   return arena.action({ move = move, turn = move > 0 and turn or 0, logs = { "holding under cloak" } })
 end
 
+-- The kill counter on self is the kill feed. Celebrations are one sentence.
+local function check_kills(obs)
+  local kills = obs.self.kills or 0
+  if kills > state.kills then
+    state.line = DOWN_LINES[(kills % #DOWN_LINES) + 1]
+    state.kills = kills
+  end
+end
+
 local function decide(obs)
   local self = obs.self
+  check_kills(obs)
 
   if not state.anchor then
-    state.anchor = arena.random_safe_point(obs, obs.arenaWidth / 2, obs.arenaHeight / 2, 80, 12)
+    state.anchor = pick_anchor(obs)
   end
 
   -- Zone collapse outranks everything; standing outside is free damage.
@@ -172,20 +205,38 @@ local function decide(obs)
     if has_effect(self, "cloak") then
       return cloaked_hold(obs)
     end
-    -- Full sight = inside vision range (already filtered) plus clear line of
-    -- sight to the actual robot.
+    -- Guardians only leave the post for prey that is close or bleeding.
+    local wounded = (enemy.hp or 0) < (enemy.maxHp or 1) * 0.5
+    local pursuit = enemy_distance <= 160 or wounded
     local seen = arena.can_see(obs, enemy)
-    local hold = unstick(obs, { moving = true })
-    if hold then return hold end
-    if not seen or enemy_distance > 160 then
-      local closing = { move = 6, fire = seen, target_x = enemy.x, target_y = enemy.y, logs = { "closing on " .. enemy.name } }
-      if relay then return arena.send_message(relay, closing) end
-      return arena.action(closing)
+    if pursuit and not seen then
+      local held = unstick(obs, { moving = true })
+      if held then return held end
+      return navigate(obs, enemy.x, enemy.y, 6, "closing to sightline")
     end
-    local x, y = aim_point(obs, enemy)
-    local engaging = { move = 4, turn = 8, fire = true, target_x = x, target_y = y, logs = { "engaging " .. enemy.name } }
-    if relay then return arena.send_message(relay, engaging) end
-    return arena.action(engaging)
+    if seen then
+      local held = unstick(obs, { moving = true })
+      if held then return held end
+      local x, y = aim_point(obs, enemy)
+      -- Healthy and far: fire from the post, but do not chase.
+      if not pursuit then
+        local line = state.line
+        state.line = nil
+        local spec = { move = 0, turn = 6, fire = true, target_x = x, target_y = y, logs = { line or ("holding. target at " .. math.floor(enemy_distance)) } }
+        if relay or line then return arena.send_message(relay or line, spec) end
+        return arena.action(spec)
+      end
+      local line = state.line
+      state.line = nil
+      if enemy_distance > 160 then
+        local spec = { move = 6, fire = true, target_x = enemy.x, target_y = enemy.y, logs = { line or ("closing on " .. enemy.name) } }
+        if relay or line then return arena.send_message(relay or line, spec) end
+        return arena.action(spec)
+      end
+      local spec = { move = 4, turn = 8, fire = true, target_x = x, target_y = y, logs = { line or ("engaging " .. enemy.name) } }
+      if relay or line then return arena.send_message(relay or line, spec) end
+      return arena.action(spec)
+    end
   end
 
   -- Quiet field: short detours for scanner, cloak, and heals only.
@@ -196,12 +247,12 @@ local function decide(obs)
     return navigate(obs, item.x, item.y, 6, "detour for " .. item.type)
   end
 
-  -- Fresh radar sweep around the anchor; radar exposes cloaked contacts.
+  -- Fresh radar sweep around the post; radar exposes cloaked contacts.
   if obs.tick >= state.next_scan then
     state.next_scan, state.scanned_at = obs.tick + 60, obs.tick
     local held = unstick(obs, { moving = true })
     if held then return held end
-    return arena.scan(state.anchor.x, state.anchor.y, 300, { move = 4, logs = { "sweeping center" } })
+    return arena.scan(state.anchor.x, state.anchor.y, 300, { move = 4, logs = { "sweeping the perimeter" } })
   end
   local report = obs.scanResult
   if report and state.scanned_at and obs.tick > state.scanned_at and obs.tick - state.scanned_at <= 50 then
@@ -212,16 +263,16 @@ local function decide(obs)
     end
   end
 
-  -- Hold the center: re-anchor when drifted, otherwise orbit it slowly.
+  -- Hold the post: re-anchor when drifted, otherwise orbit it slowly.
   if arena.distance(self, state.anchor) > 90 then
     local held = unstick(obs, { moving = true })
     if held then return held end
-    return navigate(obs, state.anchor.x, state.anchor.y, 6, "returning to anchor")
+    return navigate(obs, state.anchor.x, state.anchor.y, 6, "returning to post")
   end
   local orbit = arena.random_safe_point(obs, state.anchor.x, state.anchor.y, 60, 8)
   local held = unstick(obs, { moving = true })
   if held then return held end
-  return navigate(obs, orbit.x, orbit.y, 4, "holding center")
+  return navigate(obs, orbit.x, orbit.y, 4, "holding post")
 end
 
 arena.run({

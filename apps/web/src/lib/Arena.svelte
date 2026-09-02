@@ -5,6 +5,7 @@
   let canvas: HTMLCanvasElement;
   let width = $state(800);
   let frame = 0, receivedAt = 0, visible = true;
+  let wakeFrame = () => {};
   let previous: Snapshot | null = null, target: Snapshot | null = null;
   let reducedMotion = false;
   let legendOpen = $state(false);
@@ -233,6 +234,22 @@
       drawContext.drawImage(halo, x - haloSize / 2, y - haloSize / 2, haloSize, haloSize);
       drawContext.fillStyle = '#dfff86'; drawContext.beginPath(); drawContext.arc(x, y, 4 * scale, 0, Math.PI * 2); drawContext.fill();
     }
+    // Radar rings are drawn for every living robot before the bodies so the
+    // triangles and labels stay on top of the overlap. visionRange is the
+    // engine's per-tick perception radius (optics/scanner widen it).
+    for (const robot of target.robots) {
+      if (!robot.alive || !robot.visionRange) continue;
+      const position = robotPosition(robot, now);
+      drawContext.strokeStyle = teamColor(robot.team);
+      drawContext.globalAlpha = .16;
+      drawContext.lineWidth = 1;
+      drawContext.setLineDash([4, 7]);
+      drawContext.beginPath();
+      drawContext.arc(position.x * scale, position.y * scale, robot.visionRange * scale, 0, Math.PI * 2);
+      drawContext.stroke();
+      drawContext.setLineDash([]);
+      drawContext.globalAlpha = 1;
+    }
     for (const robot of target.robots) {
       const position = robotPosition(robot, now), x = position.x * scale, y = position.y * scale;
       const color = teamColor(robot.team);
@@ -258,6 +275,13 @@
       drawContext.fillText(final ? `FINAL ZONE · STAGE ${zone.stage}/3` : `ZONE STAGE ${zone.stage}/3`, width - 12, 20);
     }
   }
+
+  function needsAnotherFrame(now: number) {
+    if (target?.status === 'running') return true;
+    if (previous && now - receivedAt < 100) return true;
+    return explosions.some((boom) => now - boom.at < 480);
+  }
+
   onMount(() => {
     reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches || localStorage.getItem('arena-reduced-motion') === 'true';
     const requestFrame = () => {
@@ -265,9 +289,10 @@
       frame = requestAnimationFrame((now) => {
         frame = 0;
         draw(now);
-        requestFrame();
+        if (needsAnotherFrame(now)) requestFrame();
       });
     };
+    wakeFrame = requestFrame;
     const observer = new ResizeObserver(([entry]) => { width = entry.contentRect.width; requestFrame(); });
     const visibilityObserver = new IntersectionObserver(([entry]) => {
       visible = entry.isIntersecting;
@@ -277,7 +302,7 @@
     observer.observe(canvas.parentElement!);
     visibilityObserver.observe(canvas);
     requestFrame();
-    return () => { observer.disconnect(); visibilityObserver.disconnect(); if (frame) cancelAnimationFrame(frame); };
+    return () => { wakeFrame = () => {}; observer.disconnect(); visibilityObserver.disconnect(); if (frame) cancelAnimationFrame(frame); };
   });
   $effect(() => {
     if (!snapshot || snapshot === target) return;
@@ -288,6 +313,7 @@
     targetRobots = new Map(target.robots.map((robot) => [robot.robotId, robot]));
     receivedAt = performance.now();
     recordExplosions(snapshot);
+    wakeFrame();
   });
 </script>
 <canvas bind:this={canvas} aria-label="Live robot arena. Team glyphs and per-team colors distinguish robots; color is not the only identifier. Mines, turrets, and the collapsing zone are drawn in place."></canvas>
@@ -298,7 +324,7 @@
       {#each legendRows as row (row.rarity)}
         <div class="legend-row"><span class="legend-tag" data-rarity={row.rarity}>{row.rarity.toUpperCase()}</span>{#each row.entries as entry (entry)}<i class="sw" data-c={legendColor(entry)} data-r={row.rarity}></i><span>{entry}</span>{/each}</div>
       {/each}
-      <div class="legend-row legend-hazards"><i class="hz-mine"></i><span>mine</span><i class="hz-turret"></i><span>turret</span><i class="hz-zone"></i><span>zone</span><em>epic loot glows brightest</em></div>
+      <div class="legend-row legend-hazards"><i class="hz-mine"></i><span>mine</span><i class="hz-turret"></i><span>turret</span><i class="hz-zone"></i><span>zone</span><i class="hz-vision"></i><span>radar</span><em>epic loot glows brightest</em></div>
     </div>
   {/if}
 </div>

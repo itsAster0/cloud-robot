@@ -116,6 +116,7 @@ export interface RobotState {
   logs?: string[];
   dashCharges?: number;
   mineCharges?: number;
+  visionRange?: number;
   scanResult?: ScanReport;
   events?: ArenaEvent[];
   messages?: string[];
@@ -272,6 +273,16 @@ export interface Snapshot {
   zone?: ZoneState;
   announcements?: string[];
   overtime?: boolean;
+}
+
+export interface ArenaLayout {
+  type: 'arena_layout';
+  version: 1;
+  matchId: string;
+  mapId: string;
+  width: number;
+  height: number;
+  obstacles: ArenaObstacle[];
 }
 
 export interface CloudStatus {

@@ -22,6 +22,7 @@ const (
 	PersonalityAggressive BotPersonality = "aggressive"
 	PersonalityEvasive    BotPersonality = "evasive"
 	PersonalityCamper     BotPersonality = "camper"
+	PersonalityMixed      BotPersonality = "mixed"
 )
 
 // botState enumerates the behavior states the controller re-evaluates every
@@ -49,6 +50,12 @@ const (
 	dodgeLookahead    = 6.0 // ticks of projectile travel checked for threats
 	mineFleeOdds      = 0.7 // seeded gate: chance a fleeing bot drops its mine
 	botEscapeTicks    = 5   // stuck episode length before a new reverse heading
+
+	wanderProbeInterval = 24 // ticks between travel progress samples
+	wanderProbeDistance = 16 // movement below this counts as stuck
+	wanderMinTicks      = 12 // shortest wander burst
+	wanderExtraTicks    = 18 // extra burst length ceiling
+	spottedReactionGap  = 90 // ticks before a re-sighting reopens the reaction
 )
 
 // botTuning holds the per-difficulty knobs. Rookie keeps a charge-and-shoot
@@ -135,14 +142,32 @@ type BotController struct {
 	anchors        [4][2]float64
 	patrolIndex    int
 	patrolUntil    int
-	nextScanAt     int
-	scanX, scanY   float64
-	scanPending    bool
-	world          WorldState
-	hasWorld       bool
+	patrolOffsetX  float64
+	patrolOffsetY  float64
+	// Travel-progress probe: when a moving state stops making headway the
+	// controller opens a seeded wander burst toward a fresh heading.
+	probeTick      int
+	probeX, probeY float64
+	wanderTicks    int
+	wanderHeading  float64
+	// Orbit window bookkeeping so combat ring-strafing flips side randomly
+	// instead of tracing the same circle every episode.
+	orbitWindow int
+	orbitSide   float64
+	// First-sight bookkeeping: each persona opens a short reaction episode
+	// when an enemy appears after a long gap.
+	lastSeenTick int
+	spottedTicks int
+	spottedSide  float64
+	nextScanAt   int
+	scanX, scanY float64
+	scanPending  bool
+	world        WorldState
+	hasWorld     bool
 }
 
 func NewBotController(id string, difficulty BotDifficulty, personality BotPersonality, m MapDefinition) *BotController {
+	personality = resolvePersonality(id, personality)
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(id))
 	seed := h.Sum64()
@@ -169,6 +194,27 @@ func NewBotController(id string, difficulty BotDifficulty, personality BotPerson
 	bot.patrolIndex = int(seed % 4)
 	return bot
 }
+
+// resolvePersonality maps the match-level setting onto the bot persona.
+// Mixed assigns every bot a stable persona derived from its robot ID, so one
+// match fields varied opponents without extra configuration.
+func resolvePersonality(id string, personality BotPersonality) BotPersonality {
+	if personality != PersonalityMixed {
+		return personality
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(id))
+	_, _ = h.Write([]byte("|persona"))
+	switch h.Sum64() % 3 {
+	case 0:
+		return PersonalityAggressive
+	case 1:
+		return PersonalityEvasive
+	default:
+		return PersonalityCamper
+	}
+}
+
 func (b *BotController) Close() {}
 
 // SetWorld receives the engine's vision-filtered view each tick. Items,
@@ -191,6 +237,29 @@ func (b *BotController) jitter(turn float64) float64 {
 	return turn + b.driftBias + (b.rng.Float64()*2-1)*1.5
 }
 
+// trackProgress samples the bot position every wanderProbeInterval ticks. A
+// traveling state that barely moved opens a seeded wander burst toward a
+// fresh heading, which breaks anchor orbits and wall-hugging loops that
+// deterministic steering otherwise repeats forever.
+func (b *BotController) trackProgress(self RobotState, rolls botRolls) {
+	if b.wanderTicks > 0 || b.ticks-b.probeTick < wanderProbeInterval {
+		return
+	}
+	traveled := math.Hypot(self.X-b.probeX, self.Y-b.probeY)
+	b.probeTick, b.probeX, b.probeY = b.ticks, self.X, self.Y
+	if traveled >= wanderProbeDistance {
+		return
+	}
+	b.wanderTicks = wanderMinTicks + int(rolls.wander*wanderExtraTicks)
+	b.wanderHeading = normalizeDegrees(rolls.escape*360 + rolls.dodge*47)
+}
+
+// wanderIntent drives the burst: a committed run toward the burst heading
+// with normal jitter, long enough to carry the bot out of the loop it was in.
+func (b *BotController) wanderIntent(self RobotState, rolls botRolls) Intent {
+	return b.finish(Intent{Move: MaxMovePerTick * .8, Turn: b.jitter(shortestTurn(self.Heading, b.wanderHeading))}, rolls.move)
+}
+
 func (b *BotController) Tick(_ context.Context, self RobotState, robots []RobotState) (Intent, error) {
 	b.ticks++
 	if b.difficulty == BotDummy {
@@ -199,12 +268,37 @@ func (b *BotController) Tick(_ context.Context, self RobotState, robots []RobotS
 	rolls := b.roll()
 	b.trackDamage(self)
 	b.applyScanResult(self)
+	b.trackProgress(self, rolls)
 	tuning := b.tuning()
 	enemy, seen := nearestVisibleEnemy(self, robots, b.obstacles)
 	if seen {
 		b.lastKnown = botMemory{x: enemy.X, y: enemy.Y, tick: b.ticks}
+		// First sight or re-contact after a long gap opens a short
+		// personality-flavored reaction episode inside combat.
+		if b.lastSeenTick == 0 || b.ticks-b.lastSeenTick > spottedReactionGap {
+			b.spottedTicks = 6 + int(rolls.wander*6)
+			if b.personality == PersonalityEvasive {
+				b.spottedTicks += 6
+			}
+			b.spottedSide = 1
+			if rolls.sign < .5 {
+				b.spottedSide = -1
+			}
+		}
+		b.lastSeenTick = b.ticks
 	}
 	b.enterState(b.selectState(self, enemy, seen, tuning), rolls)
+	// A stuck traveler breaks off into a seeded wander burst; fights, hides,
+	// and retreats keep their own dedicated steering.
+	if b.wanderTicks > 0 {
+		switch b.state {
+		case stateCombat, stateHide, stateEscape:
+			b.wanderTicks = 0
+		default:
+			b.wanderTicks--
+			return b.avoidObstacles(self, b.wanderIntent(self, rolls), rolls), nil
+		}
+	}
 	var intent Intent
 	switch b.state {
 	case stateCombat:
@@ -356,21 +450,60 @@ func (b *BotController) combatIntent(self RobotState, enemy RobotState, tuning b
 	default:
 		move = MaxMovePerTick / 2
 		// Orbit window: while the gun cannot fire anyway, spend the window
-		// sliding sideways around the preferred-range ring.
-		if aimError >= 8 && (b.ticks+b.strafePhase)%16 < 8 {
-			side := 1.0
-			if b.strafePhase%2 == 0 {
-				side = -1
+		// sliding sideways around the preferred-range ring. The orbit side
+		// re-rolls at every window start so bots stop tracing identical rings.
+		if window := (b.ticks + b.strafePhase) / 16; window != b.orbitWindow || b.orbitSide == 0 {
+			b.orbitWindow = window
+			b.orbitSide = 1
+			if rolls.wander < .5 {
+				b.orbitSide = -1
 			}
-			orbit := normalizeDegrees(bearing + 90*side)
+		}
+		if aimError >= 8 && (b.ticks+b.strafePhase)%16 < 8 {
+			orbit := normalizeDegrees(bearing + 90*b.orbitSide)
 			return b.finish(Intent{Move: MaxMovePerTick * .7, Turn: b.jitter(shortestTurn(self.Heading, orbit))}, rolls.move)
 		}
 	}
 	if b.personality == PersonalityCamper && distance < 500 {
 		move = 0
 	}
+	// A fresh sighting opens a short persona reaction before normal combat
+	// steering resumes: aggressive bots charge, evasive bots re-establish
+	// range, campers plant and aim.
+	if b.spottedTicks > 0 {
+		b.spottedTicks--
+		return b.finish(b.spottedIntent(self, enemy, targetX, targetY, desired, tuning), rolls.move)
+	}
 	fire := aimError < 8 && LineOfSight(b.obstacles, self.X, self.Y, enemy.X, enemy.Y)
 	return b.finish(Intent{Move: move, Turn: b.jitter(shortestTurn(self.Heading, desired)), Fire: fire, TargetX: &targetX, TargetY: &targetY}, rolls.move)
+}
+
+// spottedIntent is the first-sight reaction of each persona. It only steers
+// for a handful of ticks, then regular combat intent takes over.
+func (b *BotController) spottedIntent(self RobotState, enemy RobotState, targetX, targetY, desired float64, tuning botTuning) Intent {
+	aimError := math.Abs(shortestTurn(self.Heading, desired))
+	switch b.personality {
+	case PersonalityEvasive:
+		// Re-establish range before trading shots: run directly away while
+		// close, otherwise slide sideways around the enemy.
+		dx, dy := enemy.X-self.X, enemy.Y-self.Y
+		bearing := normalizeDegrees(math.Atan2(dy, dx) * 180 / math.Pi)
+		heading := bearing + 90*b.spottedSide
+		if math.Hypot(dx, dy) < tuning.combatRange+60 {
+			heading = bearing + 180
+		}
+		return Intent{Move: MaxMovePerTick * .9, Turn: b.jitter(shortestTurn(self.Heading, normalizeDegrees(heading)))}
+	case PersonalityCamper:
+		// Plant, track, and only shoot once the barrel settles.
+		return Intent{Move: 0, Turn: b.jitter(shortestTurn(self.Heading, desired)), Fire: aimError < 8, TargetX: &targetX, TargetY: &targetY}
+	default:
+		// Aggressive: close the gap immediately, dashing across open ground.
+		intent := Intent{Move: MaxMovePerTick, Turn: b.jitter(shortestTurn(self.Heading, desired)), Fire: aimError < 8, TargetX: &targetX, TargetY: &targetY}
+		if self.DashCharges > 0 && math.Hypot(enemy.X-self.X, enemy.Y-self.Y) > 260 {
+			intent.Dash = true
+		}
+		return intent
+	}
 }
 
 func (b *BotController) dodgeIntent(self RobotState, rolls botRolls) Intent {
@@ -487,6 +620,11 @@ func (b *BotController) escapeIntent(self RobotState, enemy RobotState, seen boo
 			best = flight{bearing: bearing, score: score}
 		}
 	}
+	if best.score < 0 {
+		// Every flight bearing runs into cover: pick a seeded slide along
+		// the wall line instead of charging the blocked bearing head-on.
+		best.bearing = normalizeDegrees(flee + rolls.wander*140 - 70)
+	}
 	intent := Intent{Move: MaxMovePerTick, Turn: b.jitter(shortestTurn(self.Heading, best.bearing))}
 	if tuning.dash && self.DashCharges > 0 {
 		intent.Dash = true
@@ -510,6 +648,11 @@ func (b *BotController) insideZone(x, y float64) bool {
 
 func (b *BotController) huntIntent(self RobotState, tuning botTuning, rolls botRolls) Intent {
 	desired := normalizeDegrees(math.Atan2(b.lastKnown.y-self.Y, b.lastKnown.x-self.X) * 180 / math.Pi)
+	// Close to the memory the bot sweeps a seeded fan instead of beelining,
+	// so searching the spot does not degenerate into identical approach loops.
+	if math.Hypot(b.lastKnown.x-self.X, b.lastKnown.y-self.Y) < 80 {
+		desired = normalizeDegrees(desired + rolls.wander*90 - 45)
+	}
 	intent := Intent{Move: MaxMovePerTick * .85, Turn: b.jitter(shortestTurn(self.Heading, desired))}
 	// Sweep the quadrant around the last known position periodically; the
 	// report lands on self.ScanResult the next tick (applyScanResult).
@@ -659,11 +802,20 @@ func weaponRank(name string) float64 {
 func (b *BotController) patrolIntent(self RobotState, rolls botRolls) Intent {
 	anchor := b.anchors[b.patrolIndex]
 	if b.ticks >= b.patrolUntil || math.Hypot(anchor[0]-self.X, anchor[1]-self.Y) < 50 {
-		b.patrolIndex = (b.patrolIndex + 1) % len(b.anchors)
+		// About a third of the legs skip to a random anchor instead of the
+		// next one, and every leg aims at a seeded offset beside the anchor
+		// so repeat visits stop tracing the same approach vector.
+		if rolls.wander < .35 {
+			b.patrolIndex = int(rolls.dodge*float64(len(b.anchors))) % len(b.anchors)
+		} else {
+			b.patrolIndex = (b.patrolIndex + 1) % len(b.anchors)
+		}
+		b.patrolOffsetX = rolls.dodge*70 - 35
+		b.patrolOffsetY = rolls.move*70 - 35
 		b.patrolUntil = b.ticks + 150
 		anchor = b.anchors[b.patrolIndex]
 	}
-	desired := normalizeDegrees(math.Atan2(anchor[1]-self.Y, anchor[0]-self.X) * 180 / math.Pi)
+	desired := normalizeDegrees(math.Atan2(anchor[1]+b.patrolOffsetY-self.Y, anchor[0]+b.patrolOffsetX-self.X) * 180 / math.Pi)
 	return b.finish(Intent{Move: MaxMovePerTick * .55, Turn: b.jitter(shortestTurn(self.Heading, desired))}, rolls.move)
 }
 

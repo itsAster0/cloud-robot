@@ -91,6 +91,79 @@ func TestAgentObservationCarriesProtocolV3(t *testing.T) {
 	}
 }
 
+func TestAgentObservationSendsStaticLayoutOnce(t *testing.T) {
+	session, observations := loopbackAgent(t, func(map[string]any) map[string]any {
+		return map[string]any{"move": 1.0, "sdkVersion": "0.3.2"}
+	})
+	world := engine.WorldState{
+		Obstacles: []engine.Obstacle{{ID: "wall", Shape: "aabb", Width: 40, Height: 20}},
+		Hazards:   []engine.Hazard{{ID: "slow", Type: "slow-field", Width: 40, Height: 20}},
+	}
+	if _, err := session.Tick(context.Background(), v3Self(), nil, world); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Tick(context.Background(), v3Self(), nil, world); err != nil {
+		t.Fatal(err)
+	}
+	if len(*observations) != 2 {
+		t.Fatalf("expected two observations, got %d", len(*observations))
+	}
+	if (*observations)[0]["obstacles"] == nil || (*observations)[0]["hazards"] == nil {
+		t.Fatalf("first observation omitted static layout: %#v", (*observations)[0])
+	}
+	if _, ok := (*observations)[1]["obstacles"]; ok {
+		t.Fatalf("later observation repeated obstacles: %#v", (*observations)[1])
+	}
+	if _, ok := (*observations)[1]["hazards"]; ok {
+		t.Fatalf("later observation repeated hazards: %#v", (*observations)[1])
+	}
+}
+
+func TestAgentObservationKeepsLayoutForOlderSDK(t *testing.T) {
+	session, observations := loopbackAgent(t, func(map[string]any) map[string]any {
+		return map[string]any{"sdkVersion": "0.3.1"}
+	})
+	world := engine.WorldState{Obstacles: []engine.Obstacle{{ID: "wall"}}, Hazards: []engine.Hazard{{ID: "slow"}}}
+	for range 2 {
+		if _, err := session.Tick(context.Background(), v3Self(), nil, world); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(*observations) != 2 || (*observations)[1]["obstacles"] == nil || (*observations)[1]["hazards"] == nil {
+		t.Fatalf("older SDK lost static layout: %#v", *observations)
+	}
+}
+
+func TestReconnectGraceReturnsSafeIntentBeforeFirstAction(t *testing.T) {
+	manager := NewAgentManager()
+	manager.last["robot-1"] = engine.Intent{Move: 3}
+	manager.disconnectedAt["robot-1"] = time.Now()
+	controller := &remoteController{manager: manager, robotID: "robot-1"}
+	intent, err := controller.Tick(context.Background(), v3Self(), nil)
+	if err != nil || intent.Move != 3 {
+		t.Fatalf("mid-tick reconnect fallback failed: intent=%+v err=%v", intent, err)
+	}
+}
+
+func TestReconnectGraceAppliesWhenActiveSessionDisconnects(t *testing.T) {
+	session, _ := loopbackAgent(t, func(map[string]any) map[string]any { return nil })
+	manager := NewAgentManager()
+	manager.Attach("robot-1", session)
+	if err := session.connection.CloseNow(); err != nil {
+		t.Fatal(err)
+	}
+	controller := &remoteController{manager: manager, robotID: "robot-1"}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	intent, err := controller.Tick(ctx, v3Self(), nil)
+	if err != nil {
+		t.Fatalf("disconnect during an active tick bypassed grace: %v", err)
+	}
+	if intent.Move != 0 {
+		t.Fatalf("first reconnect grace action must be safe no-op: %+v", intent)
+	}
+}
+
 func TestAgentActionMapsDashDeployScanMessage(t *testing.T) {
 	reply := map[string]any{
 		"move": 4.0, "fire": true, "dash": true, "deploy": "mine",

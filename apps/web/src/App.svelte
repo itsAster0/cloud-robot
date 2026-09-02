@@ -18,9 +18,13 @@
   let startCommand = $state('lua main.lua');
   let match = $state<Match | null>(null);
   let enrollment = $state<AgentEnrollment | null>(null);
-  // Raw on purpose: snapshots are immutable per-tick payloads read at up to
-  // 60 fps by the arena renderer — a deep proxy here taxes every property read.
+  // The arena uses every server tick. The surrounding HTML refreshes less often
+  // so roster cards and the event feed cannot interrupt canvas frames.
   let snapshot = $state.raw<Snapshot | null>(null);
+  let arenaSnapshot = $state.raw<Snapshot | null>(null);
+  let pendingSnapshot: Snapshot | null = null;
+  let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastSnapshotRender = 0;
   let cloud = $state<CloudStatus | null>(null);
   let user = $state<User | null>(null);
   let signingIn = $state(redirectCallbackPending());
@@ -37,6 +41,7 @@
   let feed = $state<FeedEntry[]>([]);
   let socket: WebSocket | null = null;
   let boxPoll: ReturnType<typeof setInterval> | null = null;
+  let arenaObstacles: Snapshot['obstacles'] = [];
 
   interface FeedEntry {
     id: string;
@@ -210,9 +215,33 @@
 
   function hydrateMatchView(source: Match) {
     if (source.status !== 'finished' && source.status !== 'failed') return;
-    if (snapshot?.matchId === source.matchId) return;
-    snapshot = snapshotFromMatch(source);
+    if (arenaSnapshot?.matchId === source.matchId) return;
+    publishSnapshot(snapshotFromMatch(source));
     feed = (source.eventSummary ?? []).map((event, index) => feedEntry(event.sequence, index, event));
+  }
+
+  function publishSnapshot(next: Snapshot) {
+    arenaSnapshot = next;
+    const now = performance.now();
+    const mustRender = !snapshot || snapshot.matchId !== next.matchId || snapshot.status !== next.status || now - lastSnapshotRender >= 200;
+    if (mustRender) {
+      if (snapshotTimer) clearTimeout(snapshotTimer);
+      snapshotTimer = null;
+      pendingSnapshot = null;
+      lastSnapshotRender = now;
+      snapshot = next;
+      return;
+    }
+    pendingSnapshot = next;
+    if (!snapshotTimer) {
+      snapshotTimer = setTimeout(() => {
+        snapshotTimer = null;
+        if (!pendingSnapshot) return;
+        snapshot = pendingSnapshot;
+        pendingSnapshot = null;
+        lastSnapshotRender = performance.now();
+      }, Math.max(0, 200 - (now - lastSnapshotRender)));
+    }
   }
 
   onMount(() => {
@@ -223,6 +252,7 @@
       window.removeEventListener('hashchange', onHash);
       socket?.close();
       clearStreakBanner();
+      if (snapshotTimer) clearTimeout(snapshotTimer);
       if (boxPoll) clearInterval(boxPoll);
     };
   });
@@ -441,6 +471,7 @@
 
   function connect(matchId: string) {
     socket?.close();
+    arenaObstacles = [];
     socketState = 'connecting';
     const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     socket = new WebSocket(`${scheme}//${window.location.host}/ws/matches/${encodeURIComponent(matchId)}`);
@@ -449,8 +480,15 @@
     socket.onerror = () => { socketState = 'offline'; };
     socket.onmessage = ({ data }) => {
       const event = JSON.parse(data);
-      if (event.type === 'snapshot' && isNewerSnapshot(snapshot, event)) {
-        snapshot = event;
+      if (event.type === 'arena_layout') {
+        arenaObstacles = event.obstacles ?? [];
+        const current = arenaSnapshot;
+        if (current && current.matchId === event.matchId) publishSnapshot({ ...current, obstacles: arenaObstacles });
+        return;
+      }
+      if (event.type === 'snapshot' && isNewerSnapshot(arenaSnapshot, event)) {
+        event.obstacles = event.obstacles ?? arenaObstacles;
+        publishSnapshot(event);
         const incoming = (event.events ?? []).map((entry: ArenaEvent, index: number) => feedEntry(event.sequence, index, entry));
         if (incoming.length) feed = [...feed, ...incoming].slice(-40);
       }
@@ -546,13 +584,14 @@
             {#if myRobot}<button class="withdraw" onclick={withdrawRobot} disabled={busy || pending.withdraw}>{working('withdraw', 'WITHDRAWING…') ?? 'WITHDRAW ROBOT'}</button>{/if}
           </div>
         {:else}<div class="match-result" class:finished={match.status === 'finished'}><span>{match.status === 'finished' ? 'WINNER' : 'MATCH STATE'}</span><strong>{match.winnerTeam?.toUpperCase() ?? match.status.toUpperCase()}</strong></div>
+          {#if match.status !== 'running'}<a class="secondary-action queue-again" href="#/play">{match.status === 'finished' ? 'QUEUE AGAIN' : 'BACK TO QUEUE'} →</a>{/if}
           {#if match.status === 'running' && myRobot}<button class="withdraw" onclick={withdrawFromMatch} disabled={busy || pending.withdraw}>{working('withdraw', 'WITHDRAWING…') ?? 'WITHDRAW FROM MATCH'}</button>{/if}{/if}
       </aside>
 
       <section class="arena-panel">
         <div class="panel-head"><div><span class="status-dot"></span>ARENA // LIVE</div><span>{snapshot?.status.toUpperCase() ?? 'WAITING FOR AGENTS'}</span></div>
         <div class="arena-stage">
-          <Arena {snapshot} />
+          <Arena snapshot={arenaSnapshot} />
           {#if announcements.length}
             <div class="announcer-chips" role="status">{#each announcements as note (note)}<span class="announcer-chip" data-note={note}>{note}</span>{/each}</div>
           {/if}

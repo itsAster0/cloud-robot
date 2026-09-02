@@ -2454,3 +2454,91 @@ func TestBotStatefulRunRemainsDeterministicPerSeed(t *testing.T) {
 		t.Fatal("stateful bot run diverged for identical seeds")
 	}
 }
+
+func TestBotBreaksOutOfStuckLoops(t *testing.T) {
+	bot := NewBotController("stuck-1", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+	self := RobotState{RobotID: "stuck-1", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma"}
+	headings := map[float64]bool{}
+	burstIntents := 0
+	for tick := 1; tick <= 130; tick++ {
+		bot.SetWorld(WorldState{Tick: tick, Width: 800, Height: 500, VisionRange: 320})
+		// The self state never moves: the progress probe must keep opening
+		// wander bursts toward fresh seeded headings instead of letting the
+		// bot grind the same loop forever.
+		intent, err := bot.Tick(context.Background(), self, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bot.wanderTicks > 0 {
+			headings[bot.wanderHeading] = true
+			if intent.Move > 0 {
+				burstIntents++
+			}
+		}
+	}
+	if burstIntents == 0 {
+		t.Fatal("a motionless traveler must open wander bursts with forward drive")
+	}
+	if len(headings) < 3 {
+		t.Fatalf("wander bursts must pick varied directions: %v", headings)
+	}
+}
+
+func TestMixedPersonalityAssignsStablePerBotPersonas(t *testing.T) {
+	seen := map[BotPersonality]bool{}
+	for _, id := range []string{"mix-0", "mix-1", "mix-2", "mix-3", "mix-4", "mix-5", "mix-6", "mix-7", "mix-8"} {
+		bot := NewBotController(id, BotFighter, PersonalityMixed, DefaultMap(800, 500))
+		switch bot.personality {
+		case PersonalityAggressive, PersonalityEvasive, PersonalityCamper:
+			seen[bot.personality] = true
+		default:
+			t.Fatalf("mixed must resolve to a concrete persona, got %q", bot.personality)
+		}
+	}
+	if len(seen) < 2 {
+		t.Fatalf("a mixed roster should field varied personas: %v", seen)
+	}
+	stable := NewBotController("mix-3", BotFighter, PersonalityMixed, DefaultMap(800, 500)).personality
+	if stable != NewBotController("mix-3", BotFighter, PersonalityMixed, DefaultMap(800, 500)).personality {
+		t.Fatal("mixed persona must be stable per robot ID")
+	}
+	// Explicit personalities are never overridden.
+	if NewBotController("mix-0", BotFighter, PersonalityEvasive, DefaultMap(800, 500)).personality != PersonalityEvasive {
+		t.Fatal("explicit personality must survive resolution")
+	}
+}
+
+func TestBotSpottedReactionsVaryByPersonality(t *testing.T) {
+	enemy := RobotState{RobotID: "enemy", Team: "blue", X: 380, Y: 100, Heading: 180, HP: 100, Alive: true}
+	self := RobotState{RobotID: "react", Team: "red", X: 100, Y: 100, Heading: 0, HP: 100, Alive: true, Weapon: "plasma", DashCharges: 2}
+	// Aggressive answers first sight by closing the gap and dashing.
+	hunter := NewBotController("react-hunter", BotFighter, PersonalityAggressive, DefaultMap(800, 500))
+	hunt, err := hunter.Tick(context.Background(), self, []RobotState{self, enemy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hunter.spottedTicks <= 0 {
+		t.Fatalf("first sight must open the reaction episode: %+v", hunt)
+	}
+	if !hunt.Dash || hunt.Move <= 0 || !hunt.Fire {
+		t.Fatalf("aggressive first sight must charge and shoot: %+v", hunt)
+	}
+	// Evasive opens with a repositioning move and holds fire.
+	kiter := NewBotController("react-kiter", BotFighter, PersonalityEvasive, DefaultMap(800, 500))
+	kite, err := kiter.Tick(context.Background(), self, []RobotState{self, enemy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kite.Fire || kite.TargetX != nil || kite.Move <= 0 {
+		t.Fatalf("evasive first sight must reposition without shooting: %+v", kite)
+	}
+	// Camper plants and tracks without moving.
+	camper := NewBotController("react-camper", BotFighter, PersonalityCamper, DefaultMap(800, 500))
+	plant, err := camper.Tick(context.Background(), self, []RobotState{self, enemy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plant.Move != 0 || !plant.Fire || plant.TargetX == nil {
+		t.Fatalf("camper first sight must plant and aim: %+v", plant)
+	}
+}

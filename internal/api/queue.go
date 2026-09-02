@@ -245,6 +245,21 @@ func (s *Server) queueStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entry)
 }
 
+// clearQueueEntriesForMatch drops the matched entries a duel queue created
+// for a match. The queue's job ends when the match leaves the lobby: keeping
+// the entry would leave /api/queue reporting "matched" after the match ends,
+// and the web client's auto-resume would bounce the player between /play and
+// the finished match page forever.
+func (s *Server) clearQueueEntriesForMatch(matchID string) {
+	s.queue.mu.Lock()
+	defer s.queue.mu.Unlock()
+	for userID, entry := range s.queue.entries {
+		if entry.MatchID == matchID {
+			delete(s.queue.entries, userID)
+		}
+	}
+}
+
 func (s *Server) leaveQueue(w http.ResponseWriter, r *http.Request) {
 	userID := robotauth.UserID(r.Context())
 	s.queue.mu.Lock()
@@ -420,6 +435,12 @@ func (s *Server) enforceConnectGrace(matchID string, userIDs []string) {
 	match, err := s.store.GetMatch(ctx, matchID)
 	if err != nil || match.Status != model.MatchLobby {
 		s.mu.Unlock()
+		// The match left the lobby (or vanished), so the queue handoff is
+		// over whether or not the worker already dropped the entries.
+		// Without this, an entry that outlived its match keeps /api/queue
+		// reporting "matched" forever and the client redirects the player
+		// back to that finished match instead of letting them queue again.
+		s.clearQueueEntriesForMatch(matchID)
 		return
 	}
 	expired := false

@@ -1,8 +1,18 @@
 # Lua Robot SDK
 
-Robot code runs continuously inside player-owned boxes. The box opens one outbound WebSocket to arena control plane. Server sends observations at 10 Hz using protocol version 3. SDK 0.3.1 calls player `decide` function and returns latest action. There are no player-facing turns.
+Robot code runs continuously inside player-owned boxes. The box opens one outbound WebSocket to arena control plane. Server sends observations at 10 Hz using protocol version 3. SDK 0.3.2 calls player `decide` function and returns latest action. There are no player-facing turns.
+
+If `decide` raises a Lua error, SDK 0.3.2 keeps the WebSocket connected and sends
+a safe no-op action with a `script error: ...` telemetry line. Fix the script
+over SSH or deploy another template. A script error is not reported as an agent
+network failure.
 
 Edit `/workspace/main.lua` over SSH. Registering a robot snapshots this file to S3-compatible storage, gives box supervisor a short robot configuration, and starts `lua main.lua`. Credentials are not displayed in browser or written into workspace.
+
+`examples/` contains ready-to-copy SDK 0.3.2 robots. Each example exactly
+matches the identically named script available from the box console:
+`lua-aggressive`, `lua-evasive`, `lua-demolisher`, `lua-patroller`,
+`lua-sniper`, and `lua-sentinel`.
 
 ## Start
 
@@ -69,6 +79,13 @@ Protocol v3 adds these fields (mirrored on `self` and top level):
 
 The server may add fields in later protocol versions. Robot code should ignore
 unknown fields and treat missing arrays as empty.
+
+After SDK 0.3.2 identifies itself in its first action, the server stops
+repeating `obstacles` and `hazards` for that WebSocket session. The SDK caches
+them and adds both arrays to every observation before it calls `decide`.
+Scripts using the SDK continue to see the same observation shape. A reconnect
+starts a new session and receives the layout again. Older SDK versions keep
+receiving both arrays every tick.
 
 ## Vision
 
