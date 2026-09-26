@@ -58,6 +58,28 @@ func (r *v4Recorder) Add(key, source string) error {
 	}
 }
 func (r *v4Recorder) Close() error { r.once.Do(func() { close(r.queue) }); <-r.done; return r.Err() }
+
+// staticLayoutKeys hold map geometry that only changes with the revision.
+var staticLayoutKeys = []string{"obstacles", "hazards", "transit", "sites"}
+
+// withoutStaticLayout drops map geometry from a replay frame. Each stored page
+// keeps the layout on its first frame only; readers merge it into the rest.
+// A dense world's geometry is far larger than its moving entities.
+func withoutStaticLayout(frame json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(frame, &fields) != nil {
+		return frame
+	}
+	for _, key := range staticLayoutKeys {
+		delete(fields, key)
+	}
+	stripped, err := json.Marshal(fields)
+	if err != nil {
+		return frame
+	}
+	return stripped
+}
+
 func packFrames(frames []json.RawMessage) (string, error) {
 	raw, err := json.Marshal(frames)
 	if err != nil {

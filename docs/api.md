@@ -139,9 +139,21 @@ The legacy endpoints remain available. New Rust-backed matches use these routes:
   `friendlyFire`, `liveEdit`, plus map density `siteCount` (0 = auto: 4 small /
   64 large, else 1..256), `coverPerSite` (0..12, default 8), and `lootPerSite` (0..32).
   Cover composes open corners, pillars, lanes, arcs, hedgerows, glass panes,
-  and rock on slotted rings plus wild mixed clusters between sites; segments
-  carry a visual-only `material` (wall, hedge, glass, rock) with identical
-  collision. Ground texture and site pads render client-side.
+  and rock on slotted rings plus wild mixed clusters between sites. Each site
+  also has a `biome` (urban, industrial, forest, desert) that fills the rest of
+  its cell with themed structures: walled rooms with doorways, ruined corners,
+  container yards, warehouses, barrel stacks, groves, rock formations, and
+  sandbag outposts. District pieces keep 90 units of clearance from other
+  structures and hazards, and a world-wide budget of 8,000 pieces caps them.
+  Street crosses through each site stay open. `coverPerSite` scales district
+  density; 0 leaves open ground. Segments carry a visual-only `material`
+  (wall, hedge, glass, rock, brick, metal, container, crate, barrel, tree,
+  sandbag) with identical collision. Ground textures, roads, and site pads
+  render client-side from `sites`.
+- v4 snapshots carry static layout (`obstacles`, `hazards`, `transit`,
+  `sites`) on a viewer's first delivery and on revision changes. Stored replay
+  pages keep layout on their first frame and on revision changes only; readers
+  merge the latest earlier layout into later frames.
   Squad capacity must be divisible by four.
 - `POST /api/v4/maps/preview`: render the deterministic geometry (sites,
   cover structures, loot, hazard fields, zone phases) for the same config

@@ -7,6 +7,13 @@ use arena_engine::{
 };
 use serde_json::json;
 use std::collections::BTreeMap;
+/// Site rings and wild scatter; district fill is covered by its own test.
+fn core_obstacles(w: &World) -> usize {
+    w.obstacles
+        .iter()
+        .filter(|o| !o.id.starts_with("district-"))
+        .count()
+}
 fn config(n: usize) -> Config {
     serde_json::from_value(json!({"matchId":"test","mode":"sandbox","capacity":n,"width":42000,"height":26250,"durationSeconds":1080,"seed":42,"robots":(0..n).map(|i|json!({"robotId":format!("human-{i:03}"),"name":format!("Robot {i}"),"bot":false})).collect::<Vec<_>>()})).unwrap()
 }
@@ -787,7 +794,7 @@ fn bots_keep_moving_on_dense_maps() {
 fn map_structures_vary_with_hazards_and_clear_spawns() {
     let c: Config = serde_json::from_value(json!({"matchId":"structs","mode":"br-solo","capacity":64,"width":42000,"height":26250,"durationSeconds":1080,"seed":7,"siteCount":16,"coverPerSite":8,"lootPerSite":16,"robots":[]})).unwrap();
     let w = World::generate(&c);
-    assert_eq!(w.obstacles.len(), 16 * 8 + 16 * 5);
+    assert_eq!(core_obstacles(&w), 16 * 8 + 16 * 5);
     // Structures read as architecture: varied segment sizes, not one stamp.
     let sizes: std::collections::BTreeSet<(u64, u64)> = w
         .obstacles
@@ -882,7 +889,7 @@ fn dense_map_controls_scale_sites_cover_loot_deterministically() {
     let w1 = World::generate(&c1);
     let w2 = World::generate(&c2);
     assert_eq!(w1.sites.len(), 16);
-    assert_eq!(w1.obstacles.len(), 16 * 8 + 16 * 5);
+    assert_eq!(core_obstacles(&w1), 16 * 8 + 16 * 5);
     assert_eq!(w1.containers.len(), 16 * 24);
     assert_eq!(w1.sites.len(), w2.sites.len());
     assert_eq!(w1.obstacles.len(), w2.obstacles.len());
@@ -895,6 +902,137 @@ fn dense_map_controls_scale_sites_cover_loot_deterministically() {
     let def: Config = serde_json::from_value(json!({"matchId":"def","mode":"sandbox","capacity":1,"width":42000,"height":26250,"durationSeconds":1080,"seed":7,"robots":[]})).unwrap();
     let wdef = World::generate(&def);
     assert_eq!(wdef.sites.len(), 64);
-    assert_eq!(wdef.obstacles.len(), 64 * 8 + 64 * 5);
+    assert_eq!(core_obstacles(&wdef), 64 * 8 + 64 * 5);
     assert_eq!(wdef.containers.len(), 64 * 16);
+}
+
+fn world_config(extra: serde_json::Value) -> Config {
+    let mut v = json!({"matchId":"districts","mode":"br-solo","capacity":64,"width":42000,"height":26250,"durationSeconds":1080,"seed":7,"robots":[]});
+    v.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    serde_json::from_value(v).unwrap()
+}
+fn structure_key(id: &str) -> &str {
+    &id[..id.rfind('-').unwrap()]
+}
+#[test]
+fn districts_fill_cells_with_themed_walkable_structures() {
+    let w = World::generate(&world_config(json!({})));
+    let biomes: std::collections::BTreeSet<&str> =
+        w.sites.iter().map(|s| s.biome.as_str()).collect();
+    assert_eq!(biomes.len(), 4, "every theme appears: {biomes:?}");
+    let district: Vec<&Obstacle> = w
+        .obstacles
+        .iter()
+        .filter(|o| o.id.starts_with("district-"))
+        .collect();
+    assert!(
+        district.len() > 3000,
+        "sparse districts: {}",
+        district.len()
+    );
+    assert!(w.obstacles.len() <= 16384, "exceeds the edit budget");
+    let materials: std::collections::BTreeSet<&str> =
+        district.iter().map(|o| o.material.as_str()).collect();
+    for m in ["brick", "metal", "container", "tree", "rock", "sandbag"] {
+        assert!(materials.contains(m), "missing {m}: {materials:?}");
+    }
+    let index: std::collections::HashMap<&str, usize> = w
+        .obstacles
+        .iter()
+        .enumerate()
+        .map(|(i, o)| (o.id.as_str(), i))
+        .collect();
+    for o in &district {
+        assert!(o.x >= 40. && o.y >= 40. && o.x + o.width <= 41960. && o.y + o.height <= 26210.);
+        for h in &w.hazards {
+            assert!(
+                !(o.x < h.x + h.width
+                    && o.x + o.width > h.x
+                    && o.y < h.y + h.height
+                    && o.y + o.height > h.y),
+                "{} sits in hazard {}",
+                o.id,
+                h.id
+            );
+        }
+        // Distinct structures never touch, so gaps between them stay walkable.
+        for j in w
+            .grid
+            .query(o.x - 80., o.y - 80., o.width + 160., o.height + 160.)
+        {
+            let other = &w.obstacles[j];
+            if index[o.id.as_str()] == j || structure_key(&other.id) == structure_key(&o.id) {
+                continue;
+            }
+            assert!(
+                !(other.x < o.x + o.width + 80.
+                    && other.x + other.width > o.x - 80.
+                    && other.y < o.y + o.height + 80.
+                    && other.y + other.height > o.y - 80.),
+                "{} crowds {}",
+                o.id,
+                other.id
+            );
+        }
+    }
+    // Rooms keep doorways: a robot at each room center finds a way out.
+    let mut rooms: BTreeMap<&str, (f64, f64, f64, f64)> = BTreeMap::new();
+    for o in district
+        .iter()
+        .filter(|o| o.material == "brick" || o.material == "metal")
+    {
+        let b =
+            rooms
+                .entry(structure_key(&o.id))
+                .or_insert((f64::MAX, f64::MAX, f64::MIN, f64::MIN));
+        *b = (
+            b.0.min(o.x),
+            b.1.min(o.y),
+            b.2.max(o.x + o.width),
+            b.3.max(o.y + o.height),
+        );
+    }
+    let mut checked = 0;
+    for (id, (x0, y0, x1, y1)) in rooms.iter().step_by(7) {
+        let (cx, cy) = ((x0 + x1) / 2., (y0 + y1) / 2.);
+        if !w.clear(cx, cy, 24.) {
+            continue;
+        }
+        let escaped = [(0., -1.), (1., 0.), (0., 1.), (-1., 0.)]
+            .iter()
+            .any(|(dx, dy)| {
+                let goal = (
+                    cx + dx * ((x1 - x0) / 2. + 60.),
+                    cy + dy * ((y1 - y0) / 2. + 60.),
+                );
+                w.clear(goal.0, goal.1, 24.)
+                    && local_waypoint(&w, (cx, cy), goal, (42000., 26250.), 24.).is_some()
+            });
+        assert!(escaped, "room {id} seals its interior");
+        checked += 1;
+    }
+    assert!(checked > 20, "too few rooms checked: {checked}");
+    let open = World::generate(&world_config(json!({"siteCount":16,"coverPerSite":0})));
+    assert!(
+        open.obstacles.is_empty(),
+        "zero cover must stay open ground"
+    );
+}
+#[test]
+fn district_layout_is_byte_stable() {
+    let w = World::generate(&world_config(json!({})));
+    // Sites and districts use arithmetic only; the trig-placed core rings are
+    // left out so the pin holds across platforms' libm.
+    let district: Vec<&Obstacle> = w
+        .obstacles
+        .iter()
+        .filter(|o| o.id.starts_with("district-"))
+        .collect();
+    let bytes = serde_json::to_vec(&(&w.sites, district)).unwrap();
+    let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+    });
+    assert_eq!(format!("{hash:016x}"), "505cdac4ea22f50b");
 }

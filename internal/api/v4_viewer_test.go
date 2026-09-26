@@ -107,3 +107,22 @@ func TestV4RegionalPayloadMeasurement(t *testing.T) {
 	}
 	t.Logf("10-second synthetic spread fixture: full=%d regional=%d bytes reduction=%.2f%%", full, regional, 100*(1-float64(regional)/float64(full)))
 }
+
+func TestWithoutStaticLayoutKeepsEntities(t *testing.T) {
+	frame := json.RawMessage(`{"tick":20,"revision":1,"robots":[{"robotId":"r"}],"obstacles":[{"id":"o"}],"hazards":[],"transit":[],"sites":[{"id":"s"}]}`)
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(withoutStaticLayout(frame), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range staticLayoutKeys {
+		if _, ok := got[key]; ok {
+			t.Fatalf("%s kept in stripped frame", key)
+		}
+	}
+	if string(got["robots"]) != `[{"robotId":"r"}]` || string(got["tick"]) != "20" {
+		t.Fatalf("entities changed: %s", got["robots"])
+	}
+	if bad := withoutStaticLayout(json.RawMessage(`not json`)); string(bad) != "not json" {
+		t.Fatal("invalid frame must pass through unchanged")
+	}
+}

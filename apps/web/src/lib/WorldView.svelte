@@ -2,14 +2,10 @@
   import { onMount } from 'svelte';
   import { SnapshotBuffer, angleBetween } from './interpolation';
   import { hpFraction, siteColor, teamColor, weaponGlyph } from './matchStats';
-  import type { Snapshot, RobotState } from './types';
-  export interface SiteMark { x: number; y: number; kind: string }
+  import { hash2, loadTerrain, paintChunk, roadsFor, type Road } from './terrain';
+  import type { Snapshot, RobotState, WorldHazard, WorldSite } from './types';
+  export type SiteMark = WorldSite;
   let { snapshot, selected = '', leaderId = '', overview = [], sites = [], onregion }: { snapshot: Snapshot | null; selected?: string; leaderId?: string; overview?: RobotState[]; sites?: SiteMark[]; onregion?: (region: {x:number;y:number;width:number;height:number}) => void } = $props();
-  function hash2(x: number, y: number, seed: number) {
-    let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 974634211)) | 0;
-    h = Math.imul(h ^ (h >>> 13), 1274126177);
-    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
-  }
   let regionAt = 0;
   let canvas: HTMLCanvasElement;
   let zoom = $state(1), follow = $state(true), fps = $state(0), frameP95 = $state(0), age = $state(0);
@@ -17,30 +13,50 @@
   let keys = new Set<string>();
   let received = 0, width = 900, height = 580;
   const buffer = new SnapshotBuffer();
-  const tiles = new Map<string, HTMLCanvasElement>();
+  // Chunk caches per level of detail: full detail when zoomed in, a 128 px
+  // version when zoomed out so whole-map views stay cached instead of
+  // repainting every frame. Each map is kept in LRU order.
+  const LODS = [{ px: 512, cap: 64 }, { px: 128, cap: 700 }];
+  const tiles = LODS.map(() => new Map<string, HTMLCanvasElement>());
+  const clearTiles = () => tiles.forEach(cache => cache.clear());
+  // New chunk paints allowed per frame; the rest show a placeholder until later
+  // frames, so a sudden zoom-out never stalls one frame.
+  let paintBudget = 0;
   let layoutKey = '';
   const chunks = new Map<string, NonNullable<Snapshot['obstacles']>>();
+  let worldSites: WorldSite[] = [], roads: Road[] = [], hazards: WorldHazard[] = [];
+  onMount(() => loadTerrain(clearTiles));
   $effect(() => {
     if (!snapshot) return;
     received = performance.now(); buffer.push(snapshot, received);
-    const key = `${snapshot.matchId}:${snapshot.revision ?? 1}`;
+    const layoutSites = snapshot.sites?.length ? snapshot.sites : sites;
+    const key = `${snapshot.matchId}:${snapshot.revision ?? 1}:${layoutSites.length}`;
     if (key !== layoutKey) {
-      layoutKey = key; tiles.clear(); chunks.clear();
+      layoutKey = key; clearTiles(); chunks.clear();
+      worldSites = layoutSites; roads = roadsFor(layoutSites); hazards = snapshot.hazards ?? [];
+      // Pad buckets so tree canopies and shadows that overhang a chunk edge
+      // are also painted by the neighbouring chunk.
       for (const obstacle of snapshot.obstacles ?? []) {
-        for (let x = Math.floor(obstacle.x / 1024); x <= Math.floor((obstacle.x + (obstacle.width ?? 0)) / 1024); x++) {
-          for (let y = Math.floor(obstacle.y / 1024); y <= Math.floor((obstacle.y + (obstacle.height ?? 0)) / 1024); y++) {
+        for (let x = Math.floor((obstacle.x - 40) / 1024); x <= Math.floor((obstacle.x + (obstacle.width ?? 0) + 40) / 1024); x++) {
+          for (let y = Math.floor((obstacle.y - 40) / 1024); y <= Math.floor((obstacle.y + (obstacle.height ?? 0) + 40) / 1024); y++) {
             const k = `${x}:${y}`; const list = chunks.get(k) ?? []; list.push(obstacle); chunks.set(k, list);
           }
         }
       }
     }
   });
-  function tile(x: number, y: number) {
-    const key = `${x}:${y}`; let t = tiles.get(key);
-    if (t) return t;
-    if (tiles.size >= 48) tiles.delete(tiles.keys().next().value!);
-    t = document.createElement('canvas'); t.width = 512; t.height = 512;
-    const c = t.getContext('2d')!; c.scale(.5, .5); c.fillStyle = '#071712'; c.fillRect(0, 0, 1024, 1024);
+  function tile(x: number, y: number, lod: number): HTMLCanvasElement | undefined {
+    const key = `${x}:${y}`, cache = tiles[lod];
+    let t = cache.get(key);
+    if (t) { cache.delete(key); cache.set(key, t); return t; }
+    if (paintBudget <= 0) return undefined;
+    paintBudget--;
+    if (cache.size >= LODS[lod].cap) cache.delete(cache.keys().next().value!);
+    t = document.createElement('canvas'); t.width = LODS[lod].px; t.height = LODS[lod].px;
+    const c = t.getContext('2d')!; c.scale(LODS[lod].px / 1024, LODS[lod].px / 1024);
+    if (paintChunk(c, x * 1024, y * 1024, 1024, worldSites, roads, hazards, chunks.get(key) ?? [])) { cache.set(key, t); return t; }
+    // Flat fallback until the texture atlas decodes.
+    c.fillStyle = '#071712'; c.fillRect(0, 0, 1024, 1024);
     // Deterministic ground texture: two speckle layers plus grass tufts keyed
     // by tile so the map reads as terrain, not flat fill. Cached per tile.
     for (let n = 0; n < 46; n++) {
@@ -67,7 +83,7 @@
       c.fillRect(o.x - x * 1024, o.y - y * 1024, o.width ?? 0, o.height ?? 0);
       c.strokeRect(o.x - x * 1024, o.y - y * 1024, o.width ?? 0, o.height ?? 0);
     }
-    tiles.set(key, t); return t;
+    cache.set(key, t); return t;
   }
   onMount(() => {
     const down = (e: KeyboardEvent) => {
@@ -118,13 +134,18 @@
         c.save(); c.translate(width / 2, height / 2); c.scale(scale, scale); c.translate(-camera.x, -camera.y);
         const left = Math.max(0, Math.floor((camera.x - width / scale / 2) / 1024)), right = Math.min(Math.ceil((s.width ?? 42000) / 1024) - 1, Math.floor((camera.x + width / scale / 2) / 1024));
         const top = Math.max(0, Math.floor((camera.y - height / scale / 2) / 1024)), bottom = Math.min(Math.ceil((s.height ?? 26250) / 1024) - 1, Math.floor((camera.y + height / scale / 2) / 1024));
-        for (let x = left; x <= right; x++) for (let y = top; y <= bottom; y++) c.drawImage(tile(x, y), x * 1024, y * 1024, 1024, 1024);
-        for (const site of sites) {
+        paintBudget = 6;
+        const lod = scale < 0.3 ? 1 : 0;
+        for (let x = left; x <= right; x++) for (let y = top; y <= bottom; y++) {
+          const t = tile(x, y, lod) ?? (lod === 0 ? tiles[1].get(`${x}:${y}`) : undefined);
+          // A 2-unit overlap hides seams from smoothing at chunk edges.
+          if (t) c.drawImage(t, x * 1024, y * 1024, 1026, 1026);
+          else { c.fillStyle = '#0b1a14'; c.fillRect(x * 1024, y * 1024, 1024, 1024); }
+        }
+        for (const site of worldSites) {
           if (!visible(site.x, site.y, 300)) continue;
           const color = siteColor[site.kind] ?? '#9cb8a5';
-          c.globalAlpha = 0.12; c.fillStyle = color;
-          c.beginPath(); c.arc(site.x, site.y, 300, 0, Math.PI * 2); c.fill();
-          c.globalAlpha = 0.5; c.strokeStyle = color; c.lineWidth = 2 / scale;
+          c.globalAlpha = 0.6; c.strokeStyle = color; c.lineWidth = 2 / scale;
           c.beginPath(); c.arc(site.x, site.y, 300, 0, Math.PI * 2); c.stroke();
           c.globalAlpha = 1;
           if (scale >= 0.45) {
@@ -184,7 +205,7 @@
       frame = requestAnimationFrame(draw);
     };
     frame = requestAnimationFrame(draw);
-    return () => { active = false; cancelAnimationFrame(frame); resize.disconnect(); tiles.clear(); window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+    return () => { active = false; cancelAnimationFrame(frame); resize.disconnect(); clearTiles(); window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
   });
   function wheel(e: WheelEvent) {
     e.preventDefault();

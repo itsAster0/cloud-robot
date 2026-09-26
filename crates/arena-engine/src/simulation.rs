@@ -250,6 +250,11 @@ impl Arena {
     }
     pub fn reindex(&mut self) {
         self.world.reindex();
+        self.reindex_robots();
+    }
+    /// Static geometry changes only through edits and restores, which call
+    /// `reindex`; each simulation step only moves robots.
+    fn reindex_robots(&mut self) {
         self.robot_grid = Grid::default();
         for (i, r) in self.robots.iter().enumerate() {
             if r.alive {
@@ -680,7 +685,7 @@ impl Arena {
                 });
             }
         }
-        self.reindex();
+        self.reindex_robots();
         for i in 0..self.robots.len() {
             if !self.robots[i].alive {
                 continue;
@@ -703,7 +708,7 @@ impl Arena {
             }
         }
         self.resolve_overlaps();
-        self.reindex();
+        self.reindex_robots();
         for (i, action) in actions.iter().enumerate() {
             if self.robots[i].alive && !withdrawals.contains(&self.robots[i].robot_id) {
                 self.shoot(i, action, &mut hits);
@@ -793,7 +798,7 @@ impl Arena {
             self.recent_events.drain(..self.recent_events.len() - 16384);
         }
         self.tick += 1;
-        self.reindex();
+        self.reindex_robots();
         self.finish();
         Ok(())
     }
@@ -1066,7 +1071,7 @@ impl Arena {
             .filter(|c| !c.contents.is_empty())
             .map(|c| json!({"itemId":c.item_id,"x":c.x,"y":c.y,"type":"container","active":true}))
             .collect();
-        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"zone":self.zone(),"events":self.events})
+        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"events":self.events})
     }
     pub fn observation(&self, i: usize) -> Value {
         self.observation_with_geometry(i, true)

@@ -335,6 +335,10 @@ pub struct Site {
     pub kind: String,
     pub x: f64,
     pub y: f64,
+    /// District theme around the site: urban, industrial, forest, or desert.
+    /// Selects ground textures and structure styles; rules ignore it.
+    #[serde(default)]
+    pub biome: String,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

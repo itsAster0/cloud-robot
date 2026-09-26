@@ -181,6 +181,7 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 		Tick       uint32 `json:"tick"`
 		Status     string `json:"status"`
 		WinnerTeam string `json:"winnerTeam"`
+		Revision   int    `json:"revision"`
 		Robots     []struct {
 			RobotID     string  `json:"robotId"`
 			Name        string  `json:"name"`
@@ -204,6 +205,7 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 	pendingEdits := []json.RawMessage{}
 	frames := []json.RawMessage{}
 	framePage := 0
+	frameRevision := -1
 	// Full-world live data stays private for a short spectator delay. Pausing a
 	// sandbox also pauses its spectator delay.
 	for {
@@ -214,7 +216,13 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 			return s.failMatch(ctx, m, err)
 		}
 		if state.Tick%10 == 0 {
-			frames = append(frames, append(json.RawMessage(nil), result.Snapshot...))
+			frame := append(json.RawMessage(nil), result.Snapshot...)
+			// Live edits change the revision mid-page; keep that frame's layout.
+			if len(frames) > 0 && state.Revision == frameRevision {
+				frame = withoutStaticLayout(frame)
+			}
+			frameRevision = state.Revision
+			frames = append(frames, frame)
 		}
 		if len(frames) >= 10 {
 			packed, packErr := packFrames(frames)

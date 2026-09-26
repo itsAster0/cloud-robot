@@ -1,10 +1,12 @@
 use crate::model::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashMap;
 
+/// Uniform 256-unit spatial hash. Queries return sorted ids so callers stay
+/// deterministic even though the cell map itself is unordered.
 #[derive(Clone, Default)]
 pub struct Grid {
-    cells: BTreeMap<(i32, i32), Vec<usize>>,
+    cells: HashMap<(i32, i32), Vec<usize>>,
 }
 impl Grid {
     pub fn insert(&mut self, id: usize, x: f64, y: f64, w: f64, h: f64) {
@@ -15,15 +17,17 @@ impl Grid {
         }
     }
     pub fn query(&self, x: f64, y: f64, w: f64, h: f64) -> Vec<usize> {
-        let mut ids = BTreeSet::new();
+        let mut ids = vec![];
         for cx in (x / 256.).floor() as i32..=((x + w) / 256.).floor() as i32 {
             for cy in (y / 256.).floor() as i32..=((y + h) / 256.).floor() as i32 {
                 if let Some(c) = self.cells.get(&(cx, cy)) {
-                    ids.extend(c);
+                    ids.extend_from_slice(c);
                 }
             }
         }
-        ids.into_iter().collect()
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -99,6 +103,7 @@ impl World {
                 kind: kinds[i % 6].into(),
                 x,
                 y,
+                biome: biome_for(c.seed, i % cols, i / cols, count).into(),
             });
             // Two slotted rings: 4 inner slots at 90 deg, 8 outer slots at
             // 45 deg offset by half a step. Fixed slots with capped segment
@@ -268,6 +273,10 @@ impl World {
                 damage_per_second: if slow { 0. } else { 4. },
             });
         }
+        if cover_per_site > 0 {
+            world.reindex();
+            build_districts(&mut world, c, cols, cover_per_site);
+        }
         let r0 = c.width.hypot(c.height) / 2.;
         for (i, (start, end, factor)) in [
             (180., 360., 0.62),
@@ -323,6 +332,327 @@ impl World {
     }
     pub fn los(&self, x: f64, y: f64, nx: f64, ny: f64) -> bool {
         self.wall_hit(x, y, nx, ny, 0.).is_none()
+    }
+}
+pub const BIOMES: [&str; 4] = ["urban", "industrial", "forest", "desert"];
+/// Small maps give each site its own theme. Large maps share one theme per
+/// 2x2 block of sites so districts read as regions, not a patchwork.
+fn biome_for(seed: u64, col: usize, row: usize, count: usize) -> &'static str {
+    if count <= 16 {
+        return BIOMES[(col + row * 2 + (seed % 4) as usize) % 4];
+    }
+    // Diagonal pattern keeps neighbouring blocks distinct and every theme
+    // present; a seeded nudge on some blocks breaks the regularity.
+    let (bx, by) = (col / 2, row / 2);
+    let nudge = usize::from(mix(seed ^ mix((bx * 31 + by) as u64)).is_multiple_of(5));
+    BIOMES[(bx + by * 2 + nudge + (mix(seed) % 4) as usize) % 4]
+}
+/// SplitMix64 finalizer: decorrelates nearby inputs.
+fn mix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+type Piece = (f64, f64, f64, f64, &'static str);
+/// Minimum gap between a new structure and earlier geometry. Wider than a
+/// heavy chassis plus the 64-unit navigation step, so every gap is walkable.
+const DISTRICT_CLEARANCE: f64 = 90.;
+/// World-wide district piece budget, split evenly across sites.
+const DISTRICT_PIECES: usize = 8000;
+/// Themed structures fill each site's cell outside its core rings and its
+/// street cross, so the world reads as places instead of empty ground between
+/// anchors. Each structure is placed whole or not at all, clear of earlier
+/// geometry and hazards. A per-site budget bounds total geometry because
+/// obstacles travel in every snapshot. A separate RNG stream keeps the core
+/// sites, scatter, and hazards identical to earlier layouts for a seed.
+fn build_districts(world: &mut World, c: &Config, cols: usize, cover_per_site: usize) {
+    let cw = c.width / cols as f64;
+    let ch = c.height / cols as f64;
+    let lot = (cw.min(ch) / 6.).clamp(240., 560.);
+    // Structures keep at least 80% scale on small maps; clearance checks then
+    // thin them out instead of shrinking walls and crates into slivers.
+    let k = (lot / 560.).max(0.8);
+    let core = 330. + lot * 0.35;
+    let street = 110. + lot * 0.45;
+    let budget = (DISTRICT_PIECES / world.sites.len()).clamp(24, 200) * cover_per_site / 8;
+    let mut rng = Rng((c.seed ^ 0x9E37_79B9_7F4A_7C15) | 1);
+    for i in 0..world.sites.len() {
+        let (sx, sy) = (world.sites[i].x, world.sites[i].y);
+        let biome = world.sites[i].biome.clone();
+        let nx = (cw / lot).floor().max(1.) as usize;
+        let ny = (ch / lot).floor().max(1.) as usize;
+        let (x0, y0) = (
+            sx - nx as f64 * lot / 2. + lot / 2.,
+            sy - ny as f64 * lot / 2. + lot / 2.,
+        );
+        let mut lots: Vec<(f64, f64)> = (0..nx * ny)
+            .map(|n| (x0 + (n % nx) as f64 * lot, y0 + (n / nx) as f64 * lot))
+            .collect();
+        // Seeded visiting order spreads the budget across the whole cell.
+        for n in (1..lots.len()).rev() {
+            let j = (rng.next_u64() % (n as u64 + 1)) as usize;
+            lots.swap(n, j);
+        }
+        let mut used = 0;
+        for (n, (lx, ly)) in lots.into_iter().enumerate() {
+            let open_field = rng.next_u64() % 10 < 3;
+            let jx = ((rng.next_u64() % 81) as f64 - 40.) * k;
+            let jy = ((rng.next_u64() % 81) as f64 - 40.) * k;
+            if open_field
+                || distance(lx, ly, sx, sy) < core
+                || (lx - sx).abs() < street
+                || (ly - sy).abs() < street
+            {
+                continue;
+            }
+            let pieces = structure(&biome, lx + jx, ly + jy, k, &mut rng);
+            if used + pieces.len() > budget {
+                continue;
+            }
+            let pieces: Vec<Piece> = pieces
+                .into_iter()
+                .map(|(x, y, w, h, m)| (x.round(), y.round(), w.round(), h.round(), m))
+                .filter(|p| p.2 >= 20. && p.3 >= 20.)
+                .collect();
+            if pieces.is_empty() {
+                continue;
+            }
+            let (bx0, by0, bx1, by1) = pieces.iter().fold(
+                (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
+                |(a, b, cc, d), p| (a.min(p.0), b.min(p.1), cc.max(p.0 + p.2), d.max(p.1 + p.3)),
+            );
+            if bx0 < 40. || by0 < 40. || bx1 > c.width - 40. || by1 > c.height - 40. {
+                continue;
+            }
+            let g = DISTRICT_CLEARANCE;
+            let blocked = world
+                .grid
+                .query(bx0 - g, by0 - g, bx1 - bx0 + 2. * g, by1 - by0 + 2. * g)
+                .into_iter()
+                .any(|id| overlaps(&world.obstacles[id], bx0 - g, by0 - g, bx1 + g, by1 + g))
+                || world.hazards.iter().any(|h| {
+                    h.x < bx1 + g
+                        && h.x + h.width > bx0 - g
+                        && h.y < by1 + g
+                        && h.y + h.height > by0 - g
+                });
+            if blocked {
+                continue;
+            }
+            for (j, (x, y, w, h, m)) in pieces.into_iter().enumerate() {
+                let id = world.obstacles.len();
+                world.obstacles.push(Obstacle {
+                    id: format!("district-{i}-{n}-{j}"),
+                    shape: "aabb".into(),
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    material: m.into(),
+                });
+                world.grid.insert(id, x, y, w, h);
+                used += 1;
+            }
+        }
+    }
+}
+fn overlaps(o: &Obstacle, x0: f64, y0: f64, x1: f64, y1: f64) -> bool {
+    o.x < x1 && o.x + o.width > x0 && o.y < y1 && o.y + o.height > y0
+}
+/// Walled room centered on (cx, cy) with 120-unit doorways on the chosen
+/// sides (top, right, bottom, left).
+fn room(
+    cx: f64,
+    cy: f64,
+    w: f64,
+    h: f64,
+    doors: [bool; 4],
+    mat: &'static str,
+    k: f64,
+) -> Vec<Piece> {
+    let t = 24. * k.max(0.6);
+    let door = 120.;
+    let (x0, y0) = (cx - w / 2., cy - h / 2.);
+    let mut out = vec![];
+    for (side, open) in doors.iter().enumerate() {
+        let horizontal = side % 2 == 0;
+        let (sx, sy, len) = match side {
+            0 => (x0, y0, w),
+            1 => (x0 + w - t, y0 + t, h - 2. * t),
+            2 => (x0, y0 + h - t, w),
+            _ => (x0, y0 + t, h - 2. * t),
+        };
+        let spans = if *open {
+            let half = (len - door) / 2.;
+            vec![(0., half), (half + door, half)]
+        } else {
+            vec![(0., len)]
+        };
+        for (offset, span) in spans {
+            if span < t {
+                continue;
+            }
+            out.push(if horizontal {
+                (sx + offset, sy, span, t, mat)
+            } else {
+                (sx, sy + offset, t, span, mat)
+            });
+        }
+    }
+    out
+}
+fn structure(biome: &str, cx: f64, cy: f64, k: f64, rng: &mut Rng) -> Vec<Piece> {
+    let roll = rng.next_u64() % 100;
+    let r = |rng: &mut Rng, lo: f64, span: u64| (lo + (rng.next_u64() % span) as f64) * k;
+    let flip = rng.next_u64().is_multiple_of(2);
+    match biome {
+        "urban" if roll < 45 => {
+            let (w, h) = (r(rng, 300., 120), r(rng, 240., 100));
+            let doors = if flip {
+                [true, false, true, false]
+            } else {
+                [false, true, false, true]
+            };
+            room(cx, cy, w, h, doors, "brick", k)
+        }
+        "urban" if roll < 75 => {
+            // Ruined corner: an L of walls with a loose crate beside it.
+            let (a, b) = (r(rng, 240., 80), r(rng, 180., 60));
+            let t = 24. * k.max(0.6);
+            vec![
+                (cx - a / 2., cy - b / 2., a, t, "brick"),
+                (cx - a / 2., cy - b / 2. + t, t, b - t, "brick"),
+                (
+                    cx + a / 2. - 60. * k,
+                    cy + b / 2. - 60. * k,
+                    60. * k,
+                    60. * k,
+                    "crate",
+                ),
+            ]
+        }
+        "urban" => {
+            let s = 64. * k;
+            let step = 160. * k;
+            (0..3)
+                .map(|n| {
+                    (
+                        cx - step + n as f64 * step - s / 2.,
+                        cy - s / 2. + if n == 1 { 60. * k } else { 0. },
+                        s,
+                        s,
+                        "crate",
+                    )
+                })
+                .collect()
+        }
+        "industrial" if roll < 50 => {
+            let (len, t, gap) = (r(rng, 240., 60), 76. * k, 110. * k.max(0.85));
+            (0..(2 + rng.next_u64() % 2))
+                .map(|n| {
+                    let off = n as f64 * (t + gap) - (t + gap);
+                    if flip {
+                        (cx - len / 2., cy + off - t / 2., len, t, "container")
+                    } else {
+                        (cx + off - t / 2., cy - len / 2., t, len, "container")
+                    }
+                })
+                .collect()
+        }
+        "industrial" if roll < 80 => {
+            let (w, h) = (r(rng, 360., 80), r(rng, 280., 60));
+            room(cx, cy, w, h, [true, true, !flip, flip], "metal", k)
+        }
+        "industrial" => {
+            let s = 44. * k.max(0.8);
+            [(-1., -1.), (1., -1.), (0., 1.), (1.6, 0.8)]
+                .iter()
+                .take(3 + (rng.next_u64() % 2) as usize)
+                .map(|(dx, dy)| {
+                    (
+                        cx + dx * 70. * k - s / 2.,
+                        cy + dy * 70. * k - s / 2.,
+                        s,
+                        s,
+                        "barrel",
+                    )
+                })
+                .collect()
+        }
+        "forest" if roll < 75 => {
+            // Grove on a 3x3 lattice; lattice spacing keeps 90+ unit lanes.
+            let step = 190. * k.max(0.8);
+            let mut out = vec![];
+            for n in 0..9 {
+                if rng.next_u64() % 9 < 4 {
+                    continue;
+                }
+                let s = r(rng, 70., 30);
+                let (gx, gy) = ((n % 3) as f64 - 1., (n / 3) as f64 - 1.);
+                out.push((
+                    cx + gx * step - s / 2.,
+                    cy + gy * step - s / 2.,
+                    s,
+                    s,
+                    "tree",
+                ));
+            }
+            out
+        }
+        "forest" => {
+            let len = r(rng, 220., 80);
+            let t = 36. * k.max(0.7);
+            vec![
+                if flip {
+                    (cx - len / 2., cy - t / 2., len, t, "hedge")
+                } else {
+                    (cx - t / 2., cy - len / 2., t, len, "hedge")
+                },
+                (
+                    cx + if flip { 0. } else { 110. * k } - 40. * k,
+                    cy + if flip { 110. * k } else { 0. } - 40. * k,
+                    80. * k,
+                    80. * k,
+                    "tree",
+                ),
+            ]
+        }
+        "desert" if roll < 50 => {
+            let mut out = vec![];
+            for (dx, dy) in [(-1., -0.4), (0.9, -0.8), (0.2, 1.)] {
+                if out.len() == 2 && rng.next_u64().is_multiple_of(2) {
+                    break;
+                }
+                let s = r(rng, 80., 50);
+                out.push((
+                    cx + dx * 150. * k - s / 2.,
+                    cy + dy * 150. * k - s / 2.,
+                    s,
+                    s * 0.8,
+                    "rock",
+                ));
+            }
+            out
+        }
+        _ => {
+            // Sandbag outpost: a U of bag lines with open corners.
+            let (w, h, t) = (240. * k, 180. * k, 30. * k.max(0.7));
+            let gap = 100.;
+            let side = h - gap;
+            let mut out = vec![(cx - w / 2. + gap / 2., cy - h / 2., w - gap, t, "sandbag")];
+            if side > t {
+                out.push((cx - w / 2., cy - h / 2. + gap / 2. + t, t, side, "sandbag"));
+                out.push((
+                    cx + w / 2. - t,
+                    cy - h / 2. + gap / 2. + t,
+                    t,
+                    side,
+                    "sandbag",
+                ));
+            }
+            out
+        }
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
