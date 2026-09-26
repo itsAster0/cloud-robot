@@ -9,8 +9,8 @@ import (
 
 func TestListReturnsCuratedTemplates(t *testing.T) {
 	templates := List()
-	if len(templates) != 6 {
-		t.Fatalf("expected 6 templates, got %d: %+v", len(templates), templates)
+	if len(templates) != 7 {
+		t.Fatalf("expected 7 templates, got %d: %+v", len(templates), templates)
 	}
 	for _, template := range templates {
 		if template.Description == "" {
@@ -19,13 +19,11 @@ func TestListReturnsCuratedTemplates(t *testing.T) {
 		if !strings.Contains(template.Source, "arena.run(") {
 			t.Fatalf("template %q does not use the SDK runner", template.Name)
 		}
-		// Every template must be item-aware, zone-aware, and size-capped so a
-		// deployed script still fits the 16 KiB snapshot limit.
-		if !strings.Contains(template.Source, "obs.items") {
-			t.Fatalf("template %q ignores items", template.Name)
-		}
-		if !strings.Contains(template.Source, "obs.zone") {
-			t.Fatalf("template %q ignores the zone", template.Name)
+		// Every Rust-only template must target the v4 protocol and use the
+		// bounded navigation helpers so deployed scripts fit large maps and
+		// the 16 KiB snapshot limit.
+		if !strings.Contains(template.Source, "obs.version == 4") {
+			t.Fatalf("template %q does not target v4 arenas", template.Name)
 		}
 		if len(template.Source) > 16*1024 {
 			t.Fatalf("template %q exceeds the 16 KiB snapshot cap", template.Name)
@@ -35,7 +33,12 @@ func TestListReturnsCuratedTemplates(t *testing.T) {
 
 func TestExamplesMatchDeployableTemplates(t *testing.T) {
 	for _, template := range List() {
-		examplePath := filepath.Join("..", "..", "examples", "lua-"+template.Name, "main.lua")
+		var examplePath string
+		if template.Name == "v4" {
+			examplePath = filepath.Join("..", "..", "examples", "lua-v4", "main.lua")
+		} else {
+			examplePath = filepath.Join("..", "..", "examples", "lua-v4", template.Name+".lua")
+		}
 		example, err := os.ReadFile(examplePath)
 		if err != nil {
 			t.Fatalf("read %s: %v", examplePath, err)
@@ -47,12 +50,12 @@ func TestExamplesMatchDeployableTemplates(t *testing.T) {
 }
 
 func TestGetTemplateAndUnknownRejection(t *testing.T) {
-	source, err := Get("aggressive")
+	source, err := Get("assault")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(source, "arena.approach") {
-		t.Fatalf("aggressive template lost its behavior: %q", source)
+	if !strings.Contains(source, "drive_to") {
+		t.Fatalf("assault template lost its behavior: %q", source)
 	}
 	if _, err := Get("does-not-exist"); err == nil {
 		t.Fatal("unknown template accepted")

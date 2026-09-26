@@ -118,9 +118,24 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]string{"source": output})
 		return
-	case r.Method == http.MethodPut && len(parts) == 2 && parts[1] == "main.lua":
+	case r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "validate-main":
 		var input struct {
 			Source string `json:"source"`
+		}
+		if err = decode(r.Body, &input); err != nil || len(input.Source) > 16*1024 {
+			writeError(w, 400, "invalid source")
+			return
+		}
+		if err = s.execInput(r.Context(), boxID, input.Source, "validate-main"); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"valid": true})
+		return
+	case r.Method == http.MethodPut && len(parts) == 2 && parts[1] == "main.lua":
+		var input struct {
+			Source   string `json:"source"`
+			Revision string `json:"revision"`
 		}
 		if err = decode(r.Body, &input); err != nil {
 			writeError(w, 400, err.Error())
@@ -131,7 +146,14 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "main.lua source must be 1 byte to 16 KiB")
 			return
 		}
-		if err = s.execInput(r.Context(), boxID, source, "write-main"); err != nil {
+		action := "write-main"
+		payload := source
+		if input.Revision != "" {
+			action = "write-main-if-match"
+			raw, _ := json.Marshal(map[string]string{"source": input.Source, "revision": input.Revision})
+			payload = string(raw)
+		}
+		if err = s.execInput(r.Context(), boxID, payload, action); err != nil {
 			writeError(w, 502, err.Error())
 			return
 		}

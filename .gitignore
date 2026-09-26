@@ -8,3 +8,5 @@ coverage/
 data/
 bin/
 *.log
+
+crates/arena-engine/target/

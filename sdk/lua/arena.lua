@@ -2,7 +2,7 @@ local websocket = require "http.websocket"
 local cqueues = require "cqueues"
 local json = require "dkjson"
 
-local arena = { VERSION = "0.3.2" }
+local arena = { VERSION = "0.4.0" }
 local pickup_config = { auto_pickup = true, pickup_types = {} }
 local latest_observation
 local zone_history
@@ -135,6 +135,15 @@ end
 
 function arena.action(options)
   options = options or {}
+  if latest_observation and latest_observation.version == 4 then
+    local action = arena.control(options)
+    if options.move ~= nil then action.throttle = clamp(options.move / 8, -1, 1) end
+    if options.turn ~= nil and options.throttle == nil then action.turn = clamp(options.turn / 18, -1, 1) end
+    if options.target_x and options.target_y then
+      action.aim = arena.bearing(latest_observation.self, { x = options.target_x, y = options.target_y })
+    end
+    return action
+  end
   local action = {
     move = clamp(options.move or 0, -4, 8),
     turn = clamp(options.turn or 0, -18, 18),
@@ -502,10 +511,179 @@ function arena.random_safe_point(observation, x, y, radius, tries)
 end
 
 local function connect(config)
-  local ws = websocket.new_from_uri(assert(config.url, "arena URL is required"), { "robot-arena.v1" })
+  local ws = websocket.new_from_uri(assert(config.url, "arena URL is required"), { "robot-arena.v4", "robot-arena.v1" })
   ws.request.headers:upsert("authorization", "Bearer " .. assert(config.token, "robot token is required"), true)
+  ws.request.headers:upsert("x-robot-sdk-version", arena.VERSION)
   assert(ws:connect(10))
   return ws
+end
+
+-- Protocol v4 uses normalized controls and zero-based inventory/weapon slots.
+function arena.control(options)
+  options = options or {}
+  local out = {}
+  for _, key in ipairs({ "throttle", "brake", "turn", "aim", "fire", "cruise", "dash", "scan", "weapon", "utility", "consume", "pickup", "dropSlot", "equip", "dropEquipment", "pickupPriorities", "transit", "message", "label" }) do
+    if options[key] ~= nil then out[key] = options[key] end
+  end
+  if out.throttle then out.throttle = clamp(out.throttle, -1, 1) end
+  if out.turn then out.turn = clamp(out.turn, -1, 1) end
+  return out
+end
+
+function arena.drive_to(obs, point, options)
+  options = options or {}
+  local desired = arena.bearing(obs.self, point)
+  local turn = (desired - obs.self.heading + 180) % 360 - 180
+  return arena.control({ throttle = math.abs(turn) > 70 and .25 or 1,
+    turn = clamp(turn / 18, -1, 1), cruise = options.cruise == true,
+    aim = options.aim, fire = options.fire == true, label = options.label or "NAVIGATE" })
+end
+
+function arena.weapon_ready(obs, slot)
+  local w = (obs.self.weapons or {})[(slot or obs.self.activeWeapon or 0) + 1]
+  return w and not w.overheated and w.readyAt <= obs.tick
+end
+
+function arena.find_consumable(obs, kind)
+  for i, item in ipairs(obs.self.inventory or {}) do if item.kind == kind and item.count > 0 then return i - 1 end end
+end
+
+function arena.scan_contacts(obs)
+  for _, event in ipairs(obs.events or {}) do
+    if event.type == "scan_result" then return json.decode(event.message) or {} end
+  end
+  return {}
+end
+
+function arena.stuck_tracker()
+  return { x = nil, y = nil, tick = nil, stalled = 0 }
+end
+function arena.is_stuck(obs, memory)
+  if memory.tick == obs.tick then return memory.stalled >= 10 end
+  if memory.x and arena.distance(obs.self, memory) < 1 then memory.stalled = memory.stalled + 1 else memory.stalled = 0 end
+  memory.x, memory.y, memory.tick = obs.self.x, obs.self.y, obs.tick
+  return memory.stalled >= 10
+end
+
+-- Search progresses across decide calls. A caller chooses a work budget,
+-- bounded to 256 expansions per call and 4096 total explored cells.
+function arena.begin_path(obs, goal)
+  local obstacles = {}
+  for _, o in ipairs(obs.obstacles or {}) do
+    obstacles[#obstacles + 1] = { shape = o.shape, x = o.x - 15, y = o.y - 15,
+      width = (o.width or 0) + 30, height = (o.height or 0) + 30, radius = (o.radius or 0) + 15 }
+  end
+  return { start = { x = obs.self.x, y = obs.self.y }, goal = { x = goal.x, y = goal.y },
+    open = { { x = obs.self.x, y = obs.self.y, g = 0 } }, seen = {}, expanded = 0,
+    revision = obs.revision, obstacles = obstacles, width = obs.arenaWidth, height = obs.arenaHeight, status = "pending" }
+end
+function arena.advance_path(search, budget)
+  if search.status ~= "pending" then return search end
+  for _ = 1, clamp(budget or 64, 1, 256) do
+    if #search.open == 0 or search.expanded >= 4096 then search.status = "unreachable"; return search end
+    local best = 1
+    for i = 2, #search.open do
+      if search.open[i].g + arena.distance(search.open[i], search.goal) < search.open[best].g + arena.distance(search.open[best], search.goal) then best = i end
+    end
+    local node = table.remove(search.open, best)
+    search.expanded = search.expanded + 1
+    if arena.line_of_sight(node.x, node.y, search.goal.x, search.goal.y, search.obstacles) then
+      local path = { search.goal }
+      while node do table.insert(path, 1, { x = node.x, y = node.y }); node = node.parent end
+      search.status, search.path = "ready", path; return search
+    end
+    for _, d in ipairs({ {64,0}, {0,64}, {-64,0}, {0,-64} }) do
+      local x, y = node.x + d[1], node.y + d[2]
+      local key = tostring(x) .. ":" .. tostring(y)
+      if not search.seen[key] and x >= 15 and y >= 15 and x <= search.width - 15 and y <= search.height - 15 and arena.line_of_sight(node.x, node.y, x, y, search.obstacles) then
+        search.seen[key] = true; search.open[#search.open + 1] = { x = x, y = y, g = node.g + 64, parent = node }
+      end
+    end
+  end
+  return search
+end
+function arena.follow_path(obs, search)
+  if search.revision ~= obs.revision then return arena.control({ brake = true, label = "PATH_REVISION_CHANGED" }) end
+  if search.status ~= "ready" then return arena.control({ brake = true, label = "PATH_" .. string.upper(search.status) }) end
+  search.waypoint = search.waypoint or 2
+  while search.waypoint <= #search.path and arena.distance(obs.self, search.path[search.waypoint]) < 30 do search.waypoint = search.waypoint + 1 end
+  if search.waypoint > #search.path then return arena.control({ brake = true, label = "ARRIVED" }) end
+  return arena.drive_to(obs, search.path[search.waypoint])
+end
+function arena.transit_route(obs, goal)
+  assert(goal and goal.x and goal.y, "transit_route requires a goal point; pass a site or safe_zone_goal(obs)")
+  local best, cost = nil, arena.distance(obs.self, goal)
+  for _, link in ipairs(obs.transit or {}) do
+    local exit = { x = link.targetX, y = link.targetY }
+    local usable = not obs.zone or (arena.distance(link, obs.zone) <= obs.zone.radius and arena.distance(exit, obs.zone) <= obs.zone.radius)
+    local route_cost = arena.distance(obs.self, link) + arena.distance(exit, goal) + 160
+    if usable and route_cost < cost then best, cost = link, route_cost end
+  end
+  return { entry = best, goal = goal, estimatedDistance = cost }
+end
+function arena.safe_zone_goal(obs)
+  local z = obs.zone
+  if not z then return { x = obs.arenaWidth / 2, y = obs.arenaHeight / 2 } end
+  return { x = z.x, y = z.y }
+end
+
+-- Map-loot search. v4 observations expose loot as `items` entries shaped like
+-- containers ({ itemId, x, y, contents = { { kind, count } } }) with no `type`
+-- field, so nearest_item cannot filter by kind. find_consumable is different:
+-- it reads your inventory and returns a consume slot, not a map position.
+function arena.find_loot(obs, kind)
+  local best, best_distance
+  for _, item in ipairs(obs.items or {}) do
+    if item.active ~= false then
+      local match = kind == nil
+      if not match then
+        for _, stack in ipairs(item.contents or {}) do
+          if stack.kind == kind then match = true; break end
+        end
+      end
+      if match then
+        local distance = arena.distance(obs.self, item)
+        if best_distance == nil or distance < best_distance then
+          best, best_distance = item, distance
+        end
+      end
+    end
+  end
+  return best, best_distance
+end
+
+-- Nearest living teammate. Squad observations follow a survivor when you are
+-- eliminated, but returned actions still drive your own robot.
+function arena.nearest_ally(obs)
+  local best, best_distance
+  for _, robot in ipairs(obs.robots or {}) do
+    if robot.alive and robot.team == obs.self.team and robot.robotId ~= obs.controlledRobotId then
+      local distance = arena.distance(obs.self, robot)
+      if best_distance == nil or distance < best_distance then
+        best, best_distance = robot, distance
+      end
+    end
+  end
+  return best, best_distance
+end
+
+-- Aim where the enemy is going, not where it is. Observations carry no robot
+-- velocity, so drift is estimated from heading at half cruise speed.
+function arena.lead_for(obs, enemy, projectile_speed)
+  local radians = (enemy.heading or 0) * math.pi / 180
+  return arena.aim_predict(obs.self, enemy, projectile_speed or 24,
+    math.cos(radians) * 2.8, math.sin(radians) * 2.8)
+end
+
+-- Orbit an enemy at roughly its current distance while keeping the turret on
+-- it. direction is +1 or -1; flip it on a timer so orbits stay unpredictable.
+function arena.strafe_around(obs, enemy, direction)
+  direction = direction or 1
+  local aim = arena.bearing(obs.self, enemy)
+  local side = aim + 90 * direction
+  local radians = side * math.pi / 180
+  local point = { x = enemy.x + math.cos(radians) * 120, y = enemy.y + math.sin(radians) * 120 }
+  return arena.drive_to(obs, point, { aim = aim, fire = arena.weapon_ready(obs), label = "STRAFE" })
 end
 
 function arena.run(config)
@@ -515,6 +693,7 @@ function arena.run(config)
     local ok, failure = pcall(function()
       local ws = connect(config)
       retry_delay = 1
+      local sequence = 0
       while true do
         local payload = assert(ws:receive(35))
         local observation, _, decode_error = json.decode(payload)
@@ -527,6 +706,12 @@ function arena.run(config)
           if observation.hazards ~= nil then cached_layout.hazards = observation.hazards end
           observation.obstacles = cached_layout.obstacles
           observation.hazards = cached_layout.hazards
+          if observation.version == 4 then
+            for _, key in ipairs({"sites", "transit"}) do
+              if observation[key] ~= nil then cached_layout[key] = observation[key] end
+              observation[key] = cached_layout[key] or {}
+            end
+          end
           latest_observation = observation
           local started = os.clock()
           -- A player script bug must not masquerade as a lost WebSocket or
@@ -539,9 +724,19 @@ function arena.run(config)
           else
             action = arena.action({ logs = { "script error: " .. tostring(action_or_error) } })
           end
-          action.type = "action"
-          action.requestId = observation.requestId
-          action.computeMs = (os.clock() - started) * 1000
+          if observation.version == 4 then
+            sequence = sequence + 1
+            if not decided then
+              io.stderr:write("script error: " .. tostring(action_or_error) .. "\n")
+              action = { label = "SCRIPT_ERROR", brake = true }
+            end
+            action = { type = "action", version = 4, sdkVersion = arena.VERSION,
+              sequence = sequence, observedTick = observation.tick, geometryRevision = observation.revision, action = action }
+          else
+            action.type = "action"
+            action.requestId = observation.requestId
+            action.computeMs = (os.clock() - started) * 1000
+          end
           assert(ws:send(json.encode(action), "text", 2))
         end
       end

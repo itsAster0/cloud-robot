@@ -21,13 +21,15 @@ type Template struct {
 
 // Descriptions double as the allow-list: a template without an entry here is
 // not deployable even if a .lua file somehow lands in the directory.
+// Rust-only v4 strategies; legacy Go-engine scripts were removed.
 var descriptions = map[string]string{
-	"aggressive": "Hunts the nearest enemy, leads shots, detours for heals, and strafes unpredictably up close.",
-	"demolisher": "Plants mines on approaching enemies, hunts the grenade launcher, scans for loot, and dashes clear of incoming fire.",
-	"evasive":    "Kites at long range with random strafe flips, grabs heals and shields, and flees when critical.",
-	"patroller":  "Walks a randomized corner loop, detours for nearby items, and engages on sight.",
-	"sentinel":   "Holds map center, sweeps radar scans and cloaks to control the field, dodges fire, and relays enemy positions to teammates.",
-	"sniper":     "Holds mid range, fires only with line of sight, sidesteps randomly, and races for railguns.",
+	"v4":       "Balanced SDK 0.4 strategy for Rust arenas: combat, recovery, loot, and bounded navigation.",
+	"scout":    "Fast recon: cruises transit sites, pulses scans, relays positions, breaks contact early.",
+	"assault":  "Balanced brawler: engages nearest, dashes out at low HP, channels heals, scavenges loot.",
+	"sniper":   "Railgun control: holds 600-900 range, brakes to aim, cloaks to re-range, seeks optics.",
+	"support":  "Squad medic: trails allies, drops repair fields, screens with smoke, relays state.",
+	"sentinel": "Area denial: holds the safe zone, prioritizes shields, lays mines, sweeps scans.",
+	"scavenger": "Loot runner: prioritizes upgrades, equips weapons explicitly, rides transit, fights close only.",
 }
 
 func List() []Template {

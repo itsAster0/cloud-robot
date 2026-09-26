@@ -24,6 +24,7 @@ import (
 	"github.com/kryxen/cloud-robot/internal/boxes"
 	"github.com/kryxen/cloud-robot/internal/cloud"
 	"github.com/kryxen/cloud-robot/internal/engine"
+	"github.com/kryxen/cloud-robot/internal/enginev4"
 	"github.com/kryxen/cloud-robot/internal/model"
 	"github.com/kryxen/cloud-robot/internal/scripts"
 )
@@ -43,6 +44,8 @@ type Store interface {
 	GetReplay(ctx context.Context, key string) ([]model.MatchEvent, error)
 	PutBox(ctx context.Context, userID string, box model.BoxRecord) error
 	GetBox(ctx context.Context, userID string) (model.BoxRecord, error)
+	PutReplayObject(ctx context.Context, key, source string) error
+	GetReplayObject(ctx context.Context, key string) (string, error)
 	PutScript(ctx context.Context, key, source string) error
 	GetScript(ctx context.Context, key string) (string, error)
 	ListScriptVersions(ctx context.Context, boxID string, limit int) ([]model.ScriptVersion, error)
@@ -60,6 +63,7 @@ type IdentityVerifier interface {
 }
 
 type Server struct {
+	v4     map[string]*v4Control
 	store  Store
 	hub    *Hub
 	agents *AgentManager
@@ -75,11 +79,24 @@ type Server struct {
 }
 
 func NewServer(store Store, provisioner boxes.Provisioner) *Server {
-	return &Server{store: store, boxes: provisioner, hub: NewHub(), agents: NewAgentManager(), auth: robotauth.NewVerifier(), queue: newMatchQueue(), arenas: map[string]*engine.Arena{}, rates: map[string]time.Time{}}
+	return &Server{v4: map[string]*v4Control{}, store: store, boxes: provisioner, hub: NewHub(), agents: NewAgentManager(), auth: robotauth.NewVerifier(), queue: newMatchQueue(), arenas: map[string]*engine.Arena{}, rates: map[string]time.Time{}}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /api/v4/me/script", s.requireUser(http.HandlerFunc(s.v4Script)))
+	mux.Handle("PUT /api/v4/me/script", s.requireUser(http.HandlerFunc(s.v4Script)))
+	mux.Handle("POST /api/v4/me/script/validate", s.requireUser(http.HandlerFunc(s.v4ValidateScript)))
+	mux.Handle("GET /api/v4/me/loadout", s.requireUser(http.HandlerFunc(s.v4Loadout)))
+	mux.Handle("PUT /api/v4/me/loadout", s.requireUser(http.HandlerFunc(s.v4Loadout)))
+	mux.Handle("POST /api/v4/matches", s.requireUser(s.rateLimit("create-match", http.HandlerFunc(s.createV4Match))))
+	mux.Handle("POST /api/v4/maps/preview", s.requireUser(s.rateLimit("preview", http.HandlerFunc(s.previewV4Map))))
+	mux.Handle("POST /api/v4/matches/{matchID}/control", s.requireUser(http.HandlerFunc(s.controlV4)))
+	mux.HandleFunc("GET /api/v4/matches/{matchID}/final", s.v4Final)
+	mux.HandleFunc("GET /api/v4/matches/{matchID}/replay", s.v4ReplayPage)
+	mux.Handle("GET /api/v4/matches/{matchID}/trace", s.requireUser(s.rateLimit("trace", http.HandlerFunc(s.v4Trace))))
+	mux.Handle("GET /api/v4/matches/{matchID}/view", s.requireUser(http.HandlerFunc(s.v4View)))
+	mux.Handle("POST /api/v4/matches/{matchID}/edit", s.requireUser(s.requireAdmin(http.HandlerFunc(s.v4Edit))))
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/cloud/status", s.cloudStatus)
@@ -291,14 +308,16 @@ func (s *Server) getMatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "match not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, match)
+	writeJSON(w, http.StatusOK, publicMatch(match))
 }
 
 type robotRequest struct {
-	DisplayName  string `json:"displayName"`
-	Team         string `json:"team"`
-	StartCommand string `json:"startCommand"`
-	Runtime      string `json:"runtime"`
+	Loadout      enginev4.Loadout `json:"loadout"`
+	SDKVersion   string           `json:"sdkVersion"`
+	DisplayName  string           `json:"displayName"`
+	Team         string           `json:"team"`
+	StartCommand string           `json:"startCommand"`
+	Runtime      string           `json:"runtime"`
 }
 
 type agentEnrollment struct {
@@ -378,11 +397,37 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rosterCap := 8
+	if match.EngineVersion == 4 {
+		config, err := enginev4.DecodeConfig(match.ArenaConfig)
+		if err != nil {
+			writeError(w, 500, "invalid arena configuration")
+			return
+		}
+		rosterCap = config.Capacity
+		input.Loadout.Defaults()
+		if err := input.Loadout.Validate(); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		if input.SDKVersion != "0.4.0" {
+			writeError(w, 400, "v4 matches require SDK 0.4.0")
+			return
+		}
+		if match.Mode == "br-squad" {
+			if len(input.Team) < 1 || len(input.Team) > 32 || countTeamRobots(match.Robots, input.Team) >= 4 {
+				writeError(w, 400, "squad name required; maximum four robots")
+				return
+			}
+		} else {
+			input.Team = uuid.NewString()
+		}
+	}
 	if match.Mode == "squad" {
 		rosterCap = 10
 	}
 	var displacedBot *model.RobotSubmission
 	switch match.Mode {
+	case "br-solo", "br-squad", "sandbox", "quick-duel":
 	case "squad":
 		if input.Team != "red" && input.Team != "blue" {
 			writeError(w, http.StatusBadRequest, "team must be red or blue")
@@ -448,6 +493,7 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 	}
 	match.Robots = append(match.Robots, model.RobotSubmission{
 		RobotID: robotID, DisplayName: input.DisplayName, Team: input.Team,
+		Loadout: mustJSON(input.Loadout), SDKVersion: input.SDKVersion,
 		PlayerID: userID, OwnerBoxID: boxID, ScriptObjectKey: scriptKey, StartCommand: input.StartCommand, Runtime: input.Runtime, SubmittedAt: time.Now().UTC(),
 	})
 	if err := s.store.PutMatch(r.Context(), match); err != nil {
@@ -455,7 +501,11 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentBaseURL := envOr("ROBOT_AGENT_BASE_URL", "ws://host.docker.internal:8080")
-	configured, err := s.boxes.ConfigureAgent(r.Context(), boxID, boxes.AgentConfig{RobotID: robotID, MatchID: match.MatchID, URL: strings.TrimRight(agentBaseURL, "/") + "/agent/connect/" + robotID, Token: token, StartCommand: input.StartCommand})
+	immutableSource := ""
+	if match.EngineVersion == 4 {
+		immutableSource = source
+	}
+	configured, err := s.boxes.ConfigureAgent(r.Context(), boxID, boxes.AgentConfig{ImmutableSource: immutableSource, RobotID: robotID, MatchID: match.MatchID, URL: strings.TrimRight(agentBaseURL, "/") + "/agent/connect/" + robotID, Token: token, StartCommand: input.StartCommand})
 	if err != nil {
 		// Roll the roster back so a broken provisioner never leaves a phantom
 		// robot in a match that agents cannot join. A squad join also returns
@@ -471,7 +521,7 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.PutBox(r.Context(), userID, configured)
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	writeJSON(w, http.StatusCreated, robotResponse{Match: match, Agent: agentEnrollment{RobotID: robotID, Status: configured.AgentStatus}})
 }
 
@@ -539,8 +589,8 @@ func (s *Server) withdrawRobot(w http.ResponseWriter, r *http.Request) {
 		box.ActiveRobotID, box.ActiveMatchID = "", ""
 		_ = s.store.PutBox(r.Context(), userID, box)
 	}
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
-	writeJSON(w, http.StatusOK, match)
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
+	writeJSON(w, http.StatusOK, publicMatch(match))
 }
 
 // registerActiveArena exposes the worker's engine to HTTP handlers for the
@@ -586,12 +636,18 @@ func (s *Server) withdrawFromMatch(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	arena := s.arenas[match.MatchID]
+	v4 := s.v4[match.MatchID]
 	s.mu.Unlock()
+	if v4 != nil {
+		v4.RequestWithdraw(robotID)
+		writeJSON(w, 202, map[string]string{"status": "withdrawing", "robotId": robotID})
+		return
+	}
 	if arena == nil || !arena.RequestWithdraw(robotID) {
 		writeError(w, http.StatusConflict, "match is not accepting withdrawals")
 		return
 	}
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "withdrawing", "robotId": robotID})
 }
 
@@ -632,12 +688,23 @@ func (s *Server) releaseBox(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadGateway, err.Error())
 				return
 			}
-			s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+			s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 			break
 		}
 		box.ActiveRobotID, box.ActiveMatchID = "", ""
 		_ = s.store.PutBox(r.Context(), userID, box)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+		return
+	}
+	if match.EngineVersion == 4 {
+		s.mu.Lock()
+		control := s.v4[match.MatchID]
+		s.mu.Unlock()
+		if control == nil || !control.RequestWithdraw(box.ActiveRobotID) {
+			writeError(w, http.StatusConflict, "match is not accepting withdrawals")
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "withdrawing", "matchId": match.MatchID})
 		return
 	}
 	// Running match: the concession applies at the next engine tick and the
@@ -872,7 +939,7 @@ func (s *Server) beginMatch(ctx context.Context, match model.Match) (model.Match
 	for _, robot := range match.Robots {
 		states = append(states, engine.RobotState{RobotID: robot.RobotID, Name: robot.DisplayName, Team: robot.Team})
 	}
-	if err := engine.ValidateTeamsForMode(match.Mode, states); err != nil {
+	if err := engine.ValidateTeamsForMode(match.Mode, states); err != nil && match.EngineVersion != 4 {
 		return match, err
 	}
 	for _, robot := range match.Robots {
@@ -894,7 +961,7 @@ func (s *Server) beginMatch(ctx context.Context, match model.Match) (model.Match
 		s.releaseBoxes(ctx, match)
 		return match, err
 	}
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	return match, nil
 }
 
@@ -910,6 +977,9 @@ func (s *Server) autoStartIfReady(matchID string) {
 	defer s.mu.Unlock()
 	match, err := s.store.GetMatch(ctx, matchID)
 	if err != nil || match.Status != model.MatchLobby {
+		return
+	}
+	if match.EngineVersion == 4 {
 		return
 	}
 	if match.Mode == "squad" {
@@ -942,14 +1012,43 @@ func (s *Server) connectAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid robot credential")
 		return
 	}
+	agentMatch, matchErr := s.store.GetMatch(r.Context(), credential.MatchID)
+	isV4 := matchErr == nil && agentMatch.EngineVersion == 4
+	protocols := []string{"robot-arena.v1"}
+	if isV4 {
+		if agentMatch.Status != model.MatchLobby && agentMatch.Status != model.MatchQueued && agentMatch.Status != model.MatchRunning {
+			writeError(w, http.StatusConflict, "match no longer accepts agent connections")
+			return
+		}
+		enrolled := false
+		for _, robot := range agentMatch.Robots {
+			if robot.RobotID == robotID {
+				enrolled = true
+				break
+			}
+		}
+		if !enrolled {
+			writeError(w, http.StatusForbidden, "robot no longer registered")
+			return
+		}
+		if r.Header.Get("X-Robot-SDK-Version") != "0.4.0" {
+			writeError(w, http.StatusUpgradeRequired, "v4 matches require SDK 0.4.0")
+			return
+		}
+		protocols = []string{"robot-arena.v4"}
+	}
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
-		Subprotocols:   []string{"robot-arena.v1"},
+		Subprotocols:   protocols,
 	})
 	if err != nil {
 		return
 	}
 	session := newAgentSession(robotID, credential.MatchID, connection)
+	if isV4 {
+		session.v4 = true
+		session.mailbox = &v4Mailbox{out: make(chan json.RawMessage, 1)}
+	}
 	s.agents.Attach(robotID, session)
 	s.hub.Publish(credential.MatchID, map[string]any{"type": "agent_status", "version": 1, "robotId": robotID, "connected": true})
 	go s.autoStartIfReady(credential.MatchID)
@@ -958,7 +1057,11 @@ func (s *Server) connectAgent(w http.ResponseWriter, r *http.Request) {
 		s.hub.Publish(credential.MatchID, map[string]any{"type": "agent_status", "version": 1, "robotId": robotID, "connected": false})
 		connection.CloseNow()
 	}()
-	_ = session.readLoop(r.Context())
+	if session.v4 {
+		_ = session.readV4(r.Context())
+	} else {
+		_ = session.readLoop(r.Context())
+	}
 }
 
 func randomToken() (string, error) {
@@ -980,6 +1083,14 @@ func (s *Server) watchMatch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = connection.Close(websocket.StatusPolicyViolation, "match not found")
 		return
+	}
+	var viewer *v4Viewer
+	if match.EngineVersion == 4 {
+		viewer = &v4Viewer{}
+		viewerContext, cancelViewer := context.WithCancel(r.Context())
+		defer cancelViewer()
+		r = r.WithContext(viewerContext)
+		go func() { defer cancelViewer(); viewer.read(viewerContext, connection) }()
 	}
 	robotIDs := make([]string, 0, len(match.Robots))
 	for _, robot := range match.Robots {
@@ -1012,7 +1123,11 @@ func (s *Server) watchMatch(w http.ResponseWriter, r *http.Request) {
 				}
 				sentArenaLayout = true
 			}
-			err := connection.Write(ctx, websocket.MessageText, event.payload)
+			payload := event.payload
+			if viewer != nil {
+				payload = viewer.project(payload)
+			}
+			err := connection.Write(ctx, websocket.MessageText, payload)
 			cancel()
 			if err != nil {
 				return

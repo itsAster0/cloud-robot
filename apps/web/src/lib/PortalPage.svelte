@@ -3,6 +3,8 @@
   import { api, type ListedMatch } from './api';
   import type { AdminStatus, CloudStatus, Match, PlayerStats, QueueStatus, Replay, RobotBox } from './types';
   import type { Route } from './router';
+  import DocsPage from './DocsPage.svelte';
+  import { matchHref, matchModeLabel, matchRosterLabel } from './matchNavigation';
 
   interface Props { route: Route; user: User | null; match: Match | null; cloud: CloudStatus | null; box?: RobotBox | null; onSignIn: () => void; onCreateMatch: () => void; onReleaseBox: () => Promise<void>; }
   let { route, user, match, cloud, box = null, onSignIn, onCreateMatch, onReleaseBox }: Props = $props();
@@ -15,19 +17,9 @@
   let matches = $state<ListedMatch[]>([]), profile = $state<PlayerStats | null>(null), recentMatches = $state<Match[]>([]);
   let leaderboard = $state<{ rank: number; player: PlayerStats; rating: number }[]>([]);
   let queue = $state<QueueStatus>({ status: 'idle' }), replay = $state<Replay | null>(null), admin = $state<AdminStatus | null>(null);
+  let search = $state('');
   let loading = $state(false), pageError = $state(''), releasing = $state(false);
   let blockedByActiveRobot = $derived(pageError.includes('box already has an active robot'));
-  const luaExample = `local arena = require "arena"
-
-arena.run({
-  url = assert(os.getenv("ROBOT_ARENA_URL")),
-  token = assert(os.getenv("ROBOT_TOKEN")),
-  decide = function(observation)
-    local enemy = arena.nearest_enemy(observation)
-    if enemy then return arena.approach(observation, enemy, 8) end
-    return arena.action({ turn = 12 })
-  end,
-})`;
 
   function savePreferences() {
     localStorage.setItem('arena-reduced-motion', String(reducedMotion));
@@ -36,7 +28,10 @@ arena.run({
   }
   function requireUser(action: () => void) { if (user) action(); else onSignIn(); }
   let title = $derived(route.name === 'profile' ? `${route.parameter ?? 'Player'} profile` : route.name.replace('-', ' '));
-  let visibleMatches = $derived(matches.filter((entry) => filter === 'all' || entry.status === (filter === 'live' ? 'running' : filter)));
+  let visibleMatches = $derived(matches.filter((entry) =>
+    (filter === 'all' || entry.status === filter) &&
+    `${entry.matchId} ${matchModeLabel(entry.mode)} ${entry.robots.map(robot => robot.displayName).join(' ')}`.toLowerCase().includes(search.trim().toLowerCase())
+  ));
 
   async function loadPage() {
     loading = true; pageError = '';
@@ -124,13 +119,32 @@ arena.run({
     <div class="roster-preview">{#if mode === 'squad'}<div><span>RED // 5</span><strong>{displayName || user?.firstName || 'You'} + 4 bots</strong></div><div><span>BLUE // 5</span><strong>5 bots</strong></div>{:else if mode === 'solo'}<div><span>FREE-FOR-ALL</span><strong>{displayName || user?.firstName || 'You'}</strong></div><div><span>OPPONENTS</span><strong>{soloBotCount === 0 ? 'Empty sandbox' : `${soloBotCount} bot${soloBotCount > 1 ? 's' : ''}`}</strong></div>{:else}<div><span>RED // R</span><strong>{displayName || user?.firstName || 'You'}</strong></div><div><span>BLUE // B</span><strong>{queue.status === 'waiting' ? 'Searching…' : 'Waiting'}</strong></div>{/if}</div>
   </section>
 {:else if route.name === 'matches' || route.name === 'spectate'}
-  <section class="portal"><div class="page-head"><div><div class="eyebrow">{route.name === 'spectate' ? 'PUBLIC LIVE VIEW' : 'MATCH ARCHIVE'}</div><h1>{route.name === 'spectate' ? 'Spectate.' : 'Match history.'}</h1></div><label class="filter">Filter<select bind:value={filter}><option value="all">All modes</option><option value="live">Live</option><option value="finished">Finished</option></select></label></div>
-    <div class="card-list">{#each visibleMatches as listed (listed.matchId)}<a class="match-card" href={listed.status === 'finished' ? `#/match/${listed.matchId}/detail` : `#/match/${listed.matchId}`}><div><span class="pill" data-tone={listed.status === 'running' ? 'ok' : 'idle'}>{listed.status}</span><h2>{listed.robots.map((robot) => robot.displayName).join(' vs ') || 'Open lobby'}</h2><p>{listed.mode} · {listed.mapId ?? 'open-field'} · {new Date(listed.createdAt).toLocaleString()}{#if listed.status === 'running'} · {listed.viewers ?? 0} watching{/if}</p></div><strong>{listed.status === 'finished' ? `${listed.winnerTeam?.toUpperCase() ?? 'DRAW'} ›` : 'WATCH ›'}</strong></a>{:else}<div class="empty-state"><h2>{loading ? 'Loading matches…' : 'No matching matches'}</h2><p>{route.name === 'spectate' ? 'No matches are live now.' : 'Finished and active matches will appear here.'}</p></div>{/each}</div>
+  <section class="portal match-library">
+    <div class="page-head">
+      <div><div class="eyebrow">{route.name === 'spectate' ? 'WATCH AND LEARN' : 'MATCH LIBRARY'}</div><h1>{route.name === 'spectate' ? 'Live matches' : 'Matches & replays'}</h1><p class="library-lede">{route.name === 'spectate' ? 'Watch robot strategies play out. Public viewing is open to everyone.' : 'Revisit a run, inspect its outcome, and take what you learn back to your code.'}</p></div>
+      <a class="secondary-action" href="#/workspace/matches">Create a match →</a>
+    </div>
+    <div class="library-toolbar">
+      <label class="library-search">Find a match<input type="search" bind:value={search} placeholder="Search robot, mode, or match ID" /></label>
+      {#if route.name === 'matches'}<label>Status<select bind:value={filter}><option value="all">All statuses</option><option value="lobby">Lobby</option><option value="queued">Queued</option><option value="running">Live</option><option value="finished">Finished</option><option value="failed">Failed</option></select></label>{/if}
+      <button class="library-refresh" onclick={loadPage} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
+    </div>
+    <p class="library-count" aria-live="polite">{loading ? 'Loading matches…' : `${visibleMatches.length} ${visibleMatches.length === 1 ? 'match' : 'matches'} shown · latest 50 records`}</p>
+    <div class="card-list">
+      {#each visibleMatches as listed (listed.matchId)}
+        <a class="match-card" href={matchHref(listed)}>
+          <div class="library-match-info"><div class="library-match-meta"><span class="pill" data-tone={listed.status === 'running' ? 'ok' : listed.status === 'failed' ? 'bad' : 'idle'}>{listed.status === 'running' ? 'Live' : listed.status}</span><span>{listed.engineVersion === 4 ? 'Arena V2' : 'Classic arena'}</span><span>{listed.matchId.slice(0, 8)}</span></div><h2>{matchModeLabel(listed.mode)}</h2><p class="library-roster">{matchRosterLabel(listed)}</p><p>{new Date(listed.createdAt).toLocaleString()}{#if listed.status === 'running'} · {listed.viewers ?? 0} watching{/if}</p></div>
+          <strong>{listed.status === 'finished' ? 'View results →' : listed.status === 'lobby' ? 'Open lobby →' : listed.status === 'failed' ? 'View match →' : 'Watch match →'}</strong>
+        </a>
+      {:else}
+        <div class="empty-state"><h2>{loading ? 'Loading matches…' : pageError ? 'Matches could not be loaded' : search || filter !== 'all' ? 'No matches found' : route.name === 'spectate' ? 'No matches are live' : 'Your next experiment starts here'}</h2><p>{pageError ? 'Check the connection and refresh to try again.' : search || filter !== 'all' ? 'Try another search or status filter.' : 'Create a sandbox to test your robot, or start a match with game bots.'}</p><a class="secondary-action" href="#/workspace/matches">Open match setup →</a></div>
+      {/each}
+    </div>
   </section>
 {:else if route.name === 'match-detail'}
   <section class="portal narrow-page"><div class="eyebrow">MATCH RECAP</div><h1>{match?.winnerTeam ? `${match.winnerTeam.toUpperCase()} wins.` : 'Result unavailable.'}</h1><div class="recap-grid"><div><span>DURATION</span><strong>{match?.startedAt && match?.finishedAt ? `${Math.round((Date.parse(match.finishedAt) - Date.parse(match.startedAt)) / 1000)} s` : '--'}</strong></div><div><span>MAP</span><strong>{match?.mapId ?? 'open-field'}</strong></div><div><span>MODE</span><strong>{match?.mode ?? '--'}</strong></div><div><span>REPLAY</span><strong>{replay?.complete ? 'COMPLETE' : `${replay?.events.length ?? 0} SUMMARY EVENTS`}</strong></div></div>{#each match?.robotSummaries ?? [] as robot}<article class="stat-row"><b class={robot.team === 'red' || robot.team === 'blue' ? robot.team : 'solo'}>{robot.team === 'red' ? 'R' : robot.team === 'blue' ? 'B' : 'S'}</b><strong>{robot.name}</strong><span>{robot.kills ?? 0} kills</span><span>{robot.damageDealt ?? 0} dealt</span><span>{robot.itemsPickedUp ?? 0} items</span></article>{/each}{#if replay?.events.length}<div class="replay-feed">{#each replay.events as event}<div><time>T{event.tick}</time><strong>{event.type.replace(/_/g, ' ')}</strong><span>{event.message ?? (event.damage ? `${event.damage} damage` : event.robotId)}</span></div>{/each}</div>{/if}<a class="secondary-action" href={`#/match/${route.parameter}`}>OPEN ARENA VIEW</a></section>
 {:else if route.name === 'profile'}
-  <section class="portal narrow-page"><div class="eyebrow">PLAYER PROFILE</div><h1>{profile?.handle ?? route.parameter}</h1>{#if profile}<div class="profile-card"><div class="profile-mark">{profile.handle.slice(0, 2).toUpperCase()}</div><div><span>PLAYER ID</span><strong>{profile.playerId.slice(0, 12)}</strong><p>Stats updated {new Date(profile.updatedAt).toLocaleString()}.</p></div></div><div class="recap-grid"><div><span>DUEL RATING</span><strong>{profile.ratings.duel ?? 1000}</strong></div><div><span>WINS</span><strong>{profile.wins}</strong></div><div><span>LOSSES / DRAWS</span><strong>{profile.losses} / {profile.draws}</strong></div><div><span>DAMAGE DEALT</span><strong>{profile.damageDealt}</strong></div></div>{#each recentMatches as recent}<a class="match-card" href={`#/match/${recent.matchId}/detail`}><div><strong>{recent.mode} · {recent.mapId}</strong><p>{new Date(recent.createdAt).toLocaleString()}</p></div><strong>{recent.winnerTeam?.toUpperCase() ?? recent.status.toUpperCase()} ›</strong></a>{/each}{:else if !loading}<div class="empty-state"><h2>Profile not found</h2><p>No recorded stats for this handle.</p></div>{/if}</section>
+  <section class="portal narrow-page"><div class="eyebrow">PLAYER PROFILE</div><h1>{profile?.handle ?? route.parameter}</h1>{#if profile}<div class="profile-card"><div class="profile-mark">{profile.handle.slice(0, 2).toUpperCase()}</div><div><span>PLAYER ID</span><strong>{profile.playerId.slice(0, 12)}</strong><p>Stats updated {new Date(profile.updatedAt).toLocaleString()}.</p></div></div><div class="recap-grid"><div><span>DUEL RATING</span><strong>{profile.ratings.duel ?? 1000}</strong></div><div><span>WINS</span><strong>{profile.wins}</strong></div><div><span>LOSSES / DRAWS</span><strong>{profile.losses} / {profile.draws}</strong></div><div><span>DAMAGE DEALT</span><strong>{profile.damageDealt}</strong></div></div>{#each recentMatches as recent}<a class="match-card" href={matchHref(recent)}><div><strong>{recent.mode} · {recent.mapId}</strong><p>{new Date(recent.createdAt).toLocaleString()}</p></div><strong>{recent.winnerTeam?.toUpperCase() ?? recent.status.toUpperCase()} ›</strong></a>{/each}{:else if !loading}<div class="empty-state"><h2>Profile not found</h2><p>No recorded stats for this handle.</p></div>{/if}</section>
 {:else if route.name === 'leaderboard'}
   <section class="portal"><div class="eyebrow">RANKED // DUEL</div><h1>Leaderboard.</h1><div class="ladder"><div class="ladder-head"><span>RANK</span><span>PLAYER</span><span>RATING</span><span>W/L</span></div>{#each leaderboard as entry}<a class="ladder-row" href={`#/profile/${encodeURIComponent(entry.player.handle)}`}><span>#{entry.rank}</span><strong>{entry.player.handle}</strong><span>{entry.rating}</span><span>{entry.player.wins}/{entry.player.losses}</span></a>{:else}<div class="empty-state"><h2>{loading ? 'Loading ladder…' : 'No ranked results'}</h2><p>Completed duel results will fill this ladder.</p></div>{/each}</div></section>
 {:else if route.name === 'create'}
@@ -142,33 +156,26 @@ arena.run({
 {:else if route.name === 'admin'}
   <section class="portal"><div class="eyebrow">OPERATIONS</div><h1>Admin.</h1>{#if user && admin}<div class="ops-grid"><article><span>CONTROL PLANE</span><strong class:live={cloud?.status === 'ready'}>{cloud?.status?.toUpperCase() ?? 'CHECKING'}</strong><small>{cloud?.provider ?? '--'}</small></article><article><span>QUEUE DEPTH</span><strong>{admin.queueDepth}</strong><small>Players waiting</small></article><article><span>LIVE MATCHES</span><strong>{admin.matches.running ?? 0}</strong><small>{Object.values(admin.viewers).reduce((sum, value) => sum + value, 0)} viewers</small></article><article><span>AGENTS</span><strong>{admin.agents}</strong><small>{admin.matches.finished ?? 0} finished matches</small></article></div>{:else if user}<div class="empty-state"><h2>{loading ? 'Loading service status…' : 'Admin status unavailable'}</h2><p>{pageError || 'This account may not have admin access.'}</p></div>{:else}<div class="auth-gate"><h2>Admin access requires sign-in</h2><button class="deploy" onclick={onSignIn}>SIGN IN</button></div>{/if}</section>
 {:else if route.name === 'sdk' || route.name === 'api-docs'}
-  <section class="docs-page"><aside><div class="eyebrow">{route.name === 'sdk' ? 'LUA SDK // v0.3.0' : 'HTTP + WS API'}</div><h1>Build robot.<br /><em>Own runtime.</em></h1><p>Public viewer reads need no session. Resource ownership and mutations require sign-in.</p><a href={route.name === 'sdk' ? '#/docs/sdk' : '#/docs/api'}>Quickstart</a><a href="#/docs/sdk">Lua SDK</a><a href="#/docs/api">API schema</a></aside><article>{#if route.name === 'sdk'}<section><div class="eyebrow">QUICKSTART</div><h2>Continuous agent loop</h2><p>Save as <code>main.lua</code>. Start with <code>lua main.lua</code>.</p><pre><code>{luaExample}</code></pre></section><section><div class="eyebrow">OBSERVATION</div><h2>World state</h2><p>Each observation includes tick, self, visible robots, projectiles, items, mines, obstacles, arena bounds, zone state, recent events, and team messages. Protocol v3 adds dash and mine charges plus scan results on <code>self</code>; treat unknown fields and missing arrays as ignorable.</p><pre><code>{`observation = {
-  type, version, requestId, matchId, tick,
-  self = { ..., dashCharges, mineCharges, scanResult },
-  robots, projectiles,
-  items = { { itemId, type, x, y, active, rarity, source, respawnTick } },
-  mines = { { mineId, ownerId, x, y, armed } },
-  obstacles, hazards,
-  zone = { active, x, y, radius, stage },
-  events, messages,
-  arena = { width, height, map_id }
-}`}</code></pre></section><section><div class="eyebrow">ITEMS + WEAPONS</div><h2>Loot tiers</h2><p>Items carry a <code>rarity</code>: common (heal, repair-core, battery), rare (medkit, nano_repair, shield, armor_plate, overdrive, rapid_fire, scanner, dash_cell, weapon_shotgun), and epic (cloak, teleport_beacon, berserker_charm, vampiric_fang, frenzy, weapon_grenade, weapon_railgun, weapon_mine_layer). Weapon drops replace the default cannon; <code>machine_gun</code>, <code>incendiary</code>, <code>cryo</code>, and <code>emp</code> appear as projectile kinds. <code>weapon_mine_layer</code> grants mine charges for <code>deploy</code>.</p></section><section><div class="eyebrow">HELPERS</div><div class="function-grid"><div><code>arena.action(options)</code><p>Return movement, turn, aim, fire, dash, deploy, scan, message, logs, and equipment intent.</p></div><div><code>arena.nearest_enemy(obs)</code><p>Find nearest live opponent.</p></div><div><code>arena.approach(obs, target, speed)</code><p>Track and chase target.</p></div><div><code>arena.strafe(obs, target, direction)</code><p>Circle target while firing.</p></div><div><code>dash = true</code><p>Spend a dash charge for a burst move.</p></div><div><code>deploy = true</code><p>Drop an armed mine from mine charges.</p></div><div><code>scan = true</code><p>Radar sweep; results arrive as <code>self.scanResult</code>.</p></div><div><code>message = "text"</code><p>Short team message; teammates receive it in <code>messages</code>.</p></div></div><p>All helpers: <code>arena.run</code> · <code>arena.configure</code> · <code>arena.action</code> · <code>arena.fire_at</code> · <code>arena.approach</code> · <code>arena.strafe</code> · <code>arena.nearest_enemy</code> · <code>arena.nearest_item</code> · <code>arena.distance</code> · <code>arena.bearing</code> · <code>arena.line_of_sight</code> · <code>arena.path_to</code></p></section>{:else}<section><div class="eyebrow">HTTP</div><h2>Match resources</h2><pre><code>{`GET    /api/matches                public
-POST   /api/matches                 session required
-GET    /api/matches/{id}            public
-GET    /api/matches/{id}/replay     public
-GET    /api/profiles/{handle}       public
-GET    /api/leaderboard             public
-GET    /api/queue                   session required
-POST   /api/queue                   session required
-DELETE /api/queue                   session required
-POST   /api/matches/{id}/robots     session required
-DELETE /api/matches/{id}/robots     session required
-POST   /api/matches/{id}/start      session required`}</code></pre></section><section><div class="eyebrow">VIEWER WEBSOCKET</div><h2>Anonymous snapshots</h2><pre><code>{`GET /ws/matches/{id}
-
-snapshot: { type, version, matchId, sequence, tick,
-  status, winnerTeam, robots, projectiles, items,
-  mines, turrets, zone, obstacles, events,
-  width, height, mapId }`}</code></pre></section>{/if}</article></section>
+  <DocsPage section={route.name === 'sdk' ? 'sdk' : 'api'} />
 {:else}
   <section class="portal narrow-page"><div class="eyebrow">404</div><h1>Route not found.</h1><a class="secondary-action" href="#/">RETURN HOME</a></section>
 {/if}
+
+<style>
+  .match-library { max-width: 1200px; }
+  .library-lede { max-width: 650px; color: var(--muted); font-size: 14px; line-height: 1.7; }
+  .library-toolbar { display: flex; align-items: end; gap: 14px; padding: 18px; border: 1px solid var(--line); background: var(--panel); border-radius: 10px; }
+  .library-toolbar label { display: grid; gap: 8px; color: var(--muted); font-size: 12px; }
+  .library-search { flex: 1; }
+  .library-toolbar input, .library-toolbar select { width: 100%; min-height: 42px; margin: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--background, #0b1018); color: var(--ink); padding: 10px 12px; font: inherit; }
+  .library-refresh { min-height: 42px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink); font-size: 12px; }
+  .library-refresh:disabled { opacity: .5; cursor: wait; }
+  .library-count { color: var(--muted); font-size: 12px; margin: 20px 0 12px; }
+  .library-match-info { min-width: 0; }
+  .library-match-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 11px; }
+  .match-library .match-card { border-radius: 10px; gap: 20px; }
+  .match-library .match-card h2 { margin: 14px 0 8px; font-size: 19px; }
+  .match-library .match-card > strong { font-size: 12px; white-space: nowrap; color: var(--acid); }
+  .library-roster { overflow-wrap: anywhere; }
+  @media(max-width: 650px) { .library-toolbar { flex-wrap: wrap; } .library-search { flex-basis: 100%; } .library-toolbar label:not(.library-search) { flex: 1; } .match-library .match-card { flex-direction: column; align-items: start; } .match-library .page-head { flex-wrap: wrap; gap: 16px; } }
+</style>

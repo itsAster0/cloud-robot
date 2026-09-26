@@ -31,6 +31,7 @@ export interface RobotSummary {
 }
 
 export interface Match {
+ engineVersion?: number;
   matchId: string;
   status: MatchStatus;
   mode: string;
@@ -93,6 +94,20 @@ export interface AdminStatus {
 }
 
 export interface RobotState {
+  maxHp?: number;
+  turretHeading?: number;
+  energy?: number;
+  maxEnergy?: number;
+  shield?: number;
+  maxShield?: number;
+  // Active weapon kind from v4 snapshots (plasma, railgun, …).
+  weapon?: string;
+  vx?: number;
+  vy?: number;
+  placement?: number;
+  damageDealt?: number;
+  damageTaken?: number;
+  kills?: number;
   robotId: string;
   name: string;
   team: ArenaTeam;
@@ -223,6 +238,9 @@ export interface ArenaObstacle {
   radius?: number;
   width?: number;
   height?: number;
+  // Visual theme from the Rust generator: wall, hedge, glass, or rock.
+  // Collision and vision treat every material identically.
+  material?: string;
 }
 
 export interface ArenaItem {
@@ -252,12 +270,15 @@ export interface Projectile {
 }
 
 export interface Snapshot {
+ revision?: number;
+ transit?: {id:string; x:number; y:number; targetX:number; targetY:number}[];
   type: 'snapshot';
   // Protocol version 3: adds mines, turrets (empty for now), dash/scan state.
   version: number;
   matchId: string;
   sequence: number;
   tick: number;
+  tickRate?: number;
   status: 'running' | 'finished';
   winnerTeam?: string;
   robots: RobotState[];

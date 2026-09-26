@@ -7,3 +7,6 @@ apps/web/dist
 data
 bin
 *.log
+
+crates/arena-engine/target
+reports

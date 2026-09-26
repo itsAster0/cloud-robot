@@ -84,11 +84,12 @@ func optionalPositiveInt(value string, fallback int) (int, error) {
 }
 
 type AgentConfig struct {
-	RobotID      string `json:"robotId"`
-	MatchID      string `json:"matchId"`
-	URL          string `json:"url"`
-	Token        string `json:"token"`
-	StartCommand string `json:"startCommand"`
+	ImmutableSource string `json:"immutableSource,omitempty"`
+	RobotID         string `json:"robotId"`
+	MatchID         string `json:"matchId"`
+	URL             string `json:"url"`
+	Token           string `json:"token"`
+	StartCommand    string `json:"startCommand"`
 }
 
 // ValidateAgentConfig rejects incomplete supervisor payloads before they reach
@@ -96,6 +97,8 @@ type AgentConfig struct {
 // the enforcement point.
 func ValidateAgentConfig(config AgentConfig) error {
 	switch {
+	case len(config.ImmutableSource) > 16*1024:
+		return errors.New("immutable source exceeds 16 KiB")
 	case config.RobotID == "":
 		return errors.New("agent configuration requires robotId")
 	case config.MatchID == "":
@@ -274,4 +277,15 @@ func (c *Client) do(ctx context.Context, method, path string, input, output any)
 		return fmt.Errorf("box provisioner: %s", strings.TrimSpace(message))
 	}
 	return json.NewDecoder(response.Body).Decode(output)
+}
+
+func (c *Client) WriteMainRevision(ctx context.Context, boxID, source, revision string) (string, error) {
+	var result struct {
+		Source string `json:"source"`
+	}
+	err := c.do(ctx, http.MethodPut, "/v1/boxes/"+boxID+"/main.lua", map[string]string{"source": source, "revision": revision}, &result)
+	return result.Source, err
+}
+func (c *Client) ValidateMain(ctx context.Context, boxID, source string) error {
+	return c.do(ctx, http.MethodPost, "/v1/boxes/"+boxID+"/validate-main", map[string]string{"source": source}, nil)
 }

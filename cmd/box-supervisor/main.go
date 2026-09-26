@@ -42,6 +42,17 @@ func main() {
 		setKey()
 	case "configure-agent":
 		configureAgent()
+	case "validate-main":
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 16*1024+1))
+		fatal(err)
+		fatal(validateSource(data))
+	case "write-main-if-match":
+		var input struct {
+			Source   string `json:"source"`
+			Revision string `json:"revision"`
+		}
+		fatal(json.NewDecoder(io.LimitReader(os.Stdin, 128*1024)).Decode(&input))
+		fatal(writeMainRevision("/workspace/main.lua", input.Source, input.Revision))
 	case "read-main":
 		readMain()
 	case "write-main":
@@ -188,7 +199,7 @@ func setKey() {
 	fatal(writeAtomic(filepath.Join(controlDir, "authorized_keys"), []byte(key+"\n"), 0644))
 }
 func configureAgent() {
-	data, err := io.ReadAll(io.LimitReader(os.Stdin, 20*1024))
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, 128*1024))
 	if err != nil {
 		fatal(err)
 	}
@@ -200,6 +211,14 @@ func configureAgent() {
 		fatal(err)
 	}
 	if err := validateLuaSyntax("/workspace/main.lua"); err != nil {
+		fatal(err)
+	}
+	if config.ImmutableSource != "" {
+		fatal(validateSource([]byte(config.ImmutableSource)))
+		fatal(os.MkdirAll("/opt/robot-arena-run", 0755))
+		fatal(writeAtomic("/opt/robot-arena-run/main.lua", []byte(config.ImmutableSource), 0644))
+		config.StartCommand = "lua /opt/robot-arena-run/main.lua"
+		data, err = json.Marshal(config)
 		fatal(err)
 	}
 	fatal(writeAtomic(filepath.Join(controlDir, "agent.json"), data, 0600))
@@ -453,3 +472,39 @@ arena.run({
   decide = decide,
 })
 `
+
+func validateSource(data []byte) error {
+	if len(data) == 0 || len(data) > 16*1024 {
+		return errors.New("source must be 1..16384 bytes")
+	}
+	file, err := os.CreateTemp("", "arena-check-*.lua")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if _, err = file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	return validateLuaSyntax(file.Name())
+}
+func writeMainRevision(path, source, expected string) error {
+	if err := validateSource([]byte(source)); err != nil {
+		return err
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	hash := sha256.Sum256(current)
+	if fmt.Sprintf("%x", hash) != expected {
+		return errors.New("workspace revision changed; reload before saving")
+	}
+	if err = writeAtomic(path, []byte(source), 0644); err != nil {
+		return err
+	}
+	return os.Chown(path, 1000, 1000)
+}

@@ -43,6 +43,11 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   provisioner:
     build:
@@ -75,7 +80,8 @@ services:
       args:
         VITE_WORKOS_CLIENT_ID: "${VITE_WORKOS_CLIENT_ID:-client_01M1EN6565YSSYPRPKA8A5R5MX}"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "3000:80"
     restart: unless-stopped
