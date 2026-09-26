@@ -121,3 +121,8 @@ run = 'ARENA_LOAD_ROBOTS=${ARENA_LOAD_ROBOTS:-16} go test ./internal/api -run Te
 description = "Verify two real SSH boxes, Lua agents and Floci replay storage; requires running Compose stack"
 depends = ["v4:build", "box:build"]
 run = "ARENA_DOCKER_SMOKE=1 go test ./internal/api -run TestV4DockerSSHSmoke -count=1 -v -timeout=4m"
+
+[tasks."sdk:test"]
+description = "Run Lua SDK helper tests under the box image's Lua 5.4"
+depends = ["box:build"]
+run = "docker run --rm --entrypoint lua5.4 -v \"$PWD/sdk:/src/sdk:ro\" -w /src cloud-robot-box:local sdk/lua/arena_test.lua"

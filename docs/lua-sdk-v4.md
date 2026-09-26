@@ -68,8 +68,26 @@ New helpers include `weapon_ready`, `drive_to`, `find_consumable`,
 `find_loot`, `nearest_ally`, `lead_for`, `strafe_around`, `dodge`,
 `danger_level`, `scan_contacts`, `stuck_tracker`, `is_stuck`, `safe_zone_goal`, `transit_route`,
 `begin_path`, `advance_path`, and `follow_path`. Search work is bounded per call;
-paths can be pending or unreachable. Helpers use public geometry and observed
-entities, not hidden engine state.
+paths can be pending or unreachable.
+
+Tactical helpers:
+
+- `raycast(x, y, heading, max, obstacles?)` returns distance to the first
+  obstacle and the obstacle hit (nil when clear).
+- `obstacles_near(obs, x, y, radius)` lists cover within a radius, nearest first.
+- `find_cover(obs, threat, { radius = 500, clearance = 30 })` returns the nearest
+  clear point hidden from `threat` behind nearby cover, plus that obstacle.
+- `contact_tracker(ttl)` and `update_contacts(tracker, obs)` remember enemies
+  out of sight. Each contact has `age` in ticks, `visible`, `lastX/lastY`, and
+  `x/y` extrapolated from last velocity for up to one second.
+- `best_target(obs, { range = 700, hpWeight = 3 })` picks a visible enemy in
+  range with line of sight, favouring near and weak targets.
+- `nearest_site(obs, { kind = "armoury", biome = "urban" })`.
+
+`line_of_sight`, `raycast`, and cover checks build a uniform-grid index once per
+geometry array, so dense district maps (about 6,000 obstacles) stay within the
+decision budget. `mise run sdk:test` runs the helper tests under the box's Lua 5.4.
+Helpers use public geometry and observed entities, not hidden engine state.
 
 `find_consumable` reads your inventory and returns a zero-based consume slot;
 `find_loot` searches visible map containers by content kind. `transit_route`
