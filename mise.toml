@@ -1,4 +1,5 @@
 [tools]
+rust = "1.98.0"
 go = "1.26.7"
 node = "26.8.1"
 pnpm = "11.24.0"
@@ -46,6 +47,8 @@ run = "pnpm --dir apps/web dev"
 description = "Run all static checks"
 run = [
   "pnpm --dir apps/web check",
+  "cargo fmt --check --manifest-path crates/arena-engine/Cargo.toml",
+  "cargo clippy --locked --manifest-path crates/arena-engine/Cargo.toml --all-targets -- -D warnings",
   "go vet ./...",
 ]
 
@@ -53,6 +56,8 @@ run = [
 description = "Run all tests"
 run = [
   "pnpm --dir apps/web test",
+  "cargo test --locked --manifest-path crates/arena-engine/Cargo.toml",
+  "cargo build --locked --manifest-path crates/arena-engine/Cargo.toml",
   "go test ./...",
 ]
 
@@ -60,6 +65,7 @@ run = [
 description = "Build frontend and backend"
 run = [
   "pnpm --dir apps/web build",
+  "cargo build --release --locked --manifest-path crates/arena-engine/Cargo.toml",
   "go build -o bin/robot-arena ./cmd/server",
 ]
 
@@ -92,3 +98,26 @@ run = "sh -c 'ids=$(docker ps -q --filter label=robot-arena.box=true); [ -n \"$i
 [tasks."vps:doctor"]
 description = "Run read-only VPS capability checks over SSH"
 run = "./scripts/remote-doctor.sh"
+
+[tasks."v4:build"]
+description = "Build the Rust arena worker"
+run = "cargo build --release --locked --manifest-path crates/arena-engine/Cargo.toml"
+
+[tasks."v4:test"]
+description = "Test Rust game rules and protocol"
+run = "cargo test --locked --manifest-path crates/arena-engine/Cargo.toml"
+
+[tasks."v4:bench"]
+description = "Measure 256-robot simulation performance"
+depends = ["v4:build"]
+run = "crates/arena-engine/target/release/arena-engine benchmark 256 1000"
+
+[tasks."v4:load"]
+description = "Run real WebSocket load checks (ARENA_LOAD_ROBOTS defaults to 16)"
+depends = ["v4:build"]
+run = 'ARENA_LOAD_ROBOTS=${ARENA_LOAD_ROBOTS:-16} go test ./internal/api -run TestV4NetworkLoad -count=1 -v -timeout=60m'
+
+[tasks."v4:smoke"]
+description = "Verify two real SSH boxes, Lua agents and Floci replay storage; requires running Compose stack"
+depends = ["v4:build", "box:build"]
+run = "ARENA_DOCKER_SMOKE=1 go test ./internal/api -run TestV4DockerSSHSmoke -count=1 -v -timeout=4m"

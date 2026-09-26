@@ -67,6 +67,9 @@ func (s *Server) runMatch(ctx context.Context, matchID string) error {
 	if err != nil {
 		return err
 	}
+	if match.EngineVersion == 4 && match.Status == model.MatchQueued {
+		return s.runV4Match(ctx, match)
+	}
 	if match.Status != model.MatchQueued {
 		return nil
 	}
@@ -79,7 +82,7 @@ func (s *Server) runMatch(ctx context.Context, matchID string) error {
 	// /api/queue from reporting "matched" after the match ends, which would
 	// bounce the player between /play and the finished match page.
 	s.clearQueueEntriesForMatch(matchID)
-	s.hub.Publish(matchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(matchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 
 	robots := make([]engine.RobotState, 0, len(match.Robots))
 	controllers := make(map[string]engine.Controller, len(match.Robots))
@@ -118,7 +121,7 @@ func (s *Server) runMatch(ctx context.Context, matchID string) error {
 		} else if !s.agents.Connected(submission.RobotID) {
 			return s.failMatch(ctx, match, fmt.Errorf("robot agent %s disconnected", submission.RobotID))
 		} else {
-			controllers[submission.RobotID] = s.agents.Controller(submission.RobotID)
+			controllers[submission.RobotID] = newAsyncController(s.agents.Controller(submission.RobotID))
 		}
 		robots = append(robots, engine.RobotState{RobotID: submission.RobotID, Name: submission.DisplayName, Team: submission.Team})
 	}
@@ -169,7 +172,7 @@ func (s *Server) runMatch(ctx context.Context, matchID string) error {
 	if !match.Practice {
 		s.updatePlayerStats(ctx, match)
 	}
-	s.hub.Publish(matchID, map[string]any{"type": "match_finished", "version": 1, "matchId": matchID, "winnerTeam": match.WinnerTeam, "match": match})
+	s.hub.Publish(matchID, map[string]any{"type": "match_finished", "version": 1, "matchId": matchID, "winnerTeam": match.WinnerTeam, "match": publicMatch(match)})
 	s.hub.Forget(matchID)
 	return nil
 }

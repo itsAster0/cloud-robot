@@ -503,7 +503,7 @@ func TestDeployScriptRejectsUnknownTemplate(t *testing.T) {
 func TestDeployScriptReportsProvisionerFailure(t *testing.T) {
 	h := newHarness(t)
 	h.provisioner.writeMainErr = errors.New("docker unavailable")
-	response, payload := h.request(t, http.MethodPut, "/api/me/box/main.lua", `{"template":"evasive"}`)
+	response, payload := h.request(t, http.MethodPut, "/api/me/box/main.lua", `{"template":"scout"}`)
 	if response.StatusCode != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d %v", response.StatusCode, payload)
 	}
@@ -1608,4 +1608,11 @@ func TestHubReleasesEmptySubscriptionsAndForgottenEvents(t *testing.T) {
 		t.Fatalf("forgotten event was retained: %s", event.payload)
 	default:
 	}
+}
+
+func (f *fakeStore) PutReplayObject(ctx context.Context, key, source string) error {
+	return f.PutScript(ctx, key, source)
+}
+func (f *fakeStore) GetReplayObject(ctx context.Context, key string) (string, error) {
+	return f.GetScript(ctx, key)
 }

@@ -129,3 +129,65 @@ authoritative for position, damage, score, items, and match state.
 
 The response deadline is 150 ms. A missed deadline reuses the last action. A
 disconnected agent has a 30-second reconnect window before the engine fails it.
+
+## Protocol v4 migration
+
+The legacy endpoints remain available. New Rust-backed matches use these routes:
+
+- `POST /api/v4/matches`: create an unranked lobby. Body includes `mode`, `seed`
+  (0 means random), `capacity` (1..256), `width`, `height`, `durationSeconds`,
+  `friendlyFire`, `liveEdit`, plus map density `siteCount` (0 = auto: 4 small /
+  64 large, else 1..256), `coverPerSite` (0..12, default 8), and `lootPerSite` (0..32).
+  Cover composes open corners, pillars, lanes, arcs, hedgerows, glass panes,
+  and rock on slotted rings plus wild mixed clusters between sites; segments
+  carry a visual-only `material` (wall, hedge, glass, rock) with identical
+  collision. Ground texture and site pads render client-side.
+  Squad capacity must be divisible by four.
+- `POST /api/v4/maps/preview`: render the deterministic geometry (sites,
+  cover structures, loot, hazard fields, zone phases) for the same config
+  without starting a match. The browser shows it instantly on lobby creation;
+  a client-side seed of 0 is materialized before creating so preview and lobby
+  match exactly.
+- `POST /api/matches/{id}/robots`: register the immutable source with
+  `sdkVersion: "0.4.0"` and `loadout: { chassis, weapon, modules, utilities }`.
+  Existing ownership checks apply. Empty slots become server bots at start.
+- `POST /api/matches/{id}/start`: owner starts the registered roster.
+- `POST /api/v4/matches/{id}/control`: sandbox owner sends `pause`, `resume`, or
+  `step` in `command`.
+- `GET /api/v4/matches/{id}/view`: authenticated owner's live observation.
+- `GET /ws/matches/{id}`: public full snapshots delayed by 100 simulation ticks.
+- `GET /api/v4/matches/{id}/final`: completed public final state.
+- `GET /api/v4/matches/{id}/replay?page=N`: completed public frames; each page
+  spans 100 simulation ticks and holds up to ten frames.
+- `GET /api/v4/matches/{id}/trace?tick=N`: owner-only replay reconstruction;
+  returns observation, accepted action, and verified state hash.
+- `POST /api/v4/matches/{id}/edit?apply=false`: administrator validates an edit.
+  Use `apply=true` to schedule it. Body requires `expectedRevision` and a future
+  `effectiveTick`; operations are upserts/removals for supported world objects.
+  Scheduled edits are revalidated at application. Rejected edits remain audited.
+- `GET /api/v4/me/script`: own workspace source and SHA-256 revision.
+- `PUT /api/v4/me/script`: save `{source, revision}` and persist a version.
+- `POST /api/v4/me/script/validate`: syntax-check `{source}` in the Lua box.
+- `GET/PUT /api/v4/me/loadout`: read/save the account's default build.
+
+V4 agents connect through the existing credential-protected URL with WebSocket
+subprotocol `robot-arena.v4` and header `X-Robot-SDK-Version: 0.4.0`. Each action
+has `type: "action"`, `version: 4`, `sdkVersion: "0.4.0"`, `sequence`,
+`observedTick`, and `action`. The authenticated connection selects the robot;
+agent payloads cannot assign identity. See [SDK 0.4](lua-sdk-v4.md).
+
+Implementation limits and unverified qualification targets are listed in
+[the v2 status document](arena-v2.md).
+
+### V4 spectator regions
+
+V4 match WebSockets accept camera messages `{x, y, width, height}` in world units.
+Centers must be inside 48000 by 30000; dimensions must be at least 100 and no
+larger than those bounds. Invalid messages close the connection. Each 10 Hz
+snapshot replaces robots, projectiles, containers, mines and fields inside the
+camera rectangle with a 256-unit margin. The `overview` robot roster arrives at
+1 Hz and on the first snapshot. Public obstacles, hazards and transit arrive on
+the first snapshot and whenever `revision` changes. Clients retain that layout
+until replacement, and discard it on reconnect. All data comes from the existing
+5-second-delayed public stream. Camera subscriptions do not change participant
+observation permissions. Legacy WebSocket snapshots retain their existing format.

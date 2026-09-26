@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type MatchStatus string
 
@@ -13,16 +16,18 @@ const (
 )
 
 type RobotSubmission struct {
-	RobotID         string    `json:"robotId"`
-	OwnerBoxID      string    `json:"ownerBoxId,omitempty"`
-	DisplayName     string    `json:"displayName"`
-	Team            string    `json:"team"`
-	ScriptObjectKey string    `json:"scriptObjectKey,omitempty"`
-	StartCommand    string    `json:"startCommand"`
-	Runtime         string    `json:"runtime"`
-	SubmittedAt     time.Time `json:"submittedAt"`
-	PlayerID        string    `json:"-"`
-	Bot             bool      `json:"bot,omitempty"`
+	Loadout         json.RawMessage `json:"loadout,omitempty"`
+	SDKVersion      string          `json:"sdkVersion,omitempty"`
+	RobotID         string          `json:"robotId"`
+	OwnerBoxID      string          `json:"ownerBoxId,omitempty"`
+	DisplayName     string          `json:"displayName"`
+	Team            string          `json:"team"`
+	ScriptObjectKey string          `json:"scriptObjectKey,omitempty"`
+	StartCommand    string          `json:"startCommand"`
+	Runtime         string          `json:"runtime"`
+	SubmittedAt     time.Time       `json:"submittedAt"`
+	PlayerID        string          `json:"-"`
+	Bot             bool            `json:"bot,omitempty"`
 }
 
 type BoxLimits struct {
@@ -94,16 +99,18 @@ type ScriptVersion struct {
 }
 
 type Match struct {
-	MatchID     string      `json:"matchId"`
-	OwnerID     string      `json:"ownerId,omitempty"`
-	Status      MatchStatus `json:"status"`
-	Mode        string      `json:"mode"`
-	MapID       string      `json:"mapId"`
-	ArenaWidth  float64     `json:"arenaWidth"`
-	ArenaHeight float64     `json:"arenaHeight"`
-	Practice    bool        `json:"practice,omitempty"`
-	Seed        int64       `json:"seed"`
-	TickRate    int         `json:"tickRate"`
+	EngineVersion int             `json:"engineVersion,omitempty"`
+	ArenaConfig   json.RawMessage `json:"arenaConfig,omitempty"`
+	MatchID       string          `json:"matchId"`
+	OwnerID       string          `json:"ownerId,omitempty"`
+	Status        MatchStatus     `json:"status"`
+	Mode          string          `json:"mode"`
+	MapID         string          `json:"mapId"`
+	ArenaWidth    float64         `json:"arenaWidth"`
+	ArenaHeight   float64         `json:"arenaHeight"`
+	Practice      bool            `json:"practice,omitempty"`
+	Seed          int64           `json:"seed"`
+	TickRate      int             `json:"tickRate"`
 	// Combat options mirror the engine.Config field types; zero values keep
 	// stock behavior (friendly fire off, no regen, no ramming damage).
 	FriendlyFire    bool `json:"friendlyFire,omitempty"`

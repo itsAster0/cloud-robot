@@ -1,5 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { SnapshotBuffer, angleBetween } from './interpolation';
+  const playback = new SnapshotBuffer();
+  let pose = new Map<string, { x: number; y: number; heading: number }>();
+  let projectilePose = new Map<string, { x: number; y: number }>();
   import type { ArenaItem, RobotState, Snapshot } from './types';
   let { snapshot }: { snapshot: Snapshot | null } = $props();
   let canvas: HTMLCanvasElement;
@@ -49,15 +53,7 @@
   const boomAge = (now: number, at: number) => Math.max(0, Math.min(20, Math.round(((now - at) / 480) * 20)));
 
   function robotPosition(robot: RobotState, now: number) {
-    if (reducedMotion || !previous) return robot;
-    const before = prevRobots.get(robot.robotId);
-    if (!before) return robot;
-    const amount = Math.min(1, (now - receivedAt) / 100);
-    return {
-      x: before.x + (robot.x - before.x) * amount,
-      y: before.y + (robot.y - before.y) * amount,
-      heading: before.heading + (robot.heading - before.heading) * amount,
-    };
+    return reducedMotion ? robot : pose.get(robot.robotId) ?? robot;
   }
 
   // Solo free-for-all matches assign every robot its own team, so non-red and
@@ -170,6 +166,21 @@
 
   function draw(now: number) {
     if (!canvas) return;
+    const sample = playback.sample(now);
+    if (sample) {
+      const old = new Map(sample.before.robots.map(r => [r.robotId, r]));
+      pose = new Map(sample.after.robots.map(r => {
+        const p = old.get(r.robotId) ?? r;
+        const teleported = sample.after.events?.some(e => e.type === 'teleport' && e.robotId === r.robotId);
+        const t = teleported || p.alive !== r.alive ? 1 : sample.amount;
+        return [r.robotId, { x: p.x + (r.x - p.x) * t, y: p.y + (r.y - p.y) * t, heading: angleBetween(p.heading, r.heading, t) }];
+      }));
+      const prior = new Map(sample.before.projectiles.map(p => [p.projectileId, p]));
+      projectilePose = new Map(sample.after.projectiles.map(p => {
+        const old = prior.get(p.projectileId) ?? p;
+        return [p.projectileId, { x: old.x + (p.x - old.x) * sample.amount, y: old.y + (p.y - old.y) * sample.amount }];
+      }));
+    }
     // A 3x/4x backing store costs 2.25x/4x more pixel work than 2x with no
     // useful improvement for this small tactical view.
     const ratio = Math.min(window.devicePixelRatio || 1, 2), worldWidth = target?.width ?? 800, worldHeight = target?.height ?? 500;
@@ -227,9 +238,10 @@
       if (share > 0) { drawContext.strokeStyle = share > .5 ? '#b9f542' : '#ffc857'; drawContext.lineWidth = 2; drawContext.beginPath(); drawContext.arc(x, y, size + 4 * scale, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * share); drawContext.stroke(); }
     }
     for (const projectile of target.projectiles ?? []) {
-      const x = projectile.x * scale, y = projectile.y * scale;
+      const position = reducedMotion ? projectile : projectilePose.get(projectile.projectileId) ?? projectile;
+      const x = position.x * scale, y = position.y * scale;
       const teamColor = projectile.team === 'red' ? 'rgba(255,91,77,.45)' : projectile.team === 'blue' ? 'rgba(84,167,255,.45)' : 'rgba(223,255,134,.45)';
-      drawContext.strokeStyle = teamColor; drawContext.lineWidth = 2 * scale; drawContext.beginPath(); drawContext.moveTo((projectile.x - projectile.vx * .7) * scale, (projectile.y - projectile.vy * .7) * scale); drawContext.lineTo(x, y); drawContext.stroke();
+      drawContext.strokeStyle = teamColor; drawContext.lineWidth = 2 * scale; drawContext.beginPath(); drawContext.moveTo((position.x - projectile.vx * .7) * scale, (position.y - projectile.vy * .7) * scale); drawContext.lineTo(x, y); drawContext.stroke();
       const halo = glow('#b9f542', 10), haloSize = 20 * scale;
       drawContext.drawImage(halo, x - haloSize / 2, y - haloSize / 2, haloSize, haloSize);
       drawContext.fillStyle = '#dfff86'; drawContext.beginPath(); drawContext.arc(x, y, 4 * scale, 0, Math.PI * 2); drawContext.fill();
@@ -312,6 +324,7 @@
     target = snapshot;
     targetRobots = new Map(target.robots.map((robot) => [robot.robotId, robot]));
     receivedAt = performance.now();
+    playback.push(snapshot, receivedAt);
     recordExplosions(snapshot);
     wakeFrame();
   });

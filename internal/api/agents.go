@@ -67,6 +67,8 @@ type agentAction struct {
 }
 
 type AgentSession struct {
+	v4               bool
+	mailbox          *v4Mailbox
 	robotID          string
 	matchID          string
 	connection       *websocket.Conn
@@ -133,9 +135,9 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 		case <-s.closed:
 			return engine.Intent{}, errAgentDisconnected
 		case <-timer.C:
-			fallback := s.last
+			fallback := engine.Intent{}
 			fallback.ResponseMS = 150
-			fallback.Logs = append(fallback.Logs, "response deadline missed; reusing last action")
+			fallback.Logs = append(fallback.Logs, "response deadline missed; controls neutralized")
 			return fallback, nil
 		case action := <-s.responses:
 			if action.RequestID != requestID {
@@ -226,7 +228,10 @@ func (m *AgentManager) reconnectIntent(robotID string) (engine.Intent, bool) {
 	if !disconnected || time.Since(disconnectedAt) > 30*time.Second {
 		return engine.Intent{}, false
 	}
-	last.Logs = append(last.Logs, "agent disconnected; reusing last action during reconnect grace")
+	if time.Since(disconnectedAt) > 250*time.Millisecond {
+		last = engine.Intent{}
+	}
+	last.Logs = append(last.Logs, "agent disconnected; reconnect grace active")
 	return last, true
 }
 

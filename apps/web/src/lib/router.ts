@@ -1,5 +1,7 @@
+export type WorkspacePanel = 'code' | 'build' | 'match' | 'debug' | 'results';
+
 export type RouteName =
-  | 'home' | 'play' | 'match' | 'match-detail' | 'matches' | 'box'
+  | 'v2' | 'workspace' | 'home' | 'play' | 'match' | 'match-detail' | 'matches' | 'box'
   | 'sdk' | 'api-docs' | 'profile' | 'leaderboard' | 'create' | 'settings'
   | 'spectate' | 'tournaments' | 'admin' | 'not-found';
 
@@ -7,10 +9,25 @@ export interface Route {
   name: RouteName;
   path: string;
   parameter?: string;
+  panel?: WorkspacePanel;
 }
 
 export function parseRoute(hash: string): Route {
-  const path = decodeURIComponent(hash.replace(/^#/, '') || '/').replace(/\/+$/, '') || '/';
+  const rawPath = hash.replace(/^#/, '') || '/';
+  let path: string;
+  try {
+    path = decodeURIComponent(rawPath).replace(/\/+$/, '') || '/';
+  } catch {
+    return { name: 'not-found', path: rawPath };
+  }
+  const workspacePanels: Record<string, WorkspacePanel> = {
+    '/workspace': 'code', '/workspace/code': 'code', '/workspace/build': 'build',
+    '/workspace/matches': 'match', '/workspace/match': 'match',
+    '/workspace/test': 'debug', '/workspace/debug': 'debug', '/workspace/results': 'results',
+  };
+  if (workspacePanels[path]) return { name: 'workspace', path, panel: workspacePanels[path] };
+  const v2 = path.match(/^\/v2(?:\/([^/]+))?$/);
+  if (v2) return {name:'v2',path,parameter:v2[1]};
   const matchDetail = path.match(/^\/match\/([^/]+)\/detail$/);
   if (matchDetail) return { name: 'match-detail', path, parameter: matchDetail[1] };
   const match = path.match(/^\/match\/([^/]+)$/);

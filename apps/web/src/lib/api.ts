@@ -6,7 +6,7 @@ export function setTokenProvider(provider: (() => Promise<string>) | null) {
   tokenProvider = provider;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let authorization: Record<string, string> = {};
   if (tokenProvider) {
     const token = await tokenProvider();
@@ -16,7 +16,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { 'Content-Type': 'application/json', ...authorization, ...init?.headers },
   });
-  const body = (await response.json()) as T & { error?: string };
+  const text = await response.text();
+  let body: T & { error?: string };
+  try { body = JSON.parse(text); }
+  catch {
+    const endpoint = path.split('?')[0];
+    if (response.status === 404) {
+      throw new Error(`API route not found: ${init?.method ?? 'GET'} ${endpoint} (404). Check the match ID or rebuild the Docker API to match this client.`);
+    }
+    throw new Error(`Arena API unavailable (${response.status}) at ${endpoint}. Check that the Go server is running.`);
+  }
   if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
   return body;
 }
