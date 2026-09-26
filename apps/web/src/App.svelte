@@ -552,9 +552,6 @@
           <a href="#/settings" aria-current={view.name === 'settings' ? 'page' : undefined}>Account settings</a>
           <a href="#/docs/api">API reference</a>
           {#if cloud?.status !== 'ready'}<button onclick={refreshServices} disabled={checkingServices}>{checkingServices ? 'Checking services…' : 'Retry service connection'}</button>{/if}
-          <span class="menu-label">Classic arena</span>
-          <a href="#/play">Classic play</a>
-          <a href="#/leaderboard">Classic rankings</a>
         </nav>
       </details>
       {#if user}<button class="auth-button" onclick={signOut} title={`Sign out of ${user.email}`}>{user.firstName ?? 'Account'} <span>· Sign out</span></button>{:else}<button class="auth-button sign-in" disabled={signingIn} onclick={handleSignIn}>{signingIn ? 'Signing in…' : 'Sign in'}</button>{/if}

@@ -89,18 +89,120 @@ local function segment_intersects_circle(x1, y1, x2, y2, obstacle)
   return (nearest_x - obstacle.x) ^ 2 + (nearest_y - obstacle.y) ^ 2 <= radius ^ 2
 end
 
+-- Uniform-grid index over an obstacle array, built once per array and cached
+-- weakly: the SDK reuses one array per geometry revision, so dense maps pay
+-- the build cost once instead of scanning every obstacle per query.
+local INDEX_CELL = 256
+local INDEX_MIN = 48
+local index_cache = setmetatable({}, { __mode = "k" })
+local function obstacle_bounds(o)
+  if o.shape == "circle" or o.radius ~= nil then
+    local r = o.radius or 0
+    return o.x - r, o.y - r, o.x + r, o.y + r
+  end
+  return o.x or 0, o.y or 0, (o.x or 0) + (o.width or 0), (o.y or 0) + (o.height or 0)
+end
+local function cell_key(cx, cy) return cx * 1048576 + cy end
+local function obstacle_index(obstacles)
+  if #obstacles < INDEX_MIN then return nil end
+  local index = index_cache[obstacles]
+  if index and index.count == #obstacles then return index end
+  index = { cells = {}, count = #obstacles, stamp = 0, seen = {} }
+  for i, o in ipairs(obstacles) do
+    local x0, y0, x1, y1 = obstacle_bounds(o)
+    for cx = math.floor(x0 / INDEX_CELL), math.floor(x1 / INDEX_CELL) do
+      for cy = math.floor(y0 / INDEX_CELL), math.floor(y1 / INDEX_CELL) do
+        local key = cell_key(cx, cy)
+        local cell = index.cells[key]
+        if not cell then cell = {}; index.cells[key] = cell end
+        cell[#cell + 1] = i
+      end
+    end
+  end
+  index_cache[obstacles] = index
+  return index
+end
+-- Calls visit(obstacle) once for each obstacle whose cells overlap the box;
+-- stops early and returns true when visit returns true.
+local function each_candidate(obstacles, x0, y0, x1, y1, visit)
+  local index = obstacle_index(obstacles)
+  if not index then
+    for _, o in ipairs(obstacles) do if visit(o) then return true end end
+    return false
+  end
+  index.stamp = index.stamp + 1
+  local stamp, seen = index.stamp, index.seen
+  for cx = math.floor(math.min(x0, x1) / INDEX_CELL), math.floor(math.max(x0, x1) / INDEX_CELL) do
+    for cy = math.floor(math.min(y0, y1) / INDEX_CELL), math.floor(math.max(y0, y1) / INDEX_CELL) do
+      local cell = index.cells[cell_key(cx, cy)]
+      if cell then
+        for _, i in ipairs(cell) do
+          if seen[i] ~= stamp then
+            seen[i] = stamp
+            if visit(obstacles[i]) then return true end
+          end
+        end
+      end
+    end
+  end
+  return false
+end
+local function segment_blocked_by(x1, y1, x2, y2, obstacle)
+  if obstacle.shape == "circle" or obstacle.radius ~= nil then
+    return segment_intersects_circle(x1, y1, x2, y2, obstacle)
+  end
+  return segment_intersects_aabb(x1, y1, x2, y2, obstacle)
+end
+
 function arena.line_of_sight(x1, y1, x2, y2, obstacles)
   obstacles = obstacles or (latest_observation and latest_observation.obstacles) or {}
-  for _, obstacle in ipairs(obstacles) do
-    local blocked
-    if obstacle.shape == "circle" or obstacle.radius ~= nil then
-      blocked = segment_intersects_circle(x1, y1, x2, y2, obstacle)
-    else
-      blocked = segment_intersects_aabb(x1, y1, x2, y2, obstacle)
+  -- Long segments walk the grid in short pieces so only nearby cells are read.
+  local length = math.sqrt((x2 - x1) ^ 2 + (y2 - y1) ^ 2)
+  local pieces = math.max(1, math.ceil(length / INDEX_CELL))
+  for n = 0, pieces - 1 do
+    local ax, ay = x1 + (x2 - x1) * n / pieces, y1 + (y2 - y1) * n / pieces
+    local bx, by = x1 + (x2 - x1) * (n + 1) / pieces, y1 + (y2 - y1) * (n + 1) / pieces
+    if each_candidate(obstacles, ax, ay, bx, by, function(o) return segment_blocked_by(x1, y1, x2, y2, o) end) then
+      return false
     end
-    if blocked then return false end
   end
   return true
+end
+
+-- Distance along `heading` (degrees) to the first obstacle, capped at
+-- max_distance. Returns the distance and the obstacle hit, if any.
+function arena.raycast(x, y, heading, max_distance, obstacles)
+  obstacles = obstacles or (latest_observation and latest_observation.obstacles) or {}
+  max_distance = max_distance or 1000
+  local radians = math.rad(heading)
+  local ex, ey = x + math.cos(radians) * max_distance, y + math.sin(radians) * max_distance
+  if arena.line_of_sight(x, y, ex, ey, obstacles) then return max_distance, nil end
+  local low, high, hit = 0, max_distance, nil
+  for _ = 1, 14 do
+    local mid = (low + high) / 2
+    local mx, my = x + math.cos(radians) * mid, y + math.sin(radians) * mid
+    local blocker
+    each_candidate(obstacles, x, y, mx, my, function(o)
+      if segment_blocked_by(x, y, mx, my, o) then blocker = o; return true end
+    end)
+    if blocker then high, hit = mid, blocker else low = mid end
+  end
+  return high, hit
+end
+
+-- Obstacles whose bounds come within `radius` of (x, y), nearest first.
+function arena.obstacles_near(observation, x, y, radius)
+  local found = {}
+  each_candidate(observation.obstacles or {}, x - radius, y - radius, x + radius, y + radius, function(o)
+    local x0, y0, x1, y1 = obstacle_bounds(o)
+    local nx, ny = clamp(x, x0, x1), clamp(y, y0, y1)
+    local d = math.sqrt((nx - x) ^ 2 + (ny - y) ^ 2)
+    if d <= radius then found[#found + 1] = { obstacle = o, distance = d } end
+  end)
+  table.sort(found, function(a, b) return a.distance < b.distance end)
+  local list = {}
+  for i, entry in ipairs(found) do list[i] = entry.obstacle end
+  return list
 end
 
 function arena.path_to(x, y, observation)
@@ -476,15 +578,15 @@ function arena.teammates(observation)
   return found
 end
 
-local function point_blocked(x, y, obstacles)
-  for _, obstacle in ipairs(obstacles) do
+local function point_blocked(x, y, obstacles, margin)
+  margin = margin or 0
+  return each_candidate(obstacles, x - margin, y - margin, x + margin, y + margin, function(obstacle)
     if obstacle.shape == "circle" or obstacle.radius ~= nil then
-      if (x - obstacle.x) ^ 2 + (y - obstacle.y) ^ 2 <= (obstacle.radius or 0) ^ 2 then return true end
-    elseif x >= obstacle.x and x <= obstacle.x + (obstacle.width or 0) and y >= obstacle.y and y <= obstacle.y + (obstacle.height or 0) then
-      return true
+      return (x - obstacle.x) ^ 2 + (y - obstacle.y) ^ 2 <= ((obstacle.radius or 0) + margin) ^ 2
     end
-  end
-  return false
+    local x0, y0, x1, y1 = obstacle_bounds(obstacle)
+    return x >= x0 - margin and x <= x1 + margin and y >= y0 - margin and y <= y1 + margin
+  end)
 end
 
 -- Deterministic ring sampling around (x, y): a small LCG seeded from the
@@ -684,6 +786,104 @@ function arena.strafe_around(obs, enemy, direction)
   local radians = side * math.pi / 180
   local point = { x = enemy.x + math.cos(radians) * 120, y = enemy.y + math.sin(radians) * 120 }
   return arena.drive_to(obs, point, { aim = aim, fire = arena.weapon_ready(obs), label = "STRAFE" })
+end
+
+-- Nearest reachable point hidden from `threat` behind nearby cover. Scans
+-- obstacles within opts.radius (default 500) and returns the closest clear
+-- spot on each obstacle's far side, or nil when nothing nearby blocks sight.
+function arena.find_cover(obs, threat, opts)
+  opts = opts or {}
+  local self, obstacles = obs.self, obs.obstacles or {}
+  local best, best_distance, best_obstacle
+  for _, o in ipairs(arena.obstacles_near(obs, self.x, self.y, opts.radius or 500)) do
+    local x0, y0, x1, y1 = obstacle_bounds(o)
+    local cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    local dx, dy = cx - threat.x, cy - threat.y
+    local length = math.sqrt(dx * dx + dy * dy)
+    if length > 1 then
+      local reach = math.sqrt((x1 - x0) ^ 2 + (y1 - y0) ^ 2) / 2 + (opts.clearance or 30)
+      local spot = { x = cx + dx / length * reach, y = cy + dy / length * reach }
+      local inside = (not obs.arenaWidth or (spot.x > 20 and spot.x < obs.arenaWidth - 20))
+        and (not obs.arenaHeight or (spot.y > 20 and spot.y < obs.arenaHeight - 20))
+      if inside and not point_blocked(spot.x, spot.y, obstacles, 18)
+        and not arena.line_of_sight(threat.x, threat.y, spot.x, spot.y, obstacles) then
+        local d = arena.distance(self, spot)
+        if not best_distance or d < best_distance then best, best_distance, best_obstacle = spot, d, o end
+      end
+    end
+  end
+  return best, best_obstacle
+end
+
+-- Remembers enemies after they leave sight. Call arena.update_contacts every
+-- decision; it returns contacts with `age` (ticks since seen) and a position
+-- extrapolated from last velocity for up to one second. Contacts older than
+-- ttl ticks (default 200, ten seconds) are forgotten.
+function arena.contact_tracker(ttl)
+  return { ttl = ttl or 200, contacts = {} }
+end
+function arena.update_contacts(tracker, obs)
+  local self = obs.self
+  for _, robot in ipairs(obs.robots or {}) do
+    if robot.team ~= self.team then
+      if robot.alive == false then
+        tracker.contacts[robot.robotId] = nil
+      else
+        tracker.contacts[robot.robotId] = { robotId = robot.robotId, team = robot.team, x = robot.x, y = robot.y,
+          vx = robot.vx or 0, vy = robot.vy or 0, hp = robot.hp, weapon = robot.weapon, seenTick = obs.tick }
+      end
+    end
+  end
+  local list = {}
+  for id, c in pairs(tracker.contacts) do
+    local age = obs.tick - c.seenTick
+    if age > tracker.ttl then
+      tracker.contacts[id] = nil
+    else
+      local lead = math.min(age, 20) / (obs.tickRate or 20)
+      list[#list + 1] = { robotId = c.robotId, team = c.team, hp = c.hp, weapon = c.weapon, age = age,
+        visible = age == 0, x = c.x + c.vx * lead, y = c.y + c.vy * lead, lastX = c.x, lastY = c.y }
+    end
+  end
+  table.sort(list, function(a, b)
+    if a.age ~= b.age then return a.age < b.age end
+    return a.robotId < b.robotId
+  end)
+  return list
+end
+
+-- Best visible enemy to shoot: in range with line of sight, scored by
+-- distance plus weighted health so weak nearby targets win. Returns the
+-- robot and its score, or nil.
+function arena.best_target(obs, opts)
+  opts = opts or {}
+  local self, range, hp_weight = obs.self, opts.range or 700, opts.hpWeight or 3
+  local best, best_score
+  for _, robot in ipairs(obs.robots or {}) do
+    if robot.alive ~= false and robot.team ~= self.team then
+      local d = arena.distance(self, robot)
+      if d <= range and arena.line_of_sight(self.x, self.y, robot.x, robot.y, obs.obstacles) then
+        local score = d + (robot.hp or 100) * hp_weight
+        if not best_score or score < best_score or (score == best_score and robot.robotId < best.robotId) then
+          best, best_score = robot, score
+        end
+      end
+    end
+  end
+  return best, best_score
+end
+
+-- Nearest site, optionally filtered by kind (e.g. "armoury") or biome.
+function arena.nearest_site(obs, filter)
+  filter = filter or {}
+  local best, best_distance
+  for _, site in ipairs(obs.sites or {}) do
+    if (not filter.kind or site.kind == filter.kind) and (not filter.biome or site.biome == filter.biome) then
+      local d = arena.distance(obs.self, site)
+      if not best_distance or d < best_distance then best, best_distance = site, d end
+    end
+  end
+  return best, best_distance
 end
 
 function arena.run(config)
