@@ -93,7 +93,21 @@ export interface AdminStatus {
   cloud: Record<string, string>;
 }
 
+export interface WeaponSlotState { kind: string; heat: number; readyAt: number; overheated: boolean }
+export interface InventoryStack { kind: string; count: number }
+
 export interface RobotState {
+  // Engine v4 public fields.
+  bot?: boolean;
+  effects?: string[];
+  // Engine v4 owner-only fields, present in your robot's private observation.
+  loadout?: { chassis: string; weapon: string; modules: string[]; utilities: string[] };
+  weapons?: WeaponSlotState[];
+  activeWeapon?: number;
+  inventory?: InventoryStack[];
+  charges?: Record<string, number>;
+  cooldowns?: Record<string, number>;
+  actionResults?: string[];
   maxHp?: number;
   turretHeading?: number;
   energy?: number;

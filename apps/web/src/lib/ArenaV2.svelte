@@ -7,17 +7,9 @@
   import VirtualRoster from './VirtualRoster.svelte';
   import MapPreview, { type MapPreviewData } from './MapPreview.svelte';
   import MatchOverview from './MatchOverview.svelte';
+  import MatchSetup from './MatchSetup.svelte';
+  import RobotInspector from './RobotInspector.svelte';
   import { killsLeader } from './matchStats';
-  import Button from './components/ui/button.svelte';
-  import Card from './components/ui/card.svelte';
-  import CardHeader from './components/ui/card-header.svelte';
-  import CardTitle from './components/ui/card-title.svelte';
-  import CardContent from './components/ui/card-content.svelte';
-  import Input from './components/ui/input.svelte';
-  import Label from './components/ui/label.svelte';
-  import Select from './components/ui/select.svelte';
-  import Slider from './components/ui/slider.svelte';
-  import Badge from './components/ui/badge.svelte';
   type Panel = 'code' | 'build' | 'match' | 'debug' | 'results';
   let { signedIn, matchId = '', initialPanel = 'code', onSignIn }: { signedIn: boolean; matchId?: string; initialPanel?: Panel; onSignIn?: () => void } = $props();
   const stages: { id: Panel; label: string; href: string }[] = [
@@ -101,7 +93,8 @@
   let dirty = $derived(editorLoaded && source !== savedSource);
   let registered = $derived(!!box && !!match?.robots.some(robot => robot.ownerBoxId === box?.boxId || robot.robotId === box?.activeRobotId));
   let canRegister = $derived(signedIn && box?.status === 'running' && !!box.keyFingerprint && !dirty && cost <= 60);
-  let chosen = $derived(snapshot?.robots.find(r => r.robotId === selected) ?? snapshot?.robots[0]);
+  let inspected = $derived(selected ? snapshot?.robots.find(r => r.robotId === selected) ?? overview.find(r => r.robotId === selected) : undefined);
+  function closeMatch() { clearTimeout(retryTimer); const current = socket; socket = null; current?.close(); match = null; snapshot = null; overview = []; replayEnd = 0; selected = ''; matchPreview = null; idInput = ''; if (window.location.hash.startsWith('#/v2/')) window.location.hash = '#/workspace/matches'; }
   const title = (id: string) => ({ 'br-solo': 'Solo battle royale', 'br-squad': 'Squad battle royale', 'quick-duel': 'Quick duel', sandbox: 'Sandbox' }[id] ?? id.replace(/_/g, ' '));
   async function task(fn: () => Promise<void>) { busy = true; error = ''; message = ''; try { await fn(); } catch (e) { error = e instanceof Error ? e.message : String(e); } finally { busy = false; } }
   function loadout(): Loadout { return { chassis, weapon, modules: [...modules], utilities: [...utilities] }; }
@@ -220,32 +213,11 @@
           <p class="hint">Registration uses the loadout shown here. Changes affect your next match.</p>
         </section>
       {:else if panel === 'match' || panel === 'debug'}
-        <section class="surface controls"><div class="section-heading"><div><p class="eyebrow">{panel === 'debug' ? 'TEST ENVIRONMENT' : 'NEW MATCH'}</p><h2>{panel === 'debug' ? 'Run a controlled test' : 'Choose your arena'}</h2></div></div>
-          {#if panel === 'debug'}<p class="hint">Use sandbox mode to pause the simulation and inspect a tick at a time.</p>{#if mode !== 'sandbox'}<button class="full" onclick={() => { mode = 'sandbox'; modeDefaults(); }}>Use sandbox settings</button>{/if}{/if}
-          <label>Game mode<select bind:value={mode} onchange={modeDefaults}><option value="br-solo">Solo battle royale</option><option value="br-squad">Squad battle royale</option><option value="sandbox">Sandbox</option><option value="quick-duel">Quick duel</option></select></label>
-          <label>Total robot slots <strong>{capacity}</strong><input type="range" min={mode === 'br-squad' ? 4 : mode === 'quick-duel' ? 2 : 1} max={mode === 'quick-duel' ? 2 : 256} step={mode === 'br-squad' ? 4 : 1} bind:value={capacity}/></label>
-          <p class="hint">Empty slots become server bots. Start small for local tests.</p>
-          <details class="advanced"><summary>Map and simulation settings</summary>
-            {#if mode === 'br-solo' || mode === 'br-squad'}
-              <label>World size<select bind:value={size}><option value={20}>24,000 × 15,000 · skirmish</option><option value={30}>36,000 × 22,500 · standard</option><option value={35}>42,000 × 26,250 · large</option><option value={40}>48,000 × 30,000 · max</option></select></label>
-              <label>Sites · {siteCount}<input type="range" min="4" max="128" step="4" bind:value={siteCount}/></label>
-              <label>Cover per site · {coverPerSite}<input type="range" min="0" max="12" step="1" bind:value={coverPerSite}/></label>
-              <label>Loot per site · {lootPerSite}<input type="range" min="0" max="32" step="1" bind:value={lootPerSite}/></label>
-            {:else}<p class="hint">Practice map · 2,400 × 1,500 units</p>{/if}
-            <label>Map seed<span class="seed-row"><input type="number" min="0" max="999999" bind:value={seed}/><button onclick={randomizeSeed} disabled={busy}>Randomize</button></span></label>
-            <p class="hint">Zero chooses a new seed when you create the lobby.</p>
-            <label>Duration in seconds<input type="number" min="10" max="2700" bind:value={duration}/></label>
-            <label class="check"><input type="checkbox" bind:checked={liveEdit}/>Allow admin map edits</label>
-          </details>
-          <button class="primary full" onclick={create} disabled={busy || !signedIn}>{busy ? 'Working…' : 'Create lobby'}</button>
-          {#if !signedIn}<button class="quiet full" onclick={onSignIn}>Sign in to create a match →</button>{/if}
-          <p class="hint">All Arena V2 modes are currently unranked.</p>
-          {#if mapPreview}<div class="preview-block"><p class="eyebrow">{previewLoading ? 'UPDATING MAP' : 'MAP PREVIEW'}</p><MapPreview preview={mapPreview}/></div>{/if}
+        <section class="surface controls"><p class="eyebrow">{panel === 'debug' ? 'TEST ENVIRONMENT' : 'NEW MATCH'}</p><h2>{match ? 'Current arena open' : panel === 'debug' ? 'Set up a sandbox' : 'Set up a match'}</h2>
+          <p class="hint">{match ? 'Close the current arena to configure a new one.' : 'Pick a mode, size, and map on the right, then create the lobby.'}</p>
+          {#if match}<button class="primary full" onclick={closeMatch}>New match setup</button>{/if}
         </section>
         {#if panel === 'debug'}
-          <section class="surface controls debugger"><p class="eyebrow">ROBOT INSPECTOR</p><h2>{chosen?.name ?? 'No robot selected'}</h2>
-            {#if chosen}<dl><div><dt>Health</dt><dd>{Math.round(chosen.hp)} / {chosen.maxHp ?? 100}</dd></div><div><dt>Energy</dt><dd>{Math.round(chosen.energy ?? 0)}</dd></div><div><dt>Last response</dt><dd>{(chosen.lastResponseMs ?? 0).toFixed(1)} ms</dd></div><div><dt>Last action</dt><dd>{chosen.lastAction || 'No action reported'}</dd></div></dl><h3>Robot logs</h3><pre>{chosen.logs?.join('\n') || 'No logs in this snapshot.'}</pre>{:else}<p class="hint">Start a test, then select a robot in the roster. Your live observations show what your own robot can see.</p>{/if}
-          </section>
           <details class="surface controls advanced"><summary>Advanced map editing</summary><p class="hint">Requires an admin account and a match with live editing enabled. Use a future tick and the current revision.</p><textarea class="code" aria-label="Map edit JSON" bind:value={edit} spellcheck="false"></textarea><div class="actions"><button onclick={() => mapEdit(false)} disabled={busy || !match}>Preview</button><button onclick={() => mapEdit(true)} disabled={busy || !preview || !match}>Schedule edit</button></div>{#if preview}<pre>{preview}</pre>{/if}</details>
         {/if}
       {:else if panel === 'results'}
@@ -262,7 +234,9 @@
     <main>
       <section class="surface arena-panel">
         <div class="matchbar"><div><p class="eyebrow">{match ? 'CURRENT ARENA' : 'RUN & OBSERVE'}</p><h2><span class="status-dot" class:live={match?.status === 'running'}></span>{match ? title(match.mode) : 'Your next run starts here'}</h2>{#if match}<a class="match-id" href={`#/v2/${match.matchId}`}>{match.matchId}</a>{/if}</div>{#if match}<span class="state-label">{match.status}</span>{/if}</div>
-        {#if !match}
+        {#if !match && (panel === 'match' || panel === 'debug')}
+          <div class="setup-wrap"><MatchSetup bind:mode bind:capacity bind:size bind:duration bind:siteCount bind:coverPerSite bind:lootPerSite bind:seed bind:liveEdit {signedIn} {busy} preview={mapPreview} {previewLoading} testing={panel === 'debug'} onmodechange={modeDefaults} oncreate={create} onrandomize={randomizeSeed} {onSignIn}/></div>
+        {:else if !match}
           <div class="empty-arena"><div class="arena-mark" aria-hidden="true"><span>lua</span><span>→</span><span>arena</span></div><h2>Turn a script into a competitor.</h2><p>Keep your code and tools together. Run a small sandbox, inspect what happened, then bring the same robot into a match.</p>
             <ol class="run-steps"><li class:done={editorLoaded && !dirty}><span>01</span><div><strong>Prepare your script</strong><p>Load main.lua or deploy a strategy, then save your changes.</p></div></li><li><span>02</span><div><strong>Test and debug</strong><p>Create a sandbox, register your robot, and start the simulation.</p></div></li><li><span>03</span><div><strong>Compete and review</strong><p>Choose a mode. Replay a finished match to improve your next run.</p></div></li></ol>
             <div class="actions">{#if !signedIn}<button class="primary" onclick={onSignIn}>Sign in to start coding</button><a href="#/workspace/matches">Browse arenas →</a>{:else}<button class="primary" onclick={prepareSandbox}>Set up a sandbox →</button><a href="#/docs/sdk">Read the Lua SDK</a>{/if}</div>
@@ -282,7 +256,7 @@
           {#if match.status === 'finished'}<div class="result-heading"><div><p class="eyebrow">MATCH COMPLETE</p><h2>{match.winnerTeam ? `${match.winnerTeam} wins` : 'Final results'}</h2></div><button onclick={() => showPanel('code')}>Revise your script →</button></div>{/if}
           {#if replayEnd > 0}<div class="replay"><label>Replay <strong>{(replayTick / (snapshot?.tickRate ?? 20)).toFixed(1)}s / {(replayEnd / (snapshot?.tickRate ?? 20)).toFixed(1)}s</strong><input aria-label="Replay tick" type="range" min="0" max={replayEnd} step="10" bind:value={replayTick} onchange={seekReplay}/></label><button onclick={inspectTrace} disabled={busy || !signedIn}>Inspect my decision at this tick</button>{#if trace}<pre>{trace}</pre>{/if}</div>{/if}
           {#if snapshot || match.status === 'running' || match.status === 'finished'}
-            {#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion}/>{/key}
+            <div class="world-split"><div class="world-main">{#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} onselect={id => selected = id}/>{/key}</div><aside class="world-side" aria-label="Robot inspector"><RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/></aside></div>
             {#if match.status !== 'finished'}<div class="view-controls"><label class="check"><input type="checkbox" bind:checked={privateView} disabled={!signedIn || !registered} onchange={() => snapshot = null}/>My robot's live view</label><span>{connectionStatus} · {privateView ? 'Robot observations' : 'Public view delayed 5s'}</span></div>{/if}
             {#if match.status === 'running' && !snapshot}<p class="hint loading-snapshot">Waiting for a snapshot. Public spectating starts after five seconds of simulation.</p>{/if}
             <MatchOverview {snapshot} youId={privateView ? selected : ''}/>
@@ -296,13 +270,15 @@
   </div>
 </section>
 <style>
+  .v2 .setup-wrap { padding:20px 22px; }
+  .v2 .world-split { display:grid; gap:16px; padding:0 22px 16px; grid-template-columns:minmax(0,1fr); }
+  @media (min-width:1280px) { .v2 .world-split { grid-template-columns:minmax(0,1fr) 320px; align-items:start; } }
   .v2 { --v2-bg:#0d141d; --v2-panel:#111c27; --v2-border:#263544; --v2-text:#e0e8ef; --v2-muted:#91a2b3; --v2-accent:#73dfc7; color:var(--v2-text); max-width:1640px; padding:32px clamp(18px,3vw,44px) 52px; margin:auto; }
   .v2 .workspace-header { display:flex; justify-content:space-between; align-items:center; gap:24px; margin-bottom:27px; }
   .v2 .eyebrow { font:500 10px/1.5 'DM Mono',monospace; letter-spacing:.13em; color:var(--v2-muted); margin:0 0 8px; }
   .v2 .eyebrow span { color:#60768c; margin-left:8px; }
   .v2 h1 { font-size:clamp(25px,3vw,36px); line-height:1.2; letter-spacing:-.035em; margin:0; font-weight:600; }
   .v2 h2 { font-size:17px; line-height:1.3; margin:0; font-weight:600; letter-spacing:-.02em; }
-  .v2 h3 { font-size:12px; font-weight:500; margin:20px 0 10px; }
   .v2 .lede { font-size:13px; color:var(--v2-muted); margin:10px 0 0; }
   .v2 a { color:var(--v2-accent); text-decoration:none; }
   .v2 a:hover { text-decoration:underline; }
@@ -382,9 +358,6 @@
   .v2 .workspace-footnote { display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; font:9px 'DM Mono',monospace; color:#70869a; margin-top:14px; }
   .v2 .advanced { margin:20px 0; }
   .v2 .advanced summary { color:#b7c5d2; font-size:12px; cursor:pointer; padding:3px 0; }
-  .v2 .seed-row { display:flex; gap:7px; align-items:end; }
-  .v2 .seed-row button { height:40px; }
-  .v2 .preview-block { border-top:1px solid var(--v2-border); margin-top:20px; padding-top:20px; }
   .v2 .recent h2 { font-size:13px; }
   .v2 .recent .section-heading { margin-bottom:8px; }
   .v2 .match-row { display:flex; align-items:center; justify-content:space-between; gap:10px; width:100%; text-align:left; margin-top:6px; padding:12px 9px; background:transparent; border:1px solid transparent; }
@@ -405,10 +378,6 @@
   .v2 .replay label { margin:0 0 12px; }
   .v2 pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; max-height:280px; background:#090f17; border:1px solid var(--v2-border); padding:13px; color:#bdcdda; font:11px/1.65 'DM Mono',monospace; border-radius:5px; }
   .v2 .code { min-height:180px; resize:vertical; }
-  .v2 .debugger dl { font-size:12px; }
-  .v2 .debugger dl > div { display:flex; justify-content:space-between; gap:10px; padding:10px 0; border-bottom:1px solid var(--v2-border); }
-  .v2 .debugger dt { color:var(--v2-muted); }
-  .v2 .debugger dd { margin:0; overflow-wrap:anywhere; }
   @media (max-width:1100px) { .v2 .workspace-v2.editing { grid-template-columns:minmax(0,1fr); } .v2 .workspace-v2.editing .empty-arena { display:none; } .v2 .workflow a { padding-inline:14px; } }
   @media (max-width:850px) { .v2 .workspace-v2 { grid-template-columns:minmax(0,1fr); } .v2 .workspace-header { align-items:start; } .v2 .workspace-meta { font-size:11px; } .v2 .workflow a { padding-inline:11px; } .v2 .setup-note { flex-wrap:wrap; } .v2 .setup-note > div { flex-basis:100%; } }
   @media (max-width:560px) { .v2 { padding-top:22px; } .v2 .workspace-header { flex-direction:column; gap:16px; } .v2 .workspace-meta { flex-direction:row; align-items:center; justify-content:space-between; width:100%; } .v2 .workflow { gap:0; } .v2 .workflow a { padding-inline:10px; font-size:12px; } .v2 .workflow a span { display:none; } .v2 .join { flex-wrap:wrap; } .v2 .join label { flex-basis:100%; } .v2 .join button { width:100%; } .v2 .result-heading { flex-wrap:wrap; } .v2 .robot-fields { flex-direction:column; gap:0; } }

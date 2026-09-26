@@ -3,6 +3,6 @@
   let { class: klass = '', children }: { class?: string; children?: import('svelte').Snippet } = $props();
 </script>
 
-<div class={cn('rounded-xl border border-border bg-card text-card-foreground shadow-sm', klass)}>
+<p class={cn('text-xs text-muted-foreground', klass)}>
   {@render children?.()}
-</div>
+</p>
