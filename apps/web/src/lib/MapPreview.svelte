@@ -3,7 +3,8 @@
   export interface MapPreviewData {
     width: number;
     height: number;
-    sites: { x: number; y: number; kind: string }[];
+    seed?: number;
+    sites: { x: number; y: number; kind: string; biome?: string }[];
     obstacles: { x: number; y: number; width: number; height: number; material?: string }[];
     transit: { x: number; y: number }[];
     containers: { x: number; y: number }[];
@@ -74,7 +75,8 @@
       c.fillStyle = color;
       c.beginPath(); c.arc(X(s.x), Y(s.y), 3, 0, Math.PI * 2); c.fill();
       c.font = '9px monospace'; c.textAlign = 'center';
-      c.fillText(siteLabel(s.kind), X(s.x), Y(s.y) - 310 * scale);
+      // Labels only read on sparse maps; dense worlds show colour-coded pads.
+      if (preview.sites.length <= 16) c.fillText(siteLabel(s.kind), X(s.x), Y(s.y) - 310 * scale);
       c.textAlign = 'left';
     }
     c.strokeStyle = '#648272';

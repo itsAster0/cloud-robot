@@ -6,10 +6,11 @@
     base: 'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[11px] font-medium whitespace-nowrap',
     variants: {
       variant: {
-        default: 'border-[#304d3b] bg-[#13271a] text-[#dbe7dc]',
-        live: 'border-[#dfff86]/50 bg-[#dfff86]/10 text-[#dfff86]',
-        muted: 'border-[#304d3b] text-[#a3b9a9]',
-        warn: 'border-red-500/50 bg-red-500/10 text-red-300',
+        default: 'border-border bg-secondary text-foreground',
+        live: 'border-primary/50 bg-primary/10 text-primary',
+        muted: 'border-border text-muted-foreground',
+        warn: 'border-warning/50 bg-warning/10 text-warning',
+        danger: 'border-destructive/50 bg-destructive/10 text-destructive',
       },
     },
     defaultVariants: { variant: 'default' },

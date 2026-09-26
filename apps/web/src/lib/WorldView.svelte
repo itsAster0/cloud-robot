@@ -2,10 +2,16 @@
   import { onMount } from 'svelte';
   import { SnapshotBuffer, angleBetween } from './interpolation';
   import { hpFraction, siteColor, teamColor, weaponGlyph } from './matchStats';
+  import { pickRobot, screenToWorld } from './picking';
   import { hash2, loadTerrain, paintChunk, roadsFor, type Road } from './terrain';
   import type { Snapshot, RobotState, WorldHazard, WorldSite } from './types';
   export type SiteMark = WorldSite;
-  let { snapshot, selected = '', leaderId = '', overview = [], sites = [], onregion }: { snapshot: Snapshot | null; selected?: string; leaderId?: string; overview?: RobotState[]; sites?: SiteMark[]; onregion?: (region: {x:number;y:number;width:number;height:number}) => void } = $props();
+  let { snapshot, selected = '', leaderId = '', overview = [], sites = [], onregion, onselect }: { snapshot: Snapshot | null; selected?: string; leaderId?: string; overview?: RobotState[]; sites?: SiteMark[]; onregion?: (region: {x:number;y:number;width:number;height:number}) => void; onselect?: (robotId: string) => void } = $props();
+  // Robot positions as drawn in the last frame, for click and hover hit-tests.
+  let drawn: { robotId: string; x: number; y: number }[] = [];
+  let press = { x: 0, y: 0, moved: false };
+  // Selecting a robot (map, roster, or inspector) resumes camera follow.
+  $effect(() => { if (selected) follow = true; });
   let regionAt = 0;
   let canvas: HTMLCanvasElement;
   let zoom = $state(1), follow = $state(true), fps = $state(0), frameP95 = $state(0), age = $state(0);
@@ -109,6 +115,8 @@
       if (s) {
         const old = new Map(sample?.before.robots.map(r => [r.robotId, r]) ?? []);
         const positions = s.robots.map(r => { const p = old.get(r.robotId) ?? r; const t = s.events?.some(e => e.type === 'teleport' && e.robotId === r.robotId) ? 1 : sample?.amount ?? 1; return { ...r, x: p.x + (r.x - p.x) * t, y: p.y + (r.y - p.y) * t, heading: angleBetween(p.heading, r.heading, t), turretHeading: angleBetween(p.turretHeading ?? p.heading, r.turretHeading ?? r.heading, t) }; });
+        const inView = new Set(positions.map(r => r.robotId));
+        drawn = [...positions, ...overview.filter(r => !inView.has(r.robotId))];
         const focus = (positions.find(r => r.robotId === selected) ?? overview.find(r => r.robotId === selected)) ?? positions.find(r => r.alive) ?? overview.find(r => r.alive) ?? positions[0] ?? overview[0];
         if (focus && follow) target = { x: focus.x, y: focus.y };
         if (focus && camera.x === 0 && camera.y === 0 && target.x === 0 && target.y === 0) {
@@ -219,23 +227,48 @@
     camera.y += my / zoom - my / next;
     zoom = next;
   }
-  function jumpMinimap(e: MouseEvent) {
-    if (!snapshot) return;
+  function pointerPosition(e: MouseEvent) {
     const rect = canvas.getBoundingClientRect();
-    const w = snapshot.width ?? 42000, h = snapshot.height ?? 26250;
-    const mw = 180, mh = mw * h / w, mx = width - mw - 12, my = 12;
-    const px = e.clientX - rect.left, py = e.clientY - rect.top;
-    const scaleY = rect.height / height;
-    if (px / scaleY < mx || py / scaleY > my + mh) return;
-    target = { x: ((px / scaleY - mx) / mw) * w, y: ((py / scaleY - my) / mh) * h };
-    follow = false;
+    const scale = rect.height / height;
+    return { px: (e.clientX - rect.left) / scale, py: (e.clientY - rect.top) / scale };
+  }
+  function minimapBox() {
+    const w = snapshot?.width ?? 42000, h = snapshot?.height ?? 26250;
+    const mw = 180;
+    return { w, h, mw, mh: mw * h / w, mx: width - mw - 12, my: 12 };
+  }
+  function robotAt(px: number, py: number) {
+    const world = screenToWorld({ x: camera.x, y: camera.y, zoom, width, height }, px, py);
+    return pickRobot(drawn, world.x, world.y, zoom);
+  }
+  function click(e: MouseEvent) {
+    if (!snapshot || press.moved) return;
+    const { px, py } = pointerPosition(e);
+    const { w, h, mw, mh, mx, my } = minimapBox();
+    if (px >= mx && px <= mx + mw && py >= my && py <= my + mh) {
+      target = { x: ((px - mx) / mw) * w, y: ((py - my) / mh) * h };
+      follow = false;
+      return;
+    }
+    const hit = robotAt(px, py);
+    if (hit) { onselect?.(hit); follow = true; }
+  }
+  function pointerMove(e: PointerEvent) {
+    if (dragged) {
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > 5) { press.moved = true; follow = false; }
+      if (press.moved) { target.x -= (e.clientX - last.x) / zoom; target.y -= (e.clientY - last.y) / zoom; camera.x -= (e.clientX - last.x) / zoom; camera.y -= (e.clientY - last.y) / zoom; }
+      last = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    const { px, py } = pointerPosition(e);
+    canvas.style.cursor = robotAt(px, py) ? 'pointer' : 'grab';
   }
 </script>
 <div class="world">
   <div class="toolbar"><button onclick={() => follow = !follow}>{follow ? 'Following robot' : 'Free camera'}</button><button onclick={() => zoom = Math.min(4, zoom * 1.3)}>Zoom +</button><button onclick={() => zoom = Math.max(.1, zoom / 1.3)}>Zoom −</button><button onclick={() => { if (snapshot) { target = { x: (snapshot.width ?? 42000) / 2, y: (snapshot.height ?? 26250) / 2 }; follow = false; } }}>Center map</button><span>{snapshot ? `${fps} fps · frame p95 ${frameP95.toFixed(1)} ms · update ${age} ms ago` : "Waiting for match state"}</span></div>
-  <canvas bind:this={canvas} aria-label="Robot arena. Drag to pan, scroll to zoom, use WASD or arrow keys to stroll. Click the minimap to jump." onwheel={wheel} onclick={jumpMinimap} onpointerdown={(e) => { dragged = true; follow = false; last = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); }} onpointermove={(e) => { if (dragged) { target.x -= (e.clientX - last.x) / zoom; target.y -= (e.clientY - last.y) / zoom; camera.x -= (e.clientX - last.x) / zoom; camera.y -= (e.clientY - last.y) / zoom; last = { x: e.clientX, y: e.clientY }; } }} onpointerup={() => dragged = false} onpointercancel={() => dragged = false}></canvas>
-  <div class="legend" aria-label="Map legend">♛ kill leader · ◉ plasma ⋮ machine-gun ∴ shotgun ● cannon ┃ railgun ✸ grenade ♨ incendiary ❄ cryo ⚡ emp · cyan bar shield · team colors on hulls and minimap</div>
+  <canvas bind:this={canvas} aria-label="Robot arena. Click a robot to inspect it. Drag to pan, scroll to zoom, use WASD or arrow keys to stroll. Click the minimap to jump." onwheel={wheel} onclick={click} onpointerdown={(e) => { dragged = true; press = { x: e.clientX, y: e.clientY, moved: false }; last = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); }} onpointermove={pointerMove} onpointerup={() => dragged = false} onpointercancel={() => dragged = false}></canvas>
+  <div class="legend" aria-label="Map legend">Click a robot to inspect · ♛ kill leader · ◉ plasma ⋮ machine-gun ∴ shotgun ● cannon ┃ railgun ✸ grenade ♨ incendiary ❄ cryo ⚡ emp · cyan bar shield · team colors on hulls and minimap</div>
 </div>
 <style>
-  .world{border:1px solid #345143;background:#07110e;min-width:0}.toolbar{display:flex;gap:8px;padding:10px;align-items:center;flex-wrap:wrap}.toolbar button{padding:8px;background:#192b22;color:#d8e9dc;border:1px solid #42614e}.toolbar span{margin-left:auto;color:#9cb8a5;font-size:12px}canvas{width:100%;display:block;touch-action:none}.legend{padding:8px 12px;color:#7d917f;font:10px monospace;border-top:1px solid #243e2e}
+  .world{border:1px solid var(--color-border);border-radius:12px;overflow:hidden;background:var(--color-background);min-width:0}.toolbar{display:flex;gap:6px;padding:8px 10px;align-items:center;flex-wrap:wrap;background:var(--color-card);border-bottom:1px solid var(--color-border)}.toolbar button{height:32px;padding:0 12px;border-radius:6px;background:var(--color-secondary);color:var(--color-foreground);border:1px solid var(--color-input);font-size:12px}.toolbar button:hover{border-color:var(--color-primary);color:var(--color-primary)}.toolbar span{margin-left:auto;color:var(--color-muted-foreground);font:11px var(--font-mono)}canvas{width:100%;display:block;touch-action:none;cursor:grab}.legend{padding:8px 12px;color:var(--color-muted-foreground);font:10px var(--font-mono);border-top:1px solid var(--color-border);background:var(--color-card)}
 </style>

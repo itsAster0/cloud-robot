@@ -33,7 +33,7 @@
   {max}
   aria-label={ariaLabel}
   class={cn(
-    'h-9 w-full rounded-md border border-[#38533e] bg-[#07130d] px-3 py-1 text-sm text-[#e2eade] shadow-xs outline-none transition-colors placeholder:text-[#5d7268] focus:border-[#dfff86] disabled:cursor-not-allowed disabled:opacity-50',
+    'm-0 h-9 w-full rounded-md border border-input bg-background px-3 py-1 font-sans text-sm text-foreground shadow-xs outline-none transition-colors placeholder:text-muted-foreground focus:border-ring disabled:cursor-not-allowed disabled:opacity-50',
     klass,
   )}
 />

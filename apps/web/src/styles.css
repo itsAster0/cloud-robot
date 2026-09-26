@@ -1,7 +1,36 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 @import 'tailwindcss';
 @import 'tw-animate-css';
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
+/* shadcn-style design tokens for components/ui; values follow the app palette. */
+@theme inline {
+  --color-background: #0b1018;
+  --color-foreground: #e4eaf3;
+  --color-card: #111925;
+  --color-card-foreground: #e4eaf3;
+  --color-popover: #111925;
+  --color-muted: #1a2636;
+  --color-muted-foreground: #97a6b9;
+  --color-border: #273344;
+  --color-input: #2d3c50;
+  --color-primary: #58dec5;
+  --color-primary-foreground: #072b25;
+  --color-secondary: #182231;
+  --color-secondary-foreground: #e4eaf3;
+  --color-accent: #152e2b;
+  --color-accent-foreground: #58dec5;
+  --color-destructive: #ff5b4d;
+  --color-warning: #f0c274;
+  --color-ring: #58dec5;
+  --color-team-red: #ff6b5b;
+  --color-team-blue: #54a7ff;
+  --font-mono: 'DM Mono', ui-monospace, monospace;
+  --font-sans: 'Space Grotesk', ui-sans-serif, sans-serif;
+}
+
+/* Legacy global styles live in the components layer so Tailwind utilities
+   (components/ui) win where both apply. */
+@layer components {
 :root {
   font-family: 'Space Grotesk', sans-serif;
   color: #e4eaf3;
@@ -288,7 +317,7 @@ textarea { width: 100%; height: 100%; resize: none; border: 0; outline: 0; paddi
 .function-grid div { padding: 18px; border: 1px solid var(--line); background: rgba(8,20,16,.85); }
 .function-grid p { margin-bottom: 0; font-size: 12px !important; }
 .radar { height: 370px; position: relative; overflow: hidden; background: #0a111c; border-bottom: 1px solid var(--line); }
-.grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(37, 70, 59, .22) 1px, transparent 1px), linear-gradient(90deg, rgba(37, 70, 59, .22) 1px, transparent 1px); background-size: 32px 32px; }
+.radar > .grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(37, 70, 59, .22) 1px, transparent 1px), linear-gradient(90deg, rgba(37, 70, 59, .22) 1px, transparent 1px); background-size: 32px 32px; }
 .scan-ring { position: absolute; border: 1px solid rgba(88, 222, 197, .16); border-radius: 50%; left: 50%; top: 50%; transform: translate(-50%, -50%); }
 .scan-ring.one { width: 180px; height: 180px; }
 .scan-ring.two { width: 300px; height: 300px; }
@@ -431,4 +460,5 @@ textarea { width: 100%; height: 100%; resize: none; border: 0; outline: 0; paddi
   .main-nav a { flex: 1; justify-content: center; min-height: 42px; }
   .more-menu { right: -78px; }
   .error-banner { padding: 12px 16px; flex-wrap: wrap; font-size: 11px; }
+}
 }
