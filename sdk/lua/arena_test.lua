@@ -97,6 +97,77 @@ check("contacts expire after ttl", #forgotten == 0)
 local near = arena.obstacles_near(obs, 500, 500, 100)
 check("obstacles_near finds cover within radius", #near == 1 and near[1].id == "block")
 
+local function steer_obs(heading, x, y)
+  return { tick = 10, self = { robotId = "me", team = "red", x = x or 0, y = y or 0, heading = heading, hp = 100, maxHp = 100,
+    weapons = { { kind = "plasma", heat = 0, readyAt = 0, overheated = false } }, activeWeapon = 0 }, obstacles = {}, robots = {} }
+end
+local stop = arena.drive_to(steer_obs(0), { x = 20, y = 0 })
+local reach_loot = arena.drive_to(steer_obs(0), { x = 30, y = 0 })
+check("drive_to keeps driving until inside pickup reach", reach_loot.throttle > 0)
+check("drive_to brakes on arrival", stop.brake == true and stop.throttle == 0)
+local back = arena.drive_to(steer_obs(0), { x = -200, y = 0 })
+check("drive_to reverses toward a near point behind", back.throttle < 0 and math.abs(back.turn) < 0.1)
+local ahead = arena.drive_to(steer_obs(0), { x = 900, y = 0 })
+check("drive_to drives full speed at a far point ahead", ahead.throttle == 1 and ahead.turn == 0)
+local sharp = arena.drive_to(steer_obs(0), { x = 0, y = 900 })
+check("drive_to crawls through sharp turns", sharp.throttle > 0 and sharp.throttle < 0.5 and sharp.turn == 1)
+
+local near_goal = steer_obs(0, 0, 0)
+local short_route = { status = "ready", revision = nil, path = { { x = 0, y = 0 }, { x = 40, y = 0 } }, obstacles = {} }
+local hop = arena.follow_path(near_goal, short_route)
+check("follow_path keeps driving to a goal 40 units away", hop.throttle > 0 and hop.label == "FOLLOW_PATH", hop.label)
+local walled = steer_obs(0, 0, 0)
+walled.arenaWidth, walled.arenaHeight, walled.revision = 2000, 2000, 1
+walled.self.x, walled.self.y = 100, 300
+walled.obstacles = { { id = "wall", shape = "aabb", x = 200, y = 100, width = 30, height = 400 } }
+local around = arena.begin_path(walled, { x = 400, y = 300 })
+for _ = 1, 40 do arena.advance_path(around, 128); if around.status ~= "pending" then break end end
+local clear_route = around.status == "ready"
+for i = 2, clear_route and #around.path or 0 do
+  local a, b = around.path[i - 1], around.path[i]
+  if not arena.line_of_sight(a.x, a.y, b.x, b.y, walled.obstacles) then clear_route = false end
+end
+check("begin_path routes around walls instead of through them", clear_route, around.status)
+local hugging = steer_obs(90, 300, 186)
+hugging.arenaWidth, hugging.arenaHeight, hugging.revision = 2000, 2000, 1
+hugging.obstacles = { { id = "hedge", shape = "aabb", x = 200, y = 200, width = 200, height = 30 } }
+local escape = arena.begin_path(hugging, { x = 300, y = 400 })
+for _ = 1, 40 do arena.advance_path(escape, 128); if escape.status ~= "pending" then break end end
+check("begin_path plans from a spot hugging cover", escape.status == "ready", escape.status)
+local pinned, escape, started = {}, nil, false
+for tick = 1, 12 do
+  local o = steer_obs(0, 50, 50); o.tick = tick * 2
+  escape, started = arena.unstick(o, pinned)
+  if escape then break end
+  arena.note_action(pinned, { throttle = 1 })
+end
+check("unstick backs out after pushing into cover without progress", escape and started and escape.throttle == -1 and escape.label == "UNSTICK")
+local resting = {}
+for tick = 1, 12 do
+  local o = steer_obs(0, 50, 50); o.tick = tick * 2
+  escape = arena.unstick(o, resting)
+  arena.note_action(resting, { brake = true, throttle = 0 })
+end
+check("unstick ignores intentional stops", escape == nil)
+local fight = {}
+local near = arena.engage(steer_obs(0), { robotId = "e", x = 100, y = 0, vx = 0, vy = 0 }, fight)
+check("engage kites when too close", near.label == "KITE" and near.fire == true)
+local far = arena.engage(steer_obs(0), { robotId = "e", x = 1500, y = 0, vx = 0, vy = 0 }, fight)
+check("engage closes in when far", far.label == "CLOSE_IN")
+local band = arena.engage(steer_obs(0), { robotId = "e", x = 420, y = 0, vx = 0, vy = 0 }, fight)
+check("engage strafes inside its range band", band.label == "STRAFE")
+local moving = arena.engage(steer_obs(0), { robotId = "e", x = 420, y = 0, vx = 0, vy = 100 }, fight)
+check("engage leads a moving target", moving.aim > 0 and moving.aim < 90, tostring(moving.aim))
+
+local patrol_obs = { tick = 0, self = { robotId = "me", x = 0, y = 0 }, zone = { x = 500, y = 500, radius = 2000 },
+  sites = { { x = 100, y = 100 }, { x = 900, y = 900 }, { x = 100, y = 900 } } }
+local memory_a, memory_b = {}, {}
+local goal_a, goal_b = arena.patrol(patrol_obs, memory_a), arena.patrol(patrol_obs, memory_b)
+check("patrol is deterministic", goal_a.x == goal_b.x and goal_a.y == goal_b.y)
+patrol_obs.self.x, patrol_obs.self.y = goal_a.x, goal_a.y
+local next_goal = arena.patrol(patrol_obs, memory_a)
+check("patrol moves on after arrival", arena.distance(next_goal, goal_a) > 1 or memory_a.count == 2)
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)

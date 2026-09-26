@@ -632,13 +632,31 @@ function arena.control(options)
   return out
 end
 
+-- Steers toward `point`. Brakes inside options.arrive (default 25, inside the
+-- 35-unit pickup reach so driving to loot still ends in range) instead
+-- of orbiting the point, slows on approach, crawls through sharp turns, and
+-- reverses toward nearby points behind the robot rather than pivoting.
+-- options.reverse = false disables reversing.
 function arena.drive_to(obs, point, options)
   options = options or {}
-  local desired = arena.bearing(obs.self, point)
-  local turn = (desired - obs.self.heading + 180) % 360 - 180
-  return arena.control({ throttle = math.abs(turn) > 70 and .25 or 1,
-    turn = clamp(turn / 18, -1, 1), cruise = options.cruise == true,
-    aim = options.aim, fire = options.fire == true, label = options.label or "NAVIGATE" })
+  local self = obs.self
+  local base = { aim = options.aim, fire = options.fire == true, label = options.label or "NAVIGATE" }
+  local distance = arena.distance(self, point)
+  if distance < (options.arrive or 25) then
+    base.brake, base.throttle, base.turn = true, 0, 0
+    return arena.control(base)
+  end
+  local turn = (arena.bearing(self, point) - self.heading + 180) % 360 - 180
+  local approach = clamp(distance / 150, 0.35, 1)
+  if math.abs(turn) > 120 and options.reverse ~= false and (distance < 350 or options.reverse) then
+    local back = (turn + 360) % 360 - 180
+    base.turn, base.throttle = clamp(back / 18, -1, 1), -approach
+    return arena.control(base)
+  end
+  base.turn = clamp(turn / 18, -1, 1)
+  base.throttle = math.abs(turn) > 70 and 0.35 or math.abs(turn) > 35 and math.min(0.7, approach) or approach
+  base.cruise = options.cruise == true and math.abs(turn) < 15
+  return arena.control(base)
 end
 
 function arena.weapon_ready(obs, slot)
@@ -660,6 +678,36 @@ end
 function arena.stuck_tracker()
   return { x = nil, y = nil, tick = nil, stalled = 0 }
 end
+-- Recovery for a robot pinned against cover. Call every decision with a
+-- persistent `memory` table and record each returned action with
+-- arena.note_action. After ~0.8 s of commanded driving with no progress it
+-- backs out (or pushes forward, if it was reversing) while turning for one
+-- second, alternating sides. Returns the escape action and, on the decision
+-- that starts an escape, true so the caller can drop its current target.
+function arena.unstick(obs, memory)
+  if memory.escape_until and obs.tick < memory.escape_until then
+    return arena.control({ throttle = memory.escape_throttle, turn = memory.side, label = "UNSTICK" }), false
+  end
+  local self = obs.self
+  local driving = math.abs(memory.last_throttle or 0) >= 0.3
+  if driving and memory.x and arena.distance(self, memory) < 1 then
+    memory.stalled = (memory.stalled or 0) + 1
+  else
+    memory.stalled = 0
+  end
+  memory.x, memory.y = self.x, self.y
+  if memory.stalled < 8 then return nil, false end
+  memory.stalled = 0
+  memory.side = -(memory.side or 1)
+  memory.escape_throttle = (memory.last_throttle or 1) > 0 and -1 or 1
+  memory.escape_until = obs.tick + 20
+  memory.escapes = (memory.escapes or 0) + 1
+  return arena.control({ throttle = memory.escape_throttle, turn = memory.side, label = "UNSTICK" }), true
+end
+function arena.note_action(memory, action)
+  memory.last_throttle = (action and not action.brake and action.throttle) or 0
+end
+
 function arena.is_stuck(obs, memory)
   if memory.tick == obs.tick then return memory.stalled >= 10 end
   if memory.x and arena.distance(obs.self, memory) < 1 then memory.stalled = memory.stalled + 1 else memory.stalled = 0 end
@@ -672,8 +720,21 @@ end
 function arena.begin_path(obs, goal)
   local obstacles = {}
   for _, o in ipairs(obs.obstacles or {}) do
-    obstacles[#obstacles + 1] = { shape = o.shape, x = o.x - 15, y = o.y - 15,
-      width = (o.width or 0) + 30, height = (o.height or 0) + 30, radius = (o.radius or 0) + 15 }
+    -- Only circles carry a radius: the geometry helpers treat any obstacle
+    -- with a radius as a circle, so giving boxes one erased every wall.
+    -- A robot hugging cover already stands inside that piece's 15-unit
+    -- margin; inflating it would block every move and make the search
+    -- report unreachable, so plan against its real outline instead.
+    local sx, sy = obs.self.x, obs.self.y
+    if o.shape == "circle" or o.radius ~= nil then
+      local inside = (sx - o.x) ^ 2 + (sy - o.y) ^ 2 < ((o.radius or 0) + 15) ^ 2
+      obstacles[#obstacles + 1] = { shape = "circle", x = o.x, y = o.y, radius = (o.radius or 0) + (inside and 0 or 15) }
+    else
+      local w, h = o.width or 0, o.height or 0
+      local inside = sx > o.x - 15 and sx < o.x + w + 15 and sy > o.y - 15 and sy < o.y + h + 15
+      local m = inside and 0 or 15
+      obstacles[#obstacles + 1] = { shape = o.shape, x = o.x - m, y = o.y - m, width = w + 2 * m, height = h + 2 * m }
+    end
   end
   return { start = { x = obs.self.x, y = obs.self.y }, goal = { x = goal.x, y = goal.y },
     open = { { x = obs.self.x, y = obs.self.y, g = 0 } }, seen = {}, expanded = 0,
@@ -704,13 +765,24 @@ function arena.advance_path(search, budget)
   end
   return search
 end
-function arena.follow_path(obs, search)
+function arena.follow_path(obs, search, arrive)
   if search.revision ~= obs.revision then return arena.control({ brake = true, label = "PATH_REVISION_CHANGED" }) end
   if search.status ~= "ready" then return arena.control({ brake = true, label = "PATH_" .. string.upper(search.status) }) end
   search.waypoint = search.waypoint or 2
-  while search.waypoint <= #search.path and arena.distance(obs.self, search.path[search.waypoint]) < 30 do search.waypoint = search.waypoint + 1 end
+  -- Intermediate waypoints advance within 48 units; the final one only
+  -- counts as reached inside the arrival radius, so short hops still end
+  -- within pickup reach.
+  while search.waypoint < #search.path and arena.distance(obs.self, search.path[search.waypoint]) < 48 do search.waypoint = search.waypoint + 1 end
+  if search.waypoint == #search.path and arena.distance(obs.self, search.path[#search.path]) < (arrive or 25) then search.waypoint = #search.path + 1 end
+  -- Skip ahead to the furthest waypoint already in clear sight so the robot
+  -- cuts corners instead of zig-zagging through every 64-unit grid step.
+  for index = #search.path, math.min(#search.path, search.waypoint) + 1, -1 do
+    local p = search.path[index]
+    if arena.line_of_sight(obs.self.x, obs.self.y, p.x, p.y, search.obstacles) then search.waypoint = index; break end
+  end
   if search.waypoint > #search.path then return arena.control({ brake = true, label = "ARRIVED" }) end
-  return arena.drive_to(obs, search.path[search.waypoint])
+  local final = search.waypoint == #search.path
+  return arena.drive_to(obs, search.path[search.waypoint], { arrive = final and (arrive or 25) or 1, label = "FOLLOW_PATH" })
 end
 function arena.transit_route(obs, goal)
   assert(goal and goal.x and goal.y, "transit_route requires a goal point; pass a site or safe_zone_goal(obs)")
@@ -884,6 +956,189 @@ function arena.nearest_site(obs, filter)
     end
   end
   return best, best_distance
+end
+
+-- Effective ranges from the engine catalogue, used for engagement spacing.
+arena.WEAPON_RANGE = { plasma = 650, machine_gun = 450, shotgun = 250, cannon = 700, railgun = 1000,
+  grenade = 500, incendiary = 450, cryo = 450, emp = 500 }
+arena.PROJECTILE_SPEED = { plasma = 480, machine_gun = 640, shotgun = 600, cannon = 280, railgun = 0,
+  grenade = 200, incendiary = 400, cryo = 400, emp = 360 }
+
+-- Fights `enemy` at a weapon-appropriate distance: closes in when far, orbits
+-- (strafes) inside the band, and backs off while still facing and firing when
+-- too close. Pass a persistent `memory` table so the orbit direction flips on
+-- a timer and after getting stuck instead of circling the same way forever.
+function arena.engage(obs, enemy, memory, options)
+  memory, options = memory or {}, options or {}
+  local self = obs.self
+  local weapon = (self.weapons or {})[(self.activeWeapon or 0) + 1]
+  local range = arena.WEAPON_RANGE[weapon and weapon.kind or "plasma"] or 500
+  local preferred = options.preferred or clamp(range * 0.65, 140, 650)
+  -- Lead with the enemy's observed velocity (units/second) and the active
+  -- weapon's projectile speed; railguns are hitscan.
+  local lead = arena.aim_predict(self, enemy, arena.PROJECTILE_SPEED[weapon and weapon.kind or "plasma"] or 0, enemy.vx, enemy.vy)
+  local aim = arena.bearing(self, lead)
+  local fire = arena.weapon_ready(obs) ~= false and arena.line_of_sight(self.x, self.y, enemy.x, enemy.y, obs.obstacles)
+  memory.orbit = memory.orbit or 1
+  memory.flip_at = memory.flip_at or (obs.tick + 60)
+  if obs.tick >= memory.flip_at then memory.orbit, memory.flip_at = -memory.orbit, obs.tick + 60 + (obs.tick % 40) end
+  local d = arena.distance(self, enemy)
+  local goal, label
+  if d < preferred * 0.75 then
+    goal, label = { x = self.x * 2 - enemy.x, y = self.y * 2 - enemy.y }, "KITE"
+  elseif d > preferred * 1.2 then
+    goal, label = { x = enemy.x, y = enemy.y }, "CLOSE_IN"
+  else
+    local side = math.rad(arena.bearing(self, enemy) + 90 * memory.orbit)
+    goal, label = { x = self.x + math.cos(side) * 200, y = self.y + math.sin(side) * 200 }, "STRAFE"
+  end
+  return arena.drive_to(obs, goal, { aim = aim, fire = fire, label = options.label and (options.label .. "_" .. label) or label, arrive = 1, reverse = label == "KITE" })
+end
+
+-- Deterministic patrol across sites inside the safe zone. Keeps its own
+-- state in `memory`; returns the next goal point. Re-picks on arrival or
+-- after 20 seconds so robots keep exploring instead of parking.
+function arena.patrol(obs, memory)
+  local zone = obs.zone
+  local inside = {}
+  for _, site in ipairs(obs.sites or {}) do
+    if not zone or not zone.radius or arena.distance(site, zone) < zone.radius * 0.85 then inside[#inside + 1] = site end
+  end
+  local stale = not memory.goal or arena.distance(obs.self, memory.goal) < 150 or obs.tick >= (memory.until_tick or 0)
+    or (zone and zone.radius and arena.distance(memory.goal, zone) > zone.radius * 0.9)
+  if stale then
+    memory.count = (memory.count or 0) + 1
+    if #inside == 0 then
+      memory.goal = arena.safe_zone_goal(obs)
+    else
+      local seed = 0
+      for i = 1, #(obs.self.robotId or "") do seed = (seed * 31 + string.byte(obs.self.robotId, i)) % 2147483647 end
+      local site = inside[(seed + memory.count * 7919) % #inside + 1]
+      local angle = (seed + memory.count) * 2.399963229728653
+      memory.goal = { x = site.x + math.cos(angle) * 160, y = site.y + math.sin(angle) * 160 }
+    end
+    memory.until_tick = obs.tick + 400
+  end
+  return memory.goal
+end
+
+-- A complete decision loop assembled from the helpers above, used by every
+-- shipped strategy. Priorities: escape when pinned, fight the best visible
+-- target (retreating to cover when hurt), rotate into the zone, heal, pick up
+-- nearby loot, hunt remembered contacts, then idle (patrol by default).
+-- Options:
+--   name            label prefix, e.g. "SCOUT" gives SCOUT_PATROL
+--   range           max distance to engage a visible enemy (default 900)
+--   preferred       engagement distance (default: 65% of weapon range)
+--   retreat_hp      health fraction that triggers retreat (default 0.3)
+--   loot_reach      { early, late } detour distances for loot (300, 120)
+--   scan            "idle" (default), "always", or "never"
+--   pickup          pickupPriorities sent on the first decision
+--   on_enemy(obs, target, ctx)  may return an action to override fighting
+--   idle(obs, ctx)              may return an action or a goal point
+--   decorate(obs, action, ctx)  adjusts every action (utilities, messages)
+-- ctx.travel(obs, goal, label) follows a bounded path with recovery;
+-- ctx.state is persistent strategy memory.
+function arena.tactics(options)
+  options = options or {}
+  local prefix = options.name and (options.name .. "_") or ""
+  local reach = options.loot_reach or { 300, 120 }
+  local state = { tried = {}, unstick = {}, route = nil, goal = nil, stuck = arena.stuck_tracker(),
+    fight = {}, patrol = {}, contacts = arena.contact_tracker(200), sent_pickup = false }
+  local ctx = { state = state }
+
+  function ctx.travel(obs, goal, label)
+    local moved = not state.goal or arena.distance(goal, state.goal) > 120
+    if moved or not state.route or state.route.revision ~= obs.revision or arena.is_stuck(obs, state.stuck) then
+      state.route, state.goal = arena.begin_path(obs, goal), goal
+    end
+    arena.advance_path(state.route, 96)
+    if state.route.status == "unreachable" then
+      -- Goals inside cover never resolve: retarget a clear point nearby.
+      state.route = arena.begin_path(obs, arena.random_safe_point(obs, goal.x, goal.y, 260, 16))
+      arena.advance_path(state.route, 96)
+    end
+    local action
+    if state.route.status == "ready" then
+      action = arena.follow_path(obs, state.route)
+      if action.label == "ARRIVED" then state.route = nil end
+    else
+      action = arena.drive_to(obs, goal)
+    end
+    action.label = prefix .. label
+    return action
+  end
+
+  local function choose(obs)
+    local self = obs.self
+    state.target = nil
+    local contacts = arena.update_contacts(state.contacts, obs)
+    local target = arena.best_target(obs, { range = options.range or 900 })
+    if target then
+      local override = options.on_enemy and options.on_enemy(obs, target, ctx)
+      if override then return override end
+      if self.hp < self.maxHp * (options.retreat_hp or 0.3) then
+        local aim = arena.bearing(self, target)
+        local cover = arena.find_cover(obs, target)
+        local action = cover and arena.drive_to(obs, cover, { aim = aim, fire = true, label = prefix .. "TAKE_COVER" })
+          or arena.drive_to(obs, { x = self.x * 2 - target.x, y = self.y * 2 - target.y }, { aim = aim, fire = true, label = prefix .. "RETREAT", reverse = true })
+        action.dash = self.energy >= 30
+        return action
+      end
+      return arena.engage(obs, target, state.fight, { preferred = options.preferred, label = options.name })
+    end
+    local zone = obs.zone
+    if zone and zone.radius and arena.distance(self, zone) > zone.radius * 0.9 then
+      return ctx.travel(obs, arena.safe_zone_goal(obs), "ROTATE")
+    end
+    local heal = arena.find_consumable(obs, "medkit") or arena.find_consumable(obs, "repair_pack")
+    if heal and self.hp < self.maxHp * 0.6 then return arena.control({ brake = true, consume = heal, label = prefix .. "REPAIR" }) end
+    -- Containers we cannot take stay on the map; remember tried ones so the
+    -- robot never hovers beside one.
+    local loot, loot_distance
+    for _, item in ipairs(obs.items or {}) do
+      local d = arena.distance(self, item)
+      if not state.tried[item.itemId] and (not loot_distance or d < loot_distance) then loot, loot_distance = item, d end
+    end
+    if loot and loot_distance < 35 then
+      state.tried[loot.itemId] = true
+      return arena.control({ brake = true, pickup = loot.itemId, label = prefix .. "SCAVENGE" })
+    end
+    local remembered = contacts[1]
+    if remembered and not remembered.visible then return ctx.travel(obs, remembered, "HUNT") end
+    if loot and loot_distance < (obs.tick < 400 and reach[1] or reach[2]) then
+      state.target = loot.itemId
+      return ctx.travel(obs, loot, "LOOT")
+    end
+    local idle = options.idle and options.idle(obs, ctx)
+    if idle and idle.x and not idle.label then return ctx.travel(obs, idle, "MOVE") end
+    if idle then return idle end
+    return ctx.travel(obs, arena.patrol(obs, state.patrol), "PATROL")
+  end
+
+  return function(obs)
+    assert(obs.version == 4, "This strategy requires a v4 arena")
+    local action, started = arena.unstick(obs, state.unstick)
+    if action then
+      if started then
+        state.route = nil
+        if state.target then state.tried[state.target] = true end
+      end
+      action.label = prefix .. "UNSTICK"
+    else
+      action = choose(obs)
+    end
+    local scan = options.scan or "idle"
+    if scan == "always" or (scan == "idle" and not arena.best_target(obs, { range = options.range or 900 })) then
+      action.scan = action.scan or obs.self.energy > 60
+    end
+    if options.pickup and not state.sent_pickup then
+      action.pickupPriorities, state.sent_pickup = options.pickup, true
+    end
+    if options.decorate then options.decorate(obs, action, ctx) end
+    arena.note_action(state.unstick, action)
+    return action
+  end
 end
 
 function arena.run(config)

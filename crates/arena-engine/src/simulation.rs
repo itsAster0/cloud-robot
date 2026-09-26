@@ -47,6 +47,19 @@ pub struct BotMemory {
     pub wander_y: f64,
     pub wander_ticks: u32,
     pub orbit: f64,
+    /// Patrol goal used when no enemy is visible, so idle bots spread across
+    /// sites instead of circling the zone centre together.
+    pub roam_x: f64,
+    pub roam_y: f64,
+    pub roam_ticks: u32,
+    pub roam_count: u32,
+    /// Distance the last decision's throttle should cover in two ticks.
+    pub expected: f64,
+    /// Coarse enemy position from this bot's own last scan, valid until
+    /// `hunt_until`. Scans are a player mechanic too, so hunting stays fair.
+    pub hunt_x: f64,
+    pub hunt_y: f64,
+    pub hunt_until: u32,
 }
 impl Arena {
     pub fn new(mut config: Config) -> Result<Self, String> {
@@ -330,6 +343,59 @@ impl Arena {
                         && segment_circle(a.x, a.y, b.x, b.y, f.x, f.y, 100.).is_some()
                 }))
     }
+    /// Mirrors the pickup rule: whether a manual pickup would take `kind`.
+    fn can_take(r: &Robot, kind: &str) -> bool {
+        if let Some(w) = kind.strip_prefix("weapon:") {
+            r.weapons.len() < 2 && !r.weapons.iter().any(|v| v.kind == w)
+        } else if let Some(u) = kind.strip_prefix("utility:") {
+            r.loadout.utilities.len() < 2 && !r.loadout.utilities.iter().any(|v| v == u)
+        } else if catalog::MODULES.contains(&kind) {
+            r.loadout.modules.len() < 2 && !r.has(kind)
+        } else if catalog::CONSUMABLES.contains(&kind) {
+            r.inventory.len() < 4 || r.inventory.iter().any(|s| s.kind == kind && s.count < 3)
+        } else {
+            false
+        }
+    }
+    /// Deterministic patrol target: a site inside the safe zone chosen from
+    /// the bot index and patrol count, offset so bots never share one point.
+    /// Re-picked on arrival, after a time limit, or when the zone excludes it.
+    fn roam_goal(&mut self, i: usize) -> (f64, f64) {
+        let z = self.zone();
+        let (rx, ry) = (self.robots[i].x, self.robots[i].y);
+        let id = self.robots[i].robot_id.clone();
+        let inside: Vec<(f64, f64)> = self
+            .world
+            .sites
+            .iter()
+            .filter(|s| distance(s.x, s.y, z.x, z.y) < z.radius * 0.85)
+            .map(|s| (s.x, s.y))
+            .collect();
+        let mem = self.bot_memory.entry(id).or_default();
+        let stale = mem.roam_ticks == 0
+            || distance(rx, ry, mem.roam_x, mem.roam_y) < 150.
+            || distance(mem.roam_x, mem.roam_y, z.x, z.y) > z.radius * 0.9;
+        if stale {
+            mem.roam_count += 1;
+            // Hash so bots do not walk the same site order one step apart.
+            let pick = (((i as u64) << 32 | mem.roam_count as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                >> 33) as usize;
+            let (sx, sy) = if inside.is_empty() {
+                (z.x, z.y)
+            } else {
+                inside[pick % inside.len()]
+            };
+            let angle = pick as f64 * 2.399963229728653;
+            let spread = 120. + (pick % 5) as f64 * 40.;
+            mem.roam_x = (sx + angle.cos() * spread).clamp(RADIUS, self.config.width - RADIUS);
+            mem.roam_y = (sy + angle.sin() * spread).clamp(RADIUS, self.config.height - RADIUS);
+            mem.roam_ticks = 400;
+        } else {
+            mem.roam_ticks = mem.roam_ticks.saturating_sub(2);
+        }
+        (mem.roam_x, mem.roam_y)
+    }
     fn bot_action(&mut self, i: usize) -> Action {
         // Stuck detection runs on the 2-tick decision cadence: a bot that was
         // told to drive but barely moved is grinding cover, not fighting.
@@ -346,7 +412,10 @@ impl Arena {
                 orbit: if i.is_multiple_of(2) { 1. } else { -1. },
                 ..Default::default()
             });
-            if mem.driving && alive && distance(rx, ry, mem.last_x, mem.last_y) < 4. {
+            // Stuck means covering under a third of what the throttle asked
+            // for; slow crawls through turns are not stuck.
+            if mem.driving && alive && distance(rx, ry, mem.last_x, mem.last_y) < mem.expected / 3.
+            {
                 mem.stuck_ticks += 2;
             } else {
                 mem.stuck_ticks = 0;
@@ -356,10 +425,9 @@ impl Arena {
             mem.driving = false;
             if mem.stuck_ticks >= 8 {
                 let angle = self.tick as f64 * 0.05 + i as f64 * 2.399963229728653;
-                mem.wander_x = (rx + angle.cos() * 1200.).clamp(RADIUS, self.config.width - RADIUS);
-                mem.wander_y =
-                    (ry + angle.sin() * 1200.).clamp(RADIUS, self.config.height - RADIUS);
-                mem.wander_ticks = 40;
+                mem.wander_x = (rx + angle.cos() * 500.).clamp(RADIUS, self.config.width - RADIUS);
+                mem.wander_y = (ry + angle.sin() * 500.).clamp(RADIUS, self.config.height - RADIUS);
+                mem.wander_ticks = 20;
                 mem.stuck_ticks = 0;
                 mem.orbit = -mem.orbit;
             }
@@ -376,6 +444,13 @@ impl Arena {
             };
             (mem.orbit, goal)
         };
+        // Patrol state advances every decision so the goal is ready when idle.
+        let roam = self.roam_goal(i);
+        let hunt = self.bot_memory.get(&self.robots[i].robot_id).and_then(|m| {
+            let (rx, ry) = (self.robots[i].x, self.robots[i].y);
+            (m.hunt_until > self.tick && distance(rx, ry, m.hunt_x, m.hunt_y) > 80.)
+                .then_some((m.hunt_x, m.hunt_y))
+        });
         let r = &self.robots[i];
         let mut a = Action::default();
         let nearest = self
@@ -426,13 +501,16 @@ impl Arena {
             }
         } else {
             let z = self.zone();
-            a.label = Some("ROTATE_TO_ZONE".into());
+            // Only chase containers the pickup rule would actually empty into
+            // this robot; others keep bots hovering beside them forever.
             let loot = self
                 .world
                 .containers
                 .iter()
                 .filter(|c| {
-                    !c.contents.is_empty()
+                    c.contents
+                        .iter()
+                        .any(|stack| Self::can_take(r, &stack.kind))
                         && distance(c.x, c.y, r.x, r.y) <= r.vision_range
                         && self.world.los(r.x, r.y, c.x, c.y)
                         && distance(c.x, c.y, z.x, z.y) < z.radius
@@ -440,13 +518,34 @@ impl Arena {
                 .min_by(|a, b| {
                     distance(r.x, r.y, a.x, a.y).total_cmp(&distance(r.x, r.y, b.x, b.y))
                 });
+            // Enemy fire is public: head toward the nearest hostile shot in
+            // earshot instead of wandering away from the fight.
+            let heard = self
+                .projectiles
+                .iter()
+                .filter(|p| p.team != r.team && distance(p.x, p.y, r.x, r.y) < 1100.)
+                .min_by(|a, b| {
+                    distance(r.x, r.y, a.x, a.y).total_cmp(&distance(r.x, r.y, b.x, b.y))
+                })
+                .map(|p| {
+                    let speed = p.vx.hypot(p.vy).max(1.);
+                    (p.x - p.vx / speed * 300., p.y - p.vy / speed * 300.)
+                });
             if let Some(c) = loot {
+                a.label = Some("LOOT".into());
                 if distance(r.x, r.y, c.x, c.y) < 35. {
                     a.pickup = Some(c.item_id.clone());
                 }
                 (c.x, c.y)
+            } else if let Some(goal) = heard {
+                a.label = Some("INVESTIGATE".into());
+                goal
+            } else if let Some(goal) = hunt {
+                a.label = Some("HUNT".into());
+                goal
             } else {
-                (z.x, z.y)
+                a.label = Some("PATROL".into());
+                roam
             }
         };
         let (mut tx, mut ty) = (tx, ty);
@@ -542,24 +641,74 @@ impl Arena {
         }
         // Periodic sweep: contacts arrive coarse but keep bots aware beyond
         // their vision cone. Energy/cooldown gating lives server-side.
-        if self.tick % 200 == (i as u32 * 37) % 200 {
+        // Idle bots scan whenever cooldown and energy allow; fighting bots
+        // keep a slow periodic sweep. Gating lives server-side.
+        if (nearest.is_none() && r.energy > 50.) || self.tick % 200 == (i as u32 * 37) % 200 {
             a.scan = true;
         }
-        let waypoint = local_waypoint(
-            &self.world,
-            (r.x, r.y),
-            (
-                tx.clamp(RADIUS, self.config.width - RADIUS),
-                ty.clamp(RADIUS, self.config.height - RADIUS),
-            ),
-            (self.config.width, self.config.height),
-            RADIUS + 3.,
+        let (tx, ty) = (
+            tx.clamp(RADIUS, self.config.width - RADIUS),
+            ty.clamp(RADIUS, self.config.height - RADIUS),
         );
+        // The local search only succeeds when some expanded node sees the
+        // goal, which far goals on dense maps almost never allow. Plan toward
+        // a horizon point instead, fanning out when the direct one is blocked;
+        // the bot re-plans every decision, so horizons chain into a route.
+        let bounds = (self.config.width, self.config.height);
+        let goal_distance = distance(r.x, r.y, tx, ty);
+        let direct = if goal_distance <= 600. {
+            local_waypoint(&self.world, (r.x, r.y), (tx, ty), bounds, RADIUS + 3.)
+        } else {
+            None
+        };
+        let horizon = goal_distance.clamp(120., 450.);
+        let waypoint = direct.or_else(|| {
+            let base = (ty - r.y).atan2(tx - r.x);
+            [0., 25., -25., 50., -50., 80., -80.]
+                .iter()
+                .filter_map(|offset: &f64| {
+                    let angle = base + offset.to_radians();
+                    let sub = (
+                        (r.x + angle.cos() * horizon).clamp(RADIUS, self.config.width - RADIUS),
+                        (r.y + angle.sin() * horizon).clamp(RADIUS, self.config.height - RADIUS),
+                    );
+                    if !self.world.clear(sub.0, sub.1, RADIUS + 3.) {
+                        return None;
+                    }
+                    local_waypoint(&self.world, (r.x, r.y), sub, bounds, RADIUS + 3.)
+                })
+                .next()
+        });
+        let retreating = a.label.as_deref() == Some("RETREAT_LOW_HP");
         if let Some((wx, wy)) = waypoint {
+            let to_goal = distance(r.x, r.y, tx, ty);
             let wanted = heading(r.x, r.y, wx, wy);
             let turn = (wanted - r.heading + 180.).rem_euclid(360.) - 180.;
-            a.turn = turn.clamp(-18., 18.) / 18.;
-            a.throttle = if a.brake || turn.abs() > 70. { 0. } else { 1. };
+            let roaming = matches!(a.label.as_deref(), Some("PATROL" | "INVESTIGATE"));
+            if roaming && to_goal < 45. {
+                // Arrived: hold position instead of orbiting an unreachable point.
+                a.turn = 0.;
+                a.throttle = 0.;
+                a.brake = true;
+            } else if turn.abs() > 120. && (retreating || to_goal < 350.) {
+                // Goal behind: reverse toward it and keep facing forward rather
+                // than spending a second turning on the spot.
+                let back = (turn + 360.).rem_euclid(360.) - 180.;
+                a.turn = back.clamp(-18., 18.) / 18.;
+                a.throttle = -1.;
+            } else {
+                a.turn = turn.clamp(-18., 18.) / 18.;
+                // Crawl through sharp turns so the bot arcs instead of pivoting.
+                a.throttle = if a.brake {
+                    0.
+                } else if turn.abs() > 70. {
+                    0.35
+                } else if turn.abs() > 35. {
+                    0.7
+                } else {
+                    1.
+                };
+            }
             a.cruise = nearest.is_none()
                 && distance(r.x, r.y, wx, wy) > 800.
                 && turn.abs() < 15.
@@ -588,10 +737,14 @@ impl Arena {
             a.brake = true;
             a.cruise = false;
         }
-        if a.throttle != 0. && !a.brake {
+        if a.throttle.abs() >= 0.3 && !a.brake {
             let id = r.robot_id.clone();
+            let speed = catalog::chassis(&r.loadout.chassis).map_or(80., |c| c.speed);
+            let expected =
+                a.throttle.abs() * speed * if a.throttle < 0. { 0.5 } else { 1. } * 2. * DT;
             if let Some(mem) = self.bot_memory.get_mut(&id) {
                 mem.driving = true;
+                mem.expected = expected;
             }
         }
         a
@@ -854,6 +1007,13 @@ impl Arena {
             r.energy -= 30.;
             r.cooldowns.insert("dash".into(), tick + 80);
             r.channel = None;
+        }
+        // A robot whose centre ended up inside a wall's radius band would see
+        // every sweep hit at t = 0 and freeze for the rest of the match. Push
+        // it back out along the contact normal first.
+        if let Some((px, py)) = self.world.depenetrate(r.x, r.y, RADIUS) {
+            r.x = px.clamp(RADIUS, self.config.width - RADIUS);
+            r.y = py.clamp(RADIUS, self.config.height - RADIUS);
         }
         let nx =
             (r.x + r.heading.to_radians().cos() * travel).clamp(RADIUS, self.config.width - RADIUS);
@@ -1320,6 +1480,21 @@ impl Arena {
         if a.scan && r.energy >= 25. && *r.cooldowns.get("scan").unwrap_or(&0) <= tick {
             let (x, y, id) = (r.x, r.y, r.robot_id.clone());
             let contacts:Vec<_>=self.robots.iter().filter(|v|v.alive&&v.team!=self.robots[i].team&&distance(x,y,v.x,v.y)<=900.).map(|v|json!({"x":(v.x/100.).round()*100.,"y":(v.y/100.).round()*100.,"tick":tick})).collect();
+            if self.robots[i].bot {
+                let nearest = self
+                    .robots
+                    .iter()
+                    .filter(|v| {
+                        v.alive && v.team != self.robots[i].team && distance(x, y, v.x, v.y) <= 900.
+                    })
+                    .map(|v| ((v.x / 100.).round() * 100., (v.y / 100.).round() * 100.))
+                    .min_by(|a, b| distance(x, y, a.0, a.1).total_cmp(&distance(x, y, b.0, b.1)));
+                if let (Some((hx, hy)), Some(mem)) = (nearest, self.bot_memory.get_mut(&id)) {
+                    mem.hunt_x = hx;
+                    mem.hunt_y = hy;
+                    mem.hunt_until = tick + 200;
+                }
+            }
             self.robots[i].energy -= 25.;
             self.robots[i].cooldowns.insert("scan".into(), tick + 160);
             self.event(

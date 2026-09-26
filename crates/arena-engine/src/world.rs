@@ -330,6 +330,52 @@ impl World {
             .filter_map(|i| segment_box(x, y, nx, ny, &self.obstacles[i], r))
             .min_by(f64::total_cmp)
     }
+    /// Position moved out of any obstacle closer than `r`, or None when the
+    /// point is already clear. Resolves up to four contacts, each along the
+    /// normal from the nearest box point; a centre inside a box leaves
+    /// through its nearest face.
+    pub fn depenetrate(&self, x: f64, y: f64, r: f64) -> Option<(f64, f64)> {
+        if self.clear(x, y, r) {
+            return None;
+        }
+        let (mut x, mut y) = (x, y);
+        for _ in 0..4 {
+            let Some(o) = self
+                .grid
+                .query(x - r, y - r, r * 2., r * 2.)
+                .into_iter()
+                .map(|i| &self.obstacles[i])
+                .find(|o| {
+                    let nx = x.clamp(o.x, o.x + o.width);
+                    let ny = y.clamp(o.y, o.y + o.height);
+                    distance(x, y, nx, ny) < r
+                })
+            else {
+                break;
+            };
+            let (nx, ny) = (x.clamp(o.x, o.x + o.width), y.clamp(o.y, o.y + o.height));
+            let d = distance(x, y, nx, ny);
+            if d > 1e-9 {
+                let push = r - d + 0.01;
+                x += (x - nx) / d * push;
+                y += (y - ny) / d * push;
+            } else {
+                let exits = [
+                    (x - o.x, -1., 0.),
+                    (o.x + o.width - x, 1., 0.),
+                    (y - o.y, 0., -1.),
+                    (o.y + o.height - y, 0., 1.),
+                ];
+                let (depth, dx, dy) = exits
+                    .into_iter()
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .unwrap();
+                x += dx * (depth + r + 0.01);
+                y += dy * (depth + r + 0.01);
+            }
+        }
+        Some((x, y))
+    }
     pub fn los(&self, x: f64, y: f64, nx: f64, ny: f64) -> bool {
         self.wall_hit(x, y, nx, ny, 0.).is_none()
     }

@@ -7,11 +7,24 @@ Use `examples/lua-v4/main.lua` (balanced) as the working starting script.
 
 ## Strategy pack
 
-`examples/lua-v4/` ships six more Rust-only strategies that match the box
-console templates: `scout` (transit recon), `assault` (mid-range brawler),
-`sniper` (600-900 railgun control), `support` (repair fields + smoke),
-`sentinel` (safe-zone denial + mines), and `scavenger` (loot priorities +
-explicit weapon equips + transit rides). All assert `obs.version == 4`.
+Every shipped strategy is a short configuration of `arena.tactics`, the SDK's
+complete decision loop: `main` (balanced), `scout` (constant scans, transit
+rides, squad reports), `assault` (close range, dashes, mines), `sniper` (holds
+600-950 units for steady shots, cloaks when hurt), `support` (trails allies,
+repair fields, smoke), `sentinel` (walks a beat around the post nearest the
+zone centre, mines approaches), and `scavenger` (long loot detours, weapon
+priorities). `mise run v4:behaviour` runs each one in two real boxes and checks
+that its robots travel, fight, and fire.
+
+`arena.tactics(options)` returns a `decide` function. Each decision it:
+escapes when pinned against cover, fights the best visible target (retreating
+to cover when hurt), rotates into the zone, heals, picks up nearby loot, hunts
+remembered contacts, and otherwise patrols. Options: `name` (label prefix),
+`range`, `preferred` (engagement distance), `retreat_hp`, `loot_reach`
+(`{ early, late }`), `scan` (`"idle"`, `"always"`, `"never"`), `pickup`
+(pickup priorities), and hooks `on_enemy(obs, target, ctx)`, `idle(obs, ctx)`
+(return an action or a goal point), and `decorate(obs, action, ctx)`.
+`ctx.travel(obs, goal, label)` follows a bounded path with recovery.
 
 ## Observations
 
@@ -83,6 +96,19 @@ Tactical helpers:
 - `best_target(obs, { range = 700, hpWeight = 3 })` picks a visible enemy in
   range with line of sight, favouring near and weak targets.
 - `nearest_site(obs, { kind = "armoury", biome = "urban" })`.
+- `engage(obs, enemy, memory, { preferred, label })` closes in, strafes inside
+  its range band (orbit direction flips on a timer), or kites backwards while
+  firing; aim leads with the enemy's velocity and the weapon's projectile speed.
+- `patrol(obs, memory)` returns deterministic goals at sites inside the zone,
+  re-picked on arrival or after 20 seconds.
+- `unstick(obs, memory)` plus `note_action(memory, action)`: after about
+  0.8 s of commanded driving without progress, backs out while turning.
+
+`drive_to` brakes inside `arrive` (default 25, inside the 35-unit pickup
+reach), slows on approach, crawls through sharp turns, and reverses toward
+nearby points behind the robot instead of pivoting on the spot. `follow_path`
+cuts corners to the furthest visible waypoint. `begin_path` plans around
+walls and still works when the robot is already hugging cover.
 
 `line_of_sight`, `raycast`, and cover checks build a uniform-grid index once per
 geometry array, so dense district maps (about 6,000 obstacles) stay within the
