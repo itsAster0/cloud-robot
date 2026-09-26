@@ -183,3 +183,28 @@ projectiles. This remains a preliminary accelerated sample, not Linux capacity
 qualification or evidence that every navigation scenario meets the tick budget.
 The full Go suite, 29 Rust rule tests, Rust Clippy, eight frontend tests, Svelte
 checks and frontend production build passed after these changes.
+
+## Dense district maps (2026-09-26)
+
+Each site now has a biome (urban, industrial, forest, desert). Themed structures
+fill each site's cell outside its core rings and street cross: rooms with
+doorways, container yards, groves, rock formations, and sandbag outposts. The
+default 42,000×26,250 world has about 5,900 obstacles, up from 832. District
+placement uses its own RNG stream, so core rings, scatter, and hazards stay
+identical for a seed. Tests check clearance between structures, hazard
+avoidance, room exits, and a pinned layout hash.
+
+The browser paints textured ground, roads between grid-neighbour sites, site
+plazas, hazards, and material sprites. The sprites come from a CC0 Kenney atlas
+built by `scripts/build-terrain-atlas.sh`. Chunks are cached at two
+resolutions, and new chunk paints are capped at six per frame. In a local
+Chrome check, a 24-robot match rendered at 120 fps with a 9.3 ms frame p95.
+
+To keep tick cost flat, each step now reindexes only robot positions. Static
+geometry is reindexed on edits and restores. Grid queries use a hash map with
+sorted dedupe. On the Apple M4 host, the 256-robot `match` benchmark (200
+ticks) measured simulation p99 20.7 ms on the dense map. The previous sparse
+map measured 18–28 ms. The 64-robot sample measured 7.8 ms. State hashes
+matched before and after the grid change. Every step still serializes full
+geometry in the snapshot. Replay pages now store layout once per page, so dense
+maps no longer multiply replay size.

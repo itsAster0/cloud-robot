@@ -238,8 +238,9 @@ export interface ArenaObstacle {
   radius?: number;
   width?: number;
   height?: number;
-  // Visual theme from the Rust generator: wall, hedge, glass, or rock.
-  // Collision and vision treat every material identically.
+  // Visual theme from the Rust generator: wall, hedge, glass, rock, brick,
+  // metal, container, crate, barrel, tree, or sandbag. Collision and vision
+  // treat every material identically.
   material?: string;
 }
 
@@ -269,9 +270,31 @@ export interface Projectile {
   ttl: number;
 }
 
+export interface WorldSite {
+  id?: string;
+  kind: string;
+  x: number;
+  y: number;
+  // District theme: urban, industrial, forest, or desert. Visual only.
+  biome?: string;
+}
+
+export interface WorldHazard {
+  id?: string;
+  kind: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  damagePerSecond?: number;
+}
+
 export interface Snapshot {
  revision?: number;
  transit?: {id:string; x:number; y:number; targetX:number; targetY:number}[];
+  // Engine v4 static layout: sent on first delivery and on revision changes.
+  hazards?: WorldHazard[];
+  sites?: WorldSite[];
   type: 'snapshot';
   // Protocol version 3: adds mines, turrets (empty for now), dash/scan state.
   version: number;

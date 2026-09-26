@@ -18,7 +18,7 @@ explicit weapon equips + transit rides). All assert `obs.version == 4`.
 `self` contains your robot's equipment, health, shield, energy, cooldowns,
 `weapons`, `activeWeapon`, `inventory`, `actionResults`, and strategy label.
 `robots` contains visible opponents and allied status. Invisible opponents are
-not updated. Terrain, sites, transit, and hazards are public. Nearby loot,
+not updated. Terrain, sites (with a visual-only `biome`), transit, and hazards are public. Nearby loot,
 projectiles, and mines are filtered by range and occlusion. `events` includes
 perceivable events and public announcements; scan contacts are coarse and omit
 health and inventory. Save last-seen contacts in your own Lua memory.

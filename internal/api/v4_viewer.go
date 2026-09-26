@@ -83,7 +83,7 @@ func (v *v4Viewer) project(raw []byte) []byte {
 		s[key], _ = json.Marshal(kept)
 	}
 	if v.started && string(v.revision) == string(s["revision"]) {
-		for _, k := range []string{"obstacles", "hazards", "transit"} {
+		for _, k := range staticLayoutKeys {
 			delete(s, k)
 		}
 	} else {
