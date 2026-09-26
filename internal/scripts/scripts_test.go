@@ -21,8 +21,8 @@ func TestListReturnsCuratedTemplates(t *testing.T) {
 		}
 		// Every Rust-only template must target the v4 protocol and use the
 		// bounded navigation helpers so deployed scripts fit large maps and
-		// the 16 KiB snapshot limit.
-		if !strings.Contains(template.Source, "obs.version == 4") {
+		// the 16 KiB snapshot limit. arena.tactics asserts version 4 itself.
+		if !strings.Contains(template.Source, "obs.version == 4") && !strings.Contains(template.Source, "arena.tactics(") {
 			t.Fatalf("template %q does not target v4 arenas", template.Name)
 		}
 		if len(template.Source) > 16*1024 {
@@ -54,7 +54,7 @@ func TestGetTemplateAndUnknownRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(source, "drive_to") {
+	if !strings.Contains(source, "arena.tactics(") || !strings.Contains(source, "ASSAULT") {
 		t.Fatalf("assault template lost its behavior: %q", source)
 	}
 	if _, err := Get("does-not-exist"); err == nil {

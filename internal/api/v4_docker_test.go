@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +99,18 @@ func TestV4DockerSSHSmoke(t *testing.T) {
 arena.run({url=assert(os.getenv("ROBOT_ARENA_URL")),token=assert(os.getenv("ROBOT_TOKEN")),decide=function(o)
 return arena.control({throttle=0.8,turn=0.1,fire=true,label="SSH_SMOKE"}) end})
 `
+	// ARENA_SMOKE_SCRIPT runs a real strategy file instead and additionally
+	// checks that its robots travel rather than circling in place.
+	behaviour := os.Getenv("ARENA_SMOKE_SCRIPT")
+	duration := 12
+	if behaviour != "" {
+		raw, readErr := os.ReadFile(filepath.Join("..", "..", behaviour))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		// Zone phases scale with match length; 90 s keeps them realistic.
+		source, duration = string(raw), 90
+	}
 	for _, user := range []string{"a", "b"} {
 		boxID := boxes.IDForUser(identity.users[user])
 		// Never remove anything not created for this uniquely named smoke run.
@@ -136,7 +149,7 @@ return arena.control({throttle=0.8,turn=0.1,fire=true,label="SSH_SMOKE"}) end})
 			t.Fatalf("workspace lost after restart: %v", err)
 		}
 	}
-	match := call("a", "POST", "/api/v4/matches", map[string]any{"mode": "quick-duel", "capacity": 2, "width": 2400, "height": 1500, "durationSeconds": 12, "seed": 42})
+	match := call("a", "POST", "/api/v4/matches", map[string]any{"mode": "quick-duel", "capacity": 2, "width": 2400, "height": 1500, "durationSeconds": duration, "seed": 42})
 	id := match["matchId"].(string)
 	for _, user := range []string{"a", "b"} {
 		call(user, "POST", "/api/matches/"+id+"/robots", map[string]any{"displayName": "Smoke " + user, "runtime": "lua5.4", "startCommand": "lua main.lua", "sdkVersion": "0.4.0", "loadout": map[string]any{"chassis": "generalist", "weapon": "plasma"}})
@@ -165,7 +178,7 @@ return arena.control({throttle=0.8,turn=0.1,fire=true,label="SSH_SMOKE"}) end})
 		}
 	}
 	inputs, err := store.GetReplayObject(ctx, "replays/"+id+"/v4/inputs-000000.json")
-	if err != nil || !strings.Contains(inputs, "SSH_SMOKE") {
+	if err != nil || (behaviour == "" && !strings.Contains(inputs, "SSH_SMOKE")) || !strings.Contains(inputs, "label") {
 		for _, user := range []string{"a", "b"} {
 			output, _ := exec.Command("docker", "logs", "--tail", "12", boxes.IDForUser(identity.users[user])).CombinedOutput()
 			t.Logf("box %s: %s", user, output)
@@ -191,6 +204,15 @@ return arena.control({throttle=0.8,turn=0.1,fire=true,label="SSH_SMOKE"}) end})
 		}
 		_ = json.Unmarshal(frame, &s)
 		fired = fired || len(s.Projectiles) > 0
+	}
+	if behaviour != "" {
+		fired = checkLuaMovement(t, ctx, store, id, completed.Robots) || fired
+		if t.Failed() {
+			for _, user := range []string{"a", "b"} {
+				output, _ := exec.Command("docker", "logs", "--tail", "15", boxes.IDForUser(identity.users[user])).CombinedOutput()
+				t.Logf("box %s log tail:\n%s", user, output)
+			}
+		}
 	}
 	if !fired {
 		t.Fatal("Lua agents never fired")
@@ -235,4 +257,82 @@ func TestV4StoredSmoke(t *testing.T) {
 	if err != nil || len(decoded) == 0 {
 		t.Fatalf("stored frames: %v", err)
 	}
+}
+
+// checkLuaMovement reads every replay page and asserts each human robot
+// covered real ground and left its spawn area, then logs decision labels.
+func checkLuaMovement(t *testing.T, ctx context.Context, store *cloud.Store, id string, robots []model.RobotSubmission) (fired bool) {
+	t.Helper()
+	type point struct{ x, y float64 }
+	start, last := map[string]point{}, map[string]point{}
+	path, reach := map[string]float64{}, map[string]float64{}
+	trail := map[string]string{}
+	for page := 0; ; page++ {
+		raw, err := store.GetReplayObject(ctx, fmt.Sprintf("replays/%s/v4/frames-%06d.gz.b64", id, page))
+		if err != nil {
+			break
+		}
+		frames, err := unpackFrames(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, frame := range frames {
+			var s struct {
+				Robots []struct {
+					RobotID string  `json:"robotId"`
+					X       float64 `json:"x"`
+					Y       float64 `json:"y"`
+					Alive   bool    `json:"alive"`
+					HP      float64 `json:"hp"`
+					Heading float64 `json:"heading"`
+				} `json:"robots"`
+				Tick        uint32            `json:"tick"`
+				Projectiles []json.RawMessage `json:"projectiles"`
+				Zone        *struct {
+					X, Y, Radius float64
+				} `json:"zone"`
+			}
+			_ = json.Unmarshal(frame, &s)
+			fired = fired || len(s.Projectiles) > 0
+			for _, r := range s.Robots {
+				if s.Tick%100 == 0 {
+					zone := ""
+					if s.Zone != nil {
+						zone = fmt.Sprintf(" zone(%.0f,%.0f r%.0f)", s.Zone.X, s.Zone.Y, s.Zone.Radius)
+					}
+					trail[r.RobotID] += fmt.Sprintf(" t%d(%.0f,%.0f h%.0f hp%.0f%s)%s", s.Tick, r.X, r.Y, r.Heading, r.HP, map[bool]string{true: "", false: " DEAD"}[r.Alive], zone)
+				}
+				now := point{r.X, r.Y}
+				if _, ok := start[r.RobotID]; !ok {
+					start[r.RobotID] = now
+				}
+				if prev, ok := last[r.RobotID]; ok && r.Alive {
+					path[r.RobotID] += math.Hypot(now.x-prev.x, now.y-prev.y)
+				}
+				last[r.RobotID] = now
+				reach[r.RobotID] = math.Max(reach[r.RobotID], math.Hypot(now.x-start[r.RobotID].x, now.y-start[r.RobotID].y))
+			}
+		}
+	}
+	labels := map[string]int{}
+	for page := 0; ; page++ {
+		raw, err := store.GetReplayObject(ctx, fmt.Sprintf("replays/%s/v4/inputs-%06d.json", id, page))
+		if err != nil {
+			break
+		}
+		if at := strings.Index(raw, "script error"); at >= 0 {
+			t.Logf("script error in inputs: %s", raw[at:min(len(raw), at+400)])
+		}
+		for _, part := range strings.Split(raw, `"label":"`)[1:] {
+			labels[part[:strings.IndexByte(part, '"')]]++
+		}
+	}
+	t.Logf("labels: %v", labels)
+	for _, robot := range robots {
+		t.Logf("%s travelled %.0f units, reached %.0f from spawn", robot.DisplayName, path[robot.RobotID], reach[robot.RobotID])
+		if path[robot.RobotID] < 300 || reach[robot.RobotID] < 150 {
+			t.Errorf("%s barely moved: path %.0f, reach %.0f; trail:%s", robot.DisplayName, path[robot.RobotID], reach[robot.RobotID], trail[robot.RobotID])
+		}
+	}
+	return fired
 }

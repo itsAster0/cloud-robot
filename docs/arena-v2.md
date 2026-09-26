@@ -208,3 +208,27 @@ map measured 18–28 ms. The 64-robot sample measured 7.8 ms. State hashes
 matched before and after the grid change. Every step still serializes full
 geometry in the snapshot. Replay pages now store layout once per page, so dense
 maps no longer multiply replay size.
+
+## Bot and strategy behaviour (2026-09-26)
+
+A behaviour test (`crates/arena-engine/tests/bot_behaviour.rs`) measured
+server bots spinning in place on 43% of decisions. The cause: all idle bots
+drove to the zone centre, circled it, and stopped the throttle on any turn
+over 70 degrees. Bots now patrol hashed sites inside the zone. They
+investigate enemy fire, hunt their own scan contacts, and chase only loot
+they can take. They brake on arrival, reverse toward nearby goals behind
+them, and plan toward 450-unit horizons with a fan of angles. Stuck detection
+compares progress with the commanded speed. Over 1,200 ticks, bots spin on
+0% of decisions and grind cover on under 30%. Damage dealt rose from 865 to
+2,051 in a 32-robot battle royale and from 55 to 207 in a duel. The test
+fails if these regress. Robots embedded in cover are pushed out before
+moving. The 256-robot `match` benchmark p99 is 15.7 ms.
+
+All seven Lua strategies previously barely left spawn in real boxes (51-375
+units in a 90 s duel). SDK bugs caused it:
+- `begin_path` gave every inflated box a radius, so paths ran through walls.
+- The final waypoint braked at 48 units, outside the 35-unit pickup reach.
+- Robots already hugging cover were planned as unreachable.
+
+Strategies now share `arena.tactics`. `mise run v4:behaviour` shows each
+travelling 1,500-2,800 units and firing.
