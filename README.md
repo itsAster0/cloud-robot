@@ -179,7 +179,7 @@ All endpoints, credentials, ports, and limits come from environment variables (s
 | `ADMIN_USER_IDS` | Comma-separated WorkOS IDs allowed on admin status | unset |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Admin console login; empty password disables it | `admin` / `local-admin-change-me` |
 | `ARENA_ENABLED` | Keep the always-on arena running | `true` |
-| `ARENA_CAPACITY` | Arena slots (2..128); map size grows with it | `24` |
+| `ARENA_CAPACITY` | Minimum arena slots (2..128). A session grows to twice the previous session's player peak plus 8, up to 128, and the map widens with it | `24` |
 | `ARENA_SESSION_SECONDS` | Arena session length before a new map (60..21600) | `1800` |
 | `ADMIN_SESSION_SECRET` | HMAC key for admin sessions (16+ chars); random per start when unset | unset |
 | `MAINTENANCE_MODE` | Refuse new matches while current matches finish | `false` |

@@ -1231,7 +1231,10 @@ fn snapshot_loot_lists_its_contents_and_arena_fields() {
     let a = Arena::new(config(2)).unwrap();
     let snap = a.snapshot();
     let item = &snap["items"][0];
-    assert!(item["contents"][0]["kind"].is_string(), "viewer needs loot contents: {item}");
+    assert!(
+        item["contents"][0]["kind"].is_string(),
+        "viewer needs loot contents: {item}"
+    );
     assert_eq!(snap["mode"], "sandbox");
     assert_eq!(snap["endTick"], 1080 * 20);
     assert!(snap["robots"][0]["deaths"].is_number());

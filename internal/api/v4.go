@@ -356,6 +356,11 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 			joins = append(joins, join.Registration)
 			m.Robots = append(m.Robots, join.Submission)
 		}
+		if config.Mode == "arena" && len(joining) > 0 {
+			s.mu.Lock()
+			s.arenaPeak = max(s.arenaPeak, humanRobots(m.Robots))
+			s.mu.Unlock()
+		}
 		if config.Mode == "arena" && len(withdrawals) > 0 {
 			// Arena players leave for good; dropping them here stops action
 			// collection and the missing-agent timer for them.

@@ -243,6 +243,10 @@ Join with the normal `POST /api/matches/{id}/robots` while the arena is
 withdraws it and frees the box immediately. Arena snapshots add `mode`,
 `endTick`, and per-robot `deaths` and `respawnIn` (ticks, or null).
 
+Sizing: each new session has max(`ARENA_CAPACITY`, 2 × last session's peak
+players + 8) slots, capped at 128, and the map area grows with slots. The
+map does not resize during a session.
+
 Limits: the arena holds one match worker slot for its whole session. The
 join queue is in memory; a server restart fails the running session and a
 new one starts within about 10 seconds.

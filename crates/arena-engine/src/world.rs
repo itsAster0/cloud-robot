@@ -319,6 +319,11 @@ impl World {
                 _ => continue,
             };
             let (cw, ch) = (c.width / cols as f64, c.height / cols as f64);
+            // Small cells have no room beside their districts; the shared
+            // hazards already cover them.
+            if cw.min(ch) < 1400. {
+                continue;
+            }
             let q = rng.next_u64() % 4;
             let px = sx + if q.is_multiple_of(2) { -1. } else { 1. } * cw * 0.3;
             let py = sy + if q < 2 { -1. } else { 1. } * ch * 0.3;

@@ -80,8 +80,11 @@ type Server struct {
 	// arenas maps running matches to their engine so HTTP handlers can request
 	// mid-match actions (withdrawal) without owning tick state.
 	arenas map[string]*engine.Arena
-	rateMu sync.Mutex
-	rates  map[string]time.Time
+	// arenaPeak is the most players seen at once in the last arena session;
+	// the next session sizes its map from it. Guarded by mu.
+	arenaPeak int
+	rateMu    sync.Mutex
+	rates     map[string]time.Time
 }
 
 // SetLogs attaches the admin log buffer.
