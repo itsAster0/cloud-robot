@@ -268,8 +268,22 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 		if config.Mode == "arena" && state.Tick%20 == 0 {
 			for _, r := range state.Robots {
 				if _, human := players[r.RobotID]; human {
-					lastSeen[r.RobotID] = model.RobotSummary{RobotID: r.RobotID, Name: r.Name, Team: r.Team, DamageDealt: int(r.DamageDealt), DamageTaken: int(r.DamageTaken), Kills: r.Kills, Deaths: r.Deaths, Score: r.Score}
+					lastSeen[r.RobotID] = model.RobotSummary{RobotID: r.RobotID, Name: r.Name, Team: r.Team, DamageDealt: int(r.DamageDealt), DamageTaken: int(r.DamageTaken), Kills: r.Kills, Deaths: r.Deaths, Score: r.Score, PlayerID: players[r.RobotID].PlayerID}
 				}
+			}
+			// The arena never finishes, so its player stats are saved every
+			// minute for the leaderboard instead of at the end.
+			if state.Tick > 0 && state.Tick%1200 == 0 && len(lastSeen) > 0 {
+				stats := make([]model.RobotSummary, 0, len(lastSeen))
+				for _, seen := range lastSeen {
+					stats = append(stats, seen)
+				}
+				raw, _ := json.Marshal(stats)
+				go func(key string) {
+					if err := s.store.PutReplayObject(context.WithoutCancel(ctx), key, string(raw)); err != nil {
+						slog.Warn("save arena stats", "match", m.MatchID, "error", err)
+					}
+				}(arenaStatsKey(m.MatchID))
 			}
 		}
 		if state.Tick%10 == 0 {
@@ -375,11 +389,6 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 			joins = append(joins, join.Registration)
 			m.Robots = append(m.Robots, join.Submission)
 			players[join.Submission.RobotID] = join.Submission
-		}
-		if config.Mode == "arena" && len(joining) > 0 {
-			s.mu.Lock()
-			s.arenaPeak = max(s.arenaPeak, humanRobots(m.Robots))
-			s.mu.Unlock()
 		}
 		if config.Mode == "arena" && len(withdrawals) > 0 {
 			// Arena players leave for good; dropping them here stops action

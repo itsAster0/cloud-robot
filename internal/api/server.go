@@ -82,11 +82,8 @@ type Server struct {
 	// arenas maps running matches to their engine so HTTP handlers can request
 	// mid-match actions (withdrawal) without owning tick state.
 	arenas map[string]*engine.Arena
-	// arenaPeak is the most players seen at once in the last arena session;
-	// the next session sizes its map from it. Guarded by mu.
-	arenaPeak int
-	rateMu    sync.Mutex
-	rates     map[string]time.Time
+	rateMu sync.Mutex
+	rates  map[string]time.Time
 }
 
 // SetLogs attaches the admin log buffer.
@@ -441,7 +438,7 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rosterCap = config.Capacity
-		if config.Bots != nil {
+		if config.Bots != nil && match.Mode != "arena" {
 			// Slots reserved for bots are not open to players.
 			rosterCap = config.Capacity - *config.Bots
 		}

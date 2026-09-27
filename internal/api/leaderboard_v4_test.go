@@ -48,3 +48,15 @@ func TestV4LeaderboardRanksPlayersWithoutLeakingAccountIDs(t *testing.T) {
 		t.Fatalf("unknown handle: %d", response.StatusCode)
 	}
 }
+
+func TestV4LeaderboardCountsTheRunningArena(t *testing.T) {
+	h := newHarness(t)
+	h.store.matches["live"] = model.Match{MatchID: "live", EngineVersion: 4, Mode: "arena", Status: model.MatchRunning}
+	stats, _ := json.Marshal([]model.RobotSummary{{RobotID: "r", Name: "Cy", Team: "t", PlayerID: "user-cy", Score: 450, Kills: 3}})
+	h.store.PutReplayObject(t.Context(), arenaStatsKey("live"), string(stats))
+	_, payload := h.request(t, http.MethodGet, "/api/v4/leaderboard?mode=arena", "")
+	players := payload["players"].([]any)
+	if len(players) != 1 || players[0].(map[string]any)["score"].(float64) != 450 {
+		t.Fatalf("running arena stats missing: %v", payload)
+	}
+}

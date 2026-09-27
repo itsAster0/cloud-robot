@@ -17,7 +17,7 @@
   ];
   // `config: null` is the always-on arena: no lobby, no start, respawns.
   const fights: { id: string; name: string; detail: string; minutes: number; config: Record<string, unknown> | null; featured?: boolean }[] = [
-    { id: 'arena', name: 'The Arena', detail: 'Drop into the always-on arena with everyone else. Respawn when destroyed.', minutes: 0, config: null, featured: true },
+    { id: 'arena', name: 'The Arena', detail: 'Drop into the never-ending arena. Follow the drifting safe zone; respawn when destroyed.', minutes: 0, config: null, featured: true },
     { id: 'duel', name: 'Warm-up', detail: 'You vs 1 bot', minutes: 3, config: { mode: 'sandbox', capacity: 2, width: 2400, height: 1500, durationSeconds: 180, siteCount: 4, coverPerSite: 8, lootPerSite: 16 } },
     { id: 'brawl', name: 'Brawl', detail: 'You vs 5 bots', minutes: 3, config: { mode: 'sandbox', capacity: 6, width: 2400, height: 1500, durationSeconds: 180, siteCount: 4, coverPerSite: 8, lootPerSite: 16 } },
     { id: 'royale', name: 'Battle royale', detail: 'You vs 15 bots on a big map', minutes: 5, config: { mode: 'br-solo', capacity: 16, width: 12000, height: 7500, durationSeconds: 300, siteCount: 16, coverPerSite: 8, lootPerSite: 16 } },

@@ -19,6 +19,8 @@
         <b style:color={color(e.robotId)}>{name(e.robotId)}</b> claimed <b>${e.damage}</b> bounty on <b style:color={color(e.targetId)}>{name(e.targetId)}</b>
       {:else if e.type === 'hill_moved'}
         <span class="icon">⬡</span> Uplink moved to {e.message?.replace('site-', 'site ')}
+      {:else if e.type === 'zone_moved'}
+        <span class="icon">◎</span> The safe zone is moving: follow the dashed ring
       {:else if e.type === 'robot_joined'}
         <b style:color={color(e.robotId)}>{name(e.robotId)}</b> joined the arena
       {/if}

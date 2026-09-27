@@ -299,3 +299,16 @@ travelling 1,500-2,800 units and firing.
   10 ticks) so the every-other-tick viewer stream never drops a kill.
 - Tests: scoring with Uplink and bounties, spawn protection, salvage expiry
   and restock.
+
+## Endless drifting arena (2026-09-27)
+
+- `Arena.drift`: legs of 1800 ticks; each leg glides (smoothstep) from the
+  last circle to one 0.6 × radius away along a seeded wandering heading,
+  turning from world edges, so consecutive zones always overlap. Radius
+  1500 + 300√n, clamped. 4 HP/s outside. `zone_moved` event per leg.
+- Spawns, respawns, and the Uplink use sites inside the zone. Bots already
+  roam inside the zone.
+- Arena never finishes. Population target = max(bots, players), capped by
+  capacity; joins displace bots only while at the target.
+- Tests: drift overlap, bounds, movement, never finishing, growth past the
+  bot target, capacity limit. Live: 128 robots at 20.2 ticks/s.

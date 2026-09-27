@@ -14,7 +14,7 @@
 <div class="grid gap-3 rounded-2xl border border-border bg-card p-4" aria-label="Arena scoreboard">
   <div class="flex flex-wrap items-baseline justify-between gap-2">
     <h3 class="m-0 text-base font-semibold">Scoreboard</h3>
-    <span class="font-mono text-xs text-muted-foreground">{players} {players === 1 ? 'player' : 'players'} · {robots.length - players} bots{#if endTick} · new map in {clock}{/if}</span>
+    <span class="font-mono text-xs text-muted-foreground">{players} {players === 1 ? 'player' : 'players'} · {robots.length - players} bots{#if endTick} · zone moves in {clock}{/if}</span>
   </div>
   {#if you && !you.alive && you.respawnIn != null}
     <div class="respawn flex items-center gap-3 rounded-xl border border-primary/40 bg-accent p-3 text-sm" role="status">

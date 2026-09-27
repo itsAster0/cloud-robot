@@ -442,6 +442,32 @@ pub struct Zone {
     pub radius: f64,
     pub damage: f64,
     pub stage: usize,
+    /// Arena only: where the drifting zone is heading and when it arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<ZoneNext>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoneNext {
+    pub x: f64,
+    pub y: f64,
+    pub radius: f64,
+    pub arrives_at: u32,
+}
+/// The arena's drifting safe zone: each leg glides from one circle to the
+/// next, which always overlaps it, so play keeps moving across the world.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Drift {
+    pub from_x: f64,
+    pub from_y: f64,
+    pub from_r: f64,
+    pub to_x: f64,
+    pub to_y: f64,
+    pub to_r: f64,
+    pub leg_start: u32,
+    pub leg: u32,
+    pub heading: f64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
