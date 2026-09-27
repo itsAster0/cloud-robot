@@ -21,11 +21,13 @@ impl Arena {
                     let r = &self.robots[i];
                     let (x, y) = (r.x, r.y);
                     let item_id = self.id("equipment");
+                    let expires_at = self.salvage_expiry();
                     self.world.containers.push(Container {
                         item_id,
                         x,
                         y,
                         contents: vec![item],
+                        expires_at,
                     });
                 }
                 Err(code) => self.robots[i].action_results.push(code.into()),

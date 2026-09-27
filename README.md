@@ -94,7 +94,13 @@ Players see their own box output on **More → SSH & runtime**.
 
 - **The Arena:** an always-on free-for-all the server keeps running. Players
   join and leave at any time from **Play → The Arena**; destroyed robots
-  respawn after 5 seconds and keep their score; there is no zone. Bots fill
+  respawn after 5 seconds with 2 seconds of spawn protection and keep their
+  score; there is no zone. Score: +100 per kill, +5 per second for holding
+  the Uplink objective alone (it moves to another site every minute), and a
+  bounty of 50 per streak kill for ending a robot's 3+ kill streak. Salvage
+  fades after 30 seconds and site loot restocks every 30 seconds. The viewer
+  has a kill feed, Uplink and bounty markers, and camera modes (selected
+  robot, leader, my robot, free). Bots fill
   empty slots and give way when a player joins. Sessions last
   `ARENA_SESSION_SECONDS` (default 30 minutes), then a fresh map starts.
 - **Modes:** solo and duo/trio/squad battle royale (up to 256 slots, optional

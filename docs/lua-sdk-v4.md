@@ -151,3 +151,13 @@ for paths; `arena.line_of_fire(x1, y1, x2, y2, obstacles)` ignores water and is
 what `can_see`, `best_target`, `find_cover`, and `engage` use for shooting.
 Other materials added with biomes: `cliff`, `pine`, `ice`, `deadtree`, and
 `reeds`; all block movement and shots like walls.
+
+## Arena objective: the Uplink
+
+In arena mode `obs.hill` is `{ siteId, x, y, radius, movesAt, holder,
+contested, pointsPerSecond }`: a 260-unit circle on one site that moves every
+1200 ticks. Robots of a single team inside it score `pointsPerSecond` each
+second; a mixed crowd is `contested` and scores nothing. `arena.uplink(obs)`
+returns it or nil. `arena.tactics` goes to the Uplink and holds it when there
+is nothing to fight or loot; pass `uplink = false` to keep your own `idle`.
+`obs.self` also has `score`, `streak`, and `protectedUntil`.

@@ -128,6 +128,12 @@ export interface RobotState {
   // Arena mode: deaths so far and ticks until the robot respawns.
   deaths?: number;
   respawnIn?: number | null;
+  // Arena scoring: points, current kill streak, bounty on this robot, and
+  // spawn protection after a respawn.
+  score?: number;
+  streak?: number;
+  bounty?: number;
+  protected?: boolean;
   robotId: string;
   name: string;
   team: ArenaTeam;
@@ -333,11 +339,15 @@ export interface Snapshot {
   robots: RobotState[];
   projectiles: Projectile[];
   events?: ArenaEvent[];
+  // Recent kills, bounties, joins, and Uplink moves (last 10 ticks).
+  feed?: ArenaEvent[];
   width?: number;
   height?: number;
   mapId?: string;
   mode?: string;
   endTick?: number;
+  // Arena Uplink objective; null outside arena mode.
+  hill?: { siteId: string; x: number; y: number; radius: number; movesAt: number; holder: string; contested: boolean; pointsPerSecond: number } | null;
   obstacles?: ArenaObstacle[];
   items?: ArenaItem[];
   mines?: MineState[];

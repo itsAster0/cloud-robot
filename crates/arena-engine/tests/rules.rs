@@ -2,7 +2,7 @@ use arena_engine::{
     catalog::{self, Loadout},
     edit::Edit,
     model::*,
-    simulation::Arena,
+    simulation::{Arena, KILL_POINTS, RESTOCK_TICKS, SPAWN_PROTECT_TICKS},
     world::*,
 };
 use serde_json::json;
@@ -42,6 +42,7 @@ fn rejected_consumable_drop_preserves_inventory_at_chunk_limit() {
             x: 100.,
             y: 100.,
             contents: vec![],
+            expires_at: None,
         });
     }
     a.step(
@@ -278,6 +279,7 @@ fn pickup_has_no_silent_weapon_replacement() {
             count: 1,
             ..Default::default()
         }],
+        expires_at: None,
     });
     a.step(
         BTreeMap::from([(
@@ -516,6 +518,7 @@ fn corpse_and_smoke_do_not_reveal_contacts() {
             count: 1,
             ..Default::default()
         }],
+        expires_at: None,
     });
     assert_eq!(a.observation(0)["robots"].as_array().unwrap().len(), 0);
     assert_eq!(a.observation(0)["items"].as_array().unwrap().len(), 0);
@@ -594,6 +597,7 @@ fn explicit_swap_preserves_weapon_state_and_last_weapon() {
             count: 1,
             ..Default::default()
         }],
+        expires_at: None,
     });
     a.step(
         BTreeMap::from([(
@@ -657,6 +661,7 @@ fn automatic_pickup_obeys_preferences_without_swapping() {
                 ..Default::default()
             },
         ],
+        expires_at: None,
     });
     a.step(
         BTreeMap::from([(
@@ -689,6 +694,7 @@ fn utility_swaps_keep_spent_charges_and_cooldowns() {
             count: 1,
             ..Default::default()
         }],
+        expires_at: None,
     });
     a.step(
         BTreeMap::from([(
@@ -1238,4 +1244,74 @@ fn snapshot_loot_lists_its_contents_and_arena_fields() {
     assert_eq!(snap["mode"], "sandbox");
     assert_eq!(snap["endTick"], 1080 * 20);
     assert!(snap["robots"][0]["deaths"].is_number());
+}
+
+#[test]
+fn arena_scores_kills_bounties_and_the_uplink() {
+    let mut a = Arena::new(arena_config(8, 600)).unwrap();
+    let (mut bounty, mut kills, mut moved) = (false, 0, false);
+    for _ in 0..6000 {
+        a.step(BTreeMap::new(), &[]).unwrap();
+        bounty |= a.events.iter().any(|e| e.r#type == "bounty_claimed");
+        kills += a.events.iter().filter(|e| e.r#type == "kill").count();
+        moved |= a.events.iter().any(|e| e.r#type == "hill_moved");
+    }
+    assert!(kills > 0 && moved, "kills {kills}, hill moved {moved}");
+    let total_kills: u32 = a.robots.iter().map(|r| r.kills).sum();
+    let total_score: u32 = a.robots.iter().map(|r| r.score).sum();
+    assert!(
+        total_score >= total_kills * KILL_POINTS,
+        "kills score points"
+    );
+    assert!(
+        total_score > total_kills * KILL_POINTS,
+        "Uplink or bounties add points (bounty seen: {bounty})"
+    );
+    let snap = a.snapshot();
+    assert!(snap["hill"]["x"].is_number() && snap["robots"][0]["score"].is_number());
+}
+
+#[test]
+fn arena_spawn_protection_blocks_damage_until_expiry() {
+    let mut a = Arena::new(arena_config(2, 600)).unwrap();
+    let t = a.tick;
+    a.robots[0].protected_until = t + SPAWN_PROTECT_TICKS;
+    a.robots[0].burn_until = t + 10;
+    let hp = a.robots[0].hp;
+    a.step(BTreeMap::new(), &[]).unwrap();
+    assert_eq!(a.robots[0].hp, hp, "protected robots ignore burn damage");
+}
+
+#[test]
+fn arena_salvage_expires_and_site_loot_restocks() {
+    let mut a = Arena::new(arena_config(2, 600)).unwrap();
+    let site_loot = a.restock.len();
+    assert!(site_loot > 0);
+    a.world.containers.clear();
+    a.world.containers.push(Container {
+        item_id: "salvage-x".into(),
+        x: 100.,
+        y: 100.,
+        contents: vec![],
+        expires_at: Some(5),
+    });
+    for _ in 0..10 {
+        a.step(BTreeMap::new(), &[]).unwrap();
+    }
+    assert!(
+        !a.world.containers.iter().any(|c| c.item_id == "salvage-x"),
+        "salvage fades"
+    );
+    for _ in 0..RESTOCK_TICKS {
+        a.step(BTreeMap::new(), &[]).unwrap();
+    }
+    assert!(
+        a.world
+            .containers
+            .iter()
+            .filter(|c| c.item_id.starts_with("loot-"))
+            .count()
+            > site_loot / 2,
+        "site loot restocks"
+    );
 }
