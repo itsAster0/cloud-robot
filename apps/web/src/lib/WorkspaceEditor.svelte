@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { highlightLua } from './luaHighlight';
   import { tick } from 'svelte';
 
   type Template = { name: string; description: string };
@@ -36,7 +37,9 @@
   } = $props();
 
   let confirmReplace = $state(false);
-  let scrollTop = $state(0);
+  let scrollTop = $state(0), scrollLeft = $state(0);
+  // Trailing newline keeps the layer as tall as the textarea's last line.
+  let highlighted = $derived(highlightLua(source) + '\n ');
   let cursor = $state({ line: 1, column: 1 });
   let tabIndents = $state(true);
   let lines = $derived(source.split('\n').length);
@@ -96,14 +99,6 @@
 </script>
 
 <section class="workspace-editor" aria-label="Robot code workspace" aria-busy={busy}>
-  <header class="workspace-heading">
-    <div>
-      <p class="section-label">Robot workspace</p>
-      <h2>Your strategy starts here.</h2>
-      <p class="intro">Edit your Lua robot, check its syntax, then save a version for your next match.</p>
-    </div>
-    <a class="docs-link" href="#/docs/sdk">SDK reference <span aria-hidden="true">↗</span></a>
-  </header>
 
   <div class="strategy-bar">
     <div class="strategy-select">
@@ -149,6 +144,10 @@
     {:else}
       <div class="code-area">
         <div class="line-numbers" aria-hidden="true"><pre style:transform={`translateY(-${scrollTop}px)`}>{Array.from({ length: lines }, (_, index) => index + 1).join('\n')}</pre></div>
+        <div class="code-layer">
+        <!-- Highlighted copy under a transparent textarea; both share font,
+             padding, and scroll offsets so every glyph lines up. -->
+        <pre class="highlight" aria-hidden="true" style:transform={`translate(-${scrollLeft}px, -${scrollTop}px)`}>{@html highlighted}</pre>
         <textarea
           aria-label="main.lua source code"
           aria-describedby="editor-keyboard-help"
@@ -165,8 +164,9 @@
           onclick={(event) => updateCursor(event.currentTarget)}
           onkeyup={(event) => updateCursor(event.currentTarget)}
           onselect={(event) => updateCursor(event.currentTarget)}
-          onscroll={(event) => scrollTop = event.currentTarget.scrollTop}
+          onscroll={(event) => { scrollTop = event.currentTarget.scrollTop; scrollLeft = event.currentTarget.scrollLeft; }}
         ></textarea>
+        </div>
       </div>
     {/if}
     <div class="editor-status">
@@ -192,14 +192,8 @@
 
 <style>
   .workspace-editor { color: #dce5ef; min-width: 0; }
-  .workspace-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 24px; }
-  .section-label { color: #7bd4c5; font-size: 10px; letter-spacing: .15em; text-transform: uppercase; font-weight: 650; margin: 0 0 8px; }
-  h2 { font-size: clamp(22px, 3vw, 30px); font-weight: 600; letter-spacing: -.035em; line-height: 1.2; margin: 0 0 8px; }
-  .intro { color: #91a0b4; font-size: 13px; line-height: 1.6; margin: 0; max-width: 530px; }
   a { color: #a9c8cf; text-decoration: none; }
   a:hover { color: #7de4d1; }
-  .docs-link { font-size: 12px; white-space: nowrap; padding-top: 5px; }
-  .docs-link span { margin-left: 6px; }
   .strategy-bar { display: flex; gap: 20px; align-items: center; background: #121b29; border: 1px solid #273447; border-radius: 10px; padding: 16px; margin-bottom: 20px; }
   .strategy-select { flex: 0 0 180px; }
   label { display: block; color: #a7b6c8; font-size: 11px; margin-bottom: 7px; }
@@ -220,9 +214,23 @@
   .text-button { margin-left: auto; margin-right: 14px; padding: 6px 0; background: none; border: 0; color: #a8bccf; cursor: pointer; font: inherit; font-size: 11px; }
   .text-button:hover { color: #7de4d1; }
   .code-area { display: flex; height: 440px; min-height: 280px; }
-  .line-numbers { flex-shrink: 0; width: 54px; overflow: hidden; text-align: right; background: #0c1522; user-select: none; }
+  /* padding-top: 0 overrides a legacy global .line-numbers rule that shifted
+     the gutter one line down. */
+  .line-numbers { flex-shrink: 0; width: 54px; padding: 0; border: 0; font: inherit; overflow: hidden; text-align: right; background: #0c1522; user-select: none; }
   .line-numbers pre { color: #566a83; padding: 20px 14px 20px 0; margin: 0; }
-  .line-numbers pre, textarea { font-family: var(--font-mono, 'SFMono-Regular', Consolas, monospace); font-size: 12px; line-height: 22px; font-variant-ligatures: none; tab-size: 2; }
+  .code-layer { position: relative; flex: 1; min-width: 0; overflow: hidden; background: #0a121f; }
+  .highlight { position: absolute; top: 0; left: 0; margin: 0; padding: 20px 18px; color: #cbd9e9; white-space: pre; pointer-events: none; }
+  .code-layer textarea { position: relative; background: transparent; color: transparent; -webkit-text-fill-color: transparent; }
+  .code-layer textarea::selection { background: rgba(115, 223, 199, .28); -webkit-text-fill-color: transparent; }
+  .code-layer textarea[readonly] { color: transparent; }
+  .highlight :global(.tok-keyword) { color: #c792ea; }
+  .highlight :global(.tok-string) { color: #c3e88d; }
+  .highlight :global(.tok-number) { color: #f78c6c; }
+  .highlight :global(.tok-comment) { color: #5f7389; font-style: italic; }
+  .highlight :global(.tok-arena) { color: #73dfc7; }
+  .highlight :global(.tok-call) { color: #82aaff; }
+  .highlight :global(.tok-builtin) { color: #ffcb6b; }
+  .line-numbers pre, .highlight, textarea { font-family: var(--font-mono, 'SFMono-Regular', Consolas, monospace); font-size: 12px; line-height: 22px; font-variant-ligatures: none; tab-size: 2; }
   textarea { display: block; flex: 1; min-width: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 20px 18px; margin: 0; background: #0a121f; border: none; border-radius: 0; resize: none; color: #cbd9e9; outline-offset: -3px; caret-color: #83e0ce; }
   textarea::placeholder { color: #667b93; }
   textarea:focus { outline: 1px solid #438c88; }
@@ -266,7 +274,6 @@
     .workspace-footer { gap: 10px; }
   }
   @media (max-width: 460px) {
-    .workspace-heading { flex-direction: column; gap: 10px; }
     .editor-status > div { gap: 10px; }
     .editor-status > div span:last-child { display: none; }
     .line-numbers { width: 40px; }
