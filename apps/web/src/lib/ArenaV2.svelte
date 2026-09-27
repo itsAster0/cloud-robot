@@ -69,7 +69,7 @@
   let mode = $state('br-solo'), capacity = $state(64), size = $state(35), duration = $state(1080), liveEdit = $state(false);
   let siteCount = $state(64), coverPerSite = $state(8), lootPerSite = $state(16), seed = $state(0);
   let chassis = $state('generalist'), weapon = $state('plasma'), modules = $state<string[]>([]), utilities = $state<string[]>([]);
-  let name = $state('My robot'), squad = $state('squad-00'), error = $state(''), message = $state(''), busy = $state(false);
+  let name = $state('My robot'), squad = $state(''), error = $state(''), message = $state(''), busy = $state(false);
   let match = $state<Match | null>(null), snapshot = $state.raw<Snapshot | null>(null), selected = $state(''), idInput = $state('');
   let source = $state(''), revision = $state(''), editorLoaded = $state(false), privateView = $state(false), paused = $state(false);
   let edit = $state('{"expectedRevision":1,"effectiveTick":100,"obstacles":[],"removeObstacles":[],"containers":[],"transit":[]}');
@@ -93,8 +93,29 @@
   let cost = $derived((chassisCosts[chassis] ?? 0) + (weapons[weapon] ?? 0) + modules.length * 10 + utilities.reduce((n, id) => n + utilityCosts[id], 0));
   let dirty = $derived(editorLoaded && source !== savedSource);
   // Public match data hides owners, so "mine" comes from the box binding.
-  let myRobotId = $derived(box?.activeRobotId && match?.robots.some(r => r.robotId === box?.activeRobotId) ? box.activeRobotId : '');
+  let registeredId = $state('');
+  let myRobotId = $derived(
+    registeredId && match?.robots.some(r => r.robotId === registeredId) ? registeredId
+    : box?.activeRobotId && match?.robots.some(r => r.robotId === box?.activeRobotId) ? box.activeRobotId : '');
+  // Keep the box binding fresh while a match is open (joins from other pages).
+  $effect(() => {
+    if (!signedIn || !match || match.status === 'finished' || match.status === 'failed') return;
+    const timer = setInterval(() => void refreshBox(), 5000);
+    return () => clearInterval(timer);
+  });
   let welcome = $state('');
+  let confirmLeave = $state(false);
+  // Frees the box: lobby registrations are dropped and a running robot
+  // concedes; the player keeps watching as a spectator.
+  async function leaveMatch() {
+    await task(async () => {
+      await api.releaseBox();
+      confirmLeave = false; privateView = false; selected = '';
+      await refreshBox();
+      if (match) match = await api.getMatch(match.matchId);
+      message = 'You left the match. Your box is free for the next one; you can keep watching.';
+    });
+  }
   let autoSelectedFor = '';
   $effect(() => {
     const id = match?.matchId ?? '';
@@ -120,6 +141,22 @@
   let canRegister = $derived(signedIn && box?.status === 'running' && !dirty && cost <= 60);
   let inspected = $derived(selected ? snapshot?.robots.find(r => r.robotId === selected) ?? overview.find(r => r.robotId === selected) : undefined);
   function closeMatch() { clearTimeout(retryTimer); const current = socket; socket = null; current?.close(); match = null; snapshot = null; overview = []; replayEnd = 0; selected = ''; matchPreview = null; idInput = ''; if (window.location.hash.startsWith('#/v2/')) window.location.hash = '#/workspace/matches'; }
+  let teamSize = $state(4), botFill = $state(true), botCount = $state(0);
+  const teamNames: Record<number, string> = { 2: 'Duo', 3: 'Trio', 4: 'Squad' };
+  // Human title for a match, including duo/trio team sizes.
+  function matchTitle(m: Match) {
+    const size = (m.arenaConfig as { teamSize?: number } | undefined)?.teamSize;
+    if (m.mode === 'br-squad' && size) return `${teamNames[size] ?? `${size}-player team`} battle royale`;
+    return title(m.mode);
+  }
+  let lobbyTeams = $derived([...new Set((match?.robots ?? []).filter(r => !r.bot).map(r => r.team))]);
+  let lobbyBots = $derived((match?.arenaConfig as { bots?: number } | undefined)?.bots);
+  let lobbyCapacity = $derived((match?.arenaConfig as { capacity?: number } | undefined)?.capacity ?? 0);
+  let copiedLink = $state(false);
+  async function copyLink() {
+    if (!match) return;
+    try { await navigator.clipboard.writeText(`${location.origin}/#/v2/${match.matchId}`); copiedLink = true; setTimeout(() => copiedLink = false, 2000); } catch { message = `Share this link: ${location.origin}/#/v2/${match.matchId}`; }
+  }
   const title = (id: string) => ({ 'br-solo': 'Solo battle royale', 'br-squad': 'Squad battle royale', 'quick-duel': 'Quick duel', sandbox: 'Sandbox' }[id] ?? id.replace(/_/g, ' '));
   async function task(fn: () => Promise<void>) { busy = true; error = ''; message = ''; try { await fn(); } catch (e) { error = e instanceof Error ? e.message : String(e); } finally { busy = false; } }
   function loadout(): Loadout { return { chassis, weapon, modules: [...modules], utilities: [...utilities] }; }
@@ -134,7 +171,7 @@
   function preset(id: string) { if (id === 'scout') { chassis = 'scout'; weapon = 'machine_gun'; modules = ['optics', 'mobility_tuning']; utilities = ['cloak_emitter']; } else if (id === 'sniper') { chassis = 'generalist'; weapon = 'railgun'; modules = ['optics', 'cooling_system']; utilities = []; } else if (id === 'support') { chassis = 'generalist'; weapon = 'plasma'; modules = ['capacitor']; utilities = ['repair_field', 'smoke_projector']; } else { chassis = 'generalist'; weapon = 'machine_gun'; modules = ['reinforced_plating', 'cooling_system']; utilities = ['mine_dispenser']; } }
   function previewConfig() {
     const large = mode === 'br-solo' || mode === 'br-squad';
-    return { mode, capacity, width: large ? 1200 * size : 2400, height: large ? 750 * size : 1500, durationSeconds: duration, liveEdit, siteCount, coverPerSite, lootPerSite, seed };
+    return { mode, capacity, width: large ? 1200 * size : 2400, height: large ? 750 * size : 1500, durationSeconds: duration, liveEdit, siteCount, coverPerSite, lootPerSite, seed, ...(mode === 'br-squad' ? { teamSize } : {}), ...(botFill ? {} : { bots: Math.min(botCount, capacity) }) };
   }
   async function fetchPreview() {
     if (!signedIn) { mapPreview = null; return; }
@@ -175,7 +212,7 @@
   async function loadFinal() { if (match) {snapshot = await request<Snapshot>(`/api/v4/matches/${match.matchId}/final`);replayEnd=snapshot.tick;replayTick=snapshot.tick;} }
  async function seekReplay(){if(!match)return;const sequence=++seekSequence;const page=Math.floor(replayTick/100);try{const result=await request<{frames:Snapshot[]}>(`/api/v4/matches/${match.matchId}/replay?page=${page}`);if(sequence!==seekSequence)return;if(!result.frames.length)throw new Error('No replay frames are available for this tick.');const nearest=result.frames.reduce((best,frame)=>Math.abs(frame.tick-replayTick)<Math.abs(best.tick-replayTick)?frame:best,result.frames[0]);const withLayout=result.frames.filter(frame=>frame.obstacles&&frame.tick<=nearest.tick);const layout=withLayout[withLayout.length-1]??result.frames[0];snapshot={obstacles:layout.obstacles,hazards:layout.hazards,transit:layout.transit,sites:layout.sites,...nearest};}catch(e){error=e instanceof Error?e.message:String(e);}}
  async function inspectTrace(){await task(async()=>{if(!match)return;trace=JSON.stringify(await request(`/api/v4/matches/${match.matchId}/trace?tick=${replayTick}`),null,2);});}
-  async function register() { await task(async () => { if (!match) return; if (dirty) throw new Error('Save your browser changes before registering. Matches run the saved workspace file.'); const response = await request<{ match: Match }>(`/api/matches/${match.matchId}/robots`, { method: 'POST', body: JSON.stringify({ displayName: name, team: squad, runtime: 'lua5.4', startCommand: 'lua main.lua', sdkVersion: '0.4.0', loadout: loadout() }) }); match = response.match; privateView = true; await refreshBox(); message = 'Script and build registered. Start once all human agents are connected.'; }); }
+  async function register() { await task(async () => { if (!match) return; if (dirty) throw new Error('Save your browser changes before registering. Matches run the saved workspace file.'); const before = new Set(match.robots.map(r => r.robotId)); const response = await request<{ match: Match }>(`/api/matches/${match.matchId}/robots`, { method: 'POST', body: JSON.stringify({ displayName: name, team: squad, runtime: 'lua5.4', startCommand: 'lua main.lua', sdkVersion: '0.4.0', loadout: loadout() }) }); match = response.match; registeredId = match.robots.find(r => !before.has(r.robotId))?.robotId ?? ''; await refreshBox(); message = 'Script and build registered. Start once all human agents are connected.'; }); }
   async function start() { await task(async () => { if (match) match = await api.startMatch(match.matchId); }); }
   async function control(command: string) { await task(async () => { if (!match) return; const result = await request<{ paused: boolean }>(`/api/v4/matches/${match.matchId}/control`, { method: 'POST', body: JSON.stringify({ command }) }); paused = result.paused; }); }
   async function readSource() { if (dirty && !confirmReload) { confirmReload = true; return; } confirmReload = false; await task(async () => { const result = await request<{ source: string; revision: string }>('/api/v4/me/script'); source = result.source; savedSource = result.source; revision = result.revision; editorLoaded = true; syntaxResult = null; }); }
@@ -267,7 +304,7 @@
       {#if panel !== 'code'}
         <section class="surface controls recent"><div class="section-heading"><h2>{panel === 'results' ? 'Recent results' : 'Recent arenas'}</h2><button class="quiet" onclick={refreshMatches} disabled={matchesLoading}>{matchesLoading ? 'Loading…' : 'Refresh'}</button></div>
           {#if matchesError}<p class="validation-error">{matchesError}</p>{:else if matchesLoading && !recentMatches.length}<p class="hint">Loading arenas…</p>{:else if !recentMatches.filter(item => panel !== 'results' || item.status === 'finished').length}<p class="hint">{panel === 'results' ? 'No finished Arena V2 matches yet. Complete a sandbox or match to start reviewing.' : 'No Arena V2 matches yet. Create the first lobby above.'}</p>{:else}
-            {#each recentMatches.filter(item => panel !== 'results' || item.status === 'finished').slice(0, 8) as item}<button class="match-row" class:selected={match?.matchId === item.matchId} onclick={() => openListed(item)} disabled={busy}><span><strong>{title(item.mode)}</strong><small>{item.matchId.slice(0, 8)} · {new Date(item.createdAt).toLocaleDateString()}</small></span><span class="state-label">{item.status}</span></button>{/each}
+            {#each recentMatches.filter(item => panel !== 'results' || item.status === 'finished').slice(0, 8) as item}<button class="match-row" class:selected={match?.matchId === item.matchId} onclick={() => openListed(item)} disabled={busy}><span><strong>{matchTitle(item)}</strong><small>{item.matchId.slice(0, 8)} · {new Date(item.createdAt).toLocaleDateString()}</small></span><span class="state-label">{item.status}</span></button>{/each}
           {/if}
         </section>
       {/if}
@@ -275,19 +312,19 @@
     <main>
       <section class="surface arena-panel">
         {#if panel !== 'build' && (match || panel !== 'results')}
-        <div class="matchbar"><div><p class="eyebrow">{match ? 'CURRENT ARENA' : 'RUN & OBSERVE'}</p><h2><span class="status-dot" class:live={match?.status === 'running'}></span>{match ? title(match.mode) : 'Your next run starts here'}</h2>{#if match}<a class="match-id" href={`#/v2/${match.matchId}`}>{match.matchId}</a>{/if}</div>{#if match}<span class="state-label">{match.status}</span>{/if}</div>
+        <div class="matchbar"><div><p class="eyebrow">{match ? 'CURRENT ARENA' : 'RUN & OBSERVE'}</p><h2><span class="status-dot" class:live={match?.status === 'running'}></span>{match ? matchTitle(match) : 'Your next run starts here'}</h2>{#if match}<a class="match-id" href={`#/v2/${match.matchId}`}>{match.matchId}</a>{/if}</div>{#if match}<span class="state-label">{match.status}</span>{/if}</div>
         {/if}
         {#if panel === 'build'}
           <div class="setup-wrap"><LoadoutBuilder bind:chassis bind:weapon bind:modules bind:utilities {busy} {signedIn} onsave={saveBuild}/></div>
         {:else if !match && (panel === 'match' || panel === 'debug')}
-          <div class="setup-wrap"><MatchSetup bind:mode bind:capacity bind:size bind:duration bind:siteCount bind:coverPerSite bind:lootPerSite bind:seed bind:liveEdit {signedIn} {busy} preview={mapPreview} {previewLoading} testing={panel === 'debug'} onmodechange={modeDefaults} oncreate={create} onrandomize={randomizeSeed} {onSignIn}/></div>
+          <div class="setup-wrap"><MatchSetup bind:mode bind:teamSize bind:botFill bind:botCount bind:capacity bind:size bind:duration bind:siteCount bind:coverPerSite bind:lootPerSite bind:seed bind:liveEdit {signedIn} {busy} preview={mapPreview} {previewLoading} testing={panel === 'debug'} onmodechange={modeDefaults} oncreate={create} onrandomize={randomizeSeed} {onSignIn}/></div>
         {:else if !match && panel === 'results'}
           <div class="setup-wrap grid gap-3 grid-cols-1">
             <p class="m-0 text-sm text-muted-foreground">Pick a finished match to scrub its replay, click robots to inspect them, and check your robot's recorded decisions.</p>
             <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 grid-cols-1">
               {#each recentMatches.filter(item => item.status === 'finished').slice(0, 12) as item (item.matchId)}
                 <a class="grid gap-1 rounded-xl border border-border bg-background p-4 text-foreground no-underline transition-colors hover:border-primary/60 hover:bg-muted/40 grid-cols-1" href={`#/v2/${item.matchId}`}>
-                  <span class="flex items-center justify-between gap-2"><strong class="text-sm">{title(item.mode)}</strong><span class="font-mono text-[11px] text-muted-foreground">{item.matchId.slice(0, 8)}</span></span>
+                  <span class="flex items-center justify-between gap-2"><strong class="text-sm">{matchTitle(item)}</strong><span class="font-mono text-[11px] text-muted-foreground">{item.matchId.slice(0, 8)}</span></span>
                   <span class="text-xs text-muted-foreground">{new Date(item.createdAt).toLocaleString()}</span>
                   <span class="text-sm">{item.winnerTeam ? `Winner: ${item.winnerTeam}` : 'Finished'}</span>
                   <span class="text-xs text-primary">Open replay →</span>
@@ -305,14 +342,35 @@
         {:else}
           {#if match.status === 'failed'}<p class="notice error" role="alert">{match.error || 'This match failed. Create a new lobby to try again.'}</p>{/if}
           {#if match.status === 'lobby'}
-            <div class="lobby-steps"><div class="lobby-summary"><strong>{match.robots.length} human robot{match.robots.length === 1 ? '' : 's'} registered</strong><p>Empty slots fill with server bots when the match starts.</p></div>
-              <div class="registration"><div class="robot-fields"><label>Robot name<input bind:value={name} maxlength="32"/></label>{#if match.mode === 'br-squad'}<label>Squad name<input bind:value={squad} maxlength="32"/></label>{/if}</div><p class="hint">{title(chassis)} · {title(weapon)} · {cost}/60 points <a href="#/workspace/build">Edit loadout</a></p>
+            <div class="lobby-steps grid grid-cols-1 gap-4">
+              <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div class="rounded-lg bg-muted/60 p-3"><span class="block text-xs text-muted-foreground">Players joined</span><strong class="font-mono text-xl">{match.robots.length}<span class="text-sm text-muted-foreground"> / {lobbyBots === undefined ? lobbyCapacity : lobbyCapacity - lobbyBots}</span></strong></div>
+                <div class="rounded-lg bg-muted/60 p-3"><span class="block text-xs text-muted-foreground">Bots at start</span><strong class="font-mono text-xl">{lobbyBots === undefined ? 'fill' : lobbyBots}</strong><span class="block text-xs text-muted-foreground">{lobbyBots === undefined ? 'every empty slot' : 'fixed count'}</span></div>
+                <div class="rounded-lg bg-muted/60 p-3"><span class="block text-xs text-muted-foreground">Mode</span><strong class="text-sm">{matchTitle(match)}</strong></div>
+              </div>
+              <div class="grid grid-cols-1 gap-2 rounded-lg border border-border p-3">
+                <span class="text-sm font-medium">Invite friends</span>
+                <div class="flex flex-wrap items-center gap-2"><code class="min-w-0 flex-1 truncate rounded-md bg-background px-3 py-2 font-mono text-xs">{location.origin}/#/v2/{match.matchId}</code><button onclick={copyLink}>{copiedLink ? 'Copied ✓' : 'Copy link'}</button></div>
+                <span class="text-xs text-muted-foreground">Anyone signed in can open the link, register their robot, and join. Logged-out visitors can watch.</span>
+              </div>
+              <div class="registration"><div class="robot-fields"><label>Robot name<input bind:value={name} maxlength="32"/></label>{#if match.mode === 'br-squad'}<label>Team<select bind:value={squad}><option value="">Any open team</option>{#each lobbyTeams as team}<option value={team}>{team}</option>{/each}<option value={`team-${lobbyTeams.length + 1}`}>New team</option></select></label>{/if}</div><p class="hint">{title(chassis)} · {title(weapon)} · {cost}/60 points <a href="#/workspace/build">Edit loadout</a></p>
                 {#if dirty}<p class="validation-error">Save your browser changes before registering. The match uses the file saved in your runtime.</p>{/if}
-                <div class="actions"><button class="primary" onclick={register} disabled={busy || !canRegister || registered}>{registered ? 'Robot registered' : 'Register saved script'}</button><button onclick={start} disabled={busy || !signedIn}>Start match</button></div><p class="hint">Registration snapshots main.lua. Start when all human agents are connected. Only the lobby owner can start it.</p>
+                <div class="actions"><button class="primary" onclick={register} disabled={busy || !canRegister || registered}>{registered ? 'Robot registered' : 'Join with my robot'}</button><button onclick={start} disabled={busy || !signedIn}>Start match</button></div><p class="hint">Joining snapshots your saved main.lua. The lobby owner starts the match once everyone's robot is connected.</p>
               </div>
             </div>
             {#if matchPreview}<MapPreview preview={matchPreview}/>{/if}
           {:else if match.status === 'queued'}<p class="notice" role="status">Your match is queued. The simulation will appear when the worker starts it.</p>{/if}
+          {#if myRobotId && (match.status === 'lobby' || match.status === 'queued' || match.status === 'running')}
+            <div class="leave-bar">
+              <span><i class="status-dot live"></i>You are playing as <strong>{match.robots.find(r => r.robotId === myRobotId)?.displayName ?? 'your robot'}</strong></span>
+              {#if confirmLeave}
+                <span class="leave-confirm">Leave? Your robot is removed and your box is freed for another match.</span>
+                <button class="danger" onclick={leaveMatch} disabled={busy}>{busy ? 'Leaving…' : 'Leave match'}</button><button class="quiet" onclick={() => confirmLeave = false}>Stay</button>
+              {:else}
+                <button class="quiet" onclick={() => confirmLeave = true}>Leave match</button>
+              {/if}
+            </div>
+          {/if}
           {#if match.mode === 'sandbox' && match.status === 'running'}<div class="sandbox-toolbar"><span class="state-label">{paused ? 'Paused' : 'Running'}</span><button onclick={() => control(paused ? 'resume' : 'pause')} disabled={busy || !signedIn}>{paused ? 'Resume' : 'Pause'}</button><button onclick={() => control('step')} disabled={busy || !signedIn}>Step one tick</button><span class="hint">Owner controls</span></div>{/if}
           {#if match.status === 'finished'}<div class="result-heading"><div><p class="eyebrow">MATCH COMPLETE</p><h2>{match.winnerTeam ? `${match.winnerTeam} wins` : 'Final results'}</h2></div><button onclick={() => showPanel('code')}>Revise your script →</button></div>{/if}
           {#if replayEnd > 0}<div class="replay"><label>Replay <strong>{(replayTick / (snapshot?.tickRate ?? 20)).toFixed(1)}s / {(replayEnd / (snapshot?.tickRate ?? 20)).toFixed(1)}s</strong><input aria-label="Replay tick" type="range" min="0" max={replayEnd} step="10" bind:value={replayTick} onchange={seekReplay}/></label><button onclick={inspectTrace} disabled={busy || !signedIn}>Inspect my decision at this tick</button>{#if trace}<pre>{trace}</pre>{/if}</div>{/if}
@@ -332,6 +390,10 @@
 </section>
 <style>
   .v2 .setup-wrap { padding:20px 22px; }
+  .v2 .leave-bar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:12px 20px; border-bottom:1px solid var(--v2-border); font-size:13px; }
+  .v2 .leave-bar > span:first-child { display:flex; align-items:center; gap:8px; margin-right:auto; }
+  .v2 .leave-confirm { color:#f2a49b; font-size:12px; }
+  .v2 .leave-bar .danger { border-color:#7a3a36; color:#ffb4ab; background:#2a1414; }
   .v2 .welcome-banner { display:flex; gap:16px; align-items:flex-start; padding:16px 18px; margin-bottom:20px; border:1px solid color-mix(in srgb, var(--v2-accent) 50%, transparent); border-radius:12px; background:color-mix(in srgb, var(--v2-accent) 10%, transparent); animation:welcome-in .5s ease both; }
   .v2 .welcome-banner strong { font-size:15px; }
   .v2 .welcome-banner p { margin:4px 0 0; font-size:13px; color:var(--v2-muted); line-height:1.6; }
@@ -422,8 +484,6 @@
   .v2 .match-row small { display:block; color:var(--v2-muted); font:9px 'DM Mono',monospace; margin-top:5px; }
   .v2 .match-row .state-label { font-size:9px; padding:3px 5px; }
   .v2 .lobby-steps,.v2 .replay { padding:20px 22px; border-bottom:1px solid var(--v2-border); }
-  .v2 .lobby-summary strong { font-size:13px; }
-  .v2 .lobby-summary p { font-size:12px; color:var(--v2-muted); margin:6px 0; }
   .v2 .robot-fields { display:flex; gap:12px; }
   .v2 .robot-fields label { flex:1; min-width:0; margin-bottom:0; }
   .v2 .sandbox-toolbar { display:flex; align-items:center; gap:9px; padding:14px 20px; border-bottom:1px solid var(--v2-border); flex-wrap:wrap; }

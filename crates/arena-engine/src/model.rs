@@ -38,6 +38,13 @@ pub struct Config {
     /// Loot containers per site. Default 16, range 0..=32.
     #[serde(default)]
     pub loot_per_site: usize,
+    /// Robots per team in br-squad: 2 duo, 3 trio, 4 squad (0 means 4).
+    #[serde(default)]
+    pub team_size: usize,
+    /// Bots to add at start. None fills every empty slot; Some(n) adds at
+    /// most n, leaving the rest open for players who join by link.
+    #[serde(default)]
+    pub bots: Option<usize>,
     #[serde(default)]
     pub robots: Vec<Registration>,
 }
@@ -57,6 +64,20 @@ fn default_duration() -> u32 {
     1080
 }
 impl Config {
+    /// Effective team size for br-squad (4 when unset).
+    pub fn squad_size(&self) -> usize {
+        if self.team_size == 0 {
+            4
+        } else {
+            self.team_size
+        }
+    }
+    /// Robots the match starts with: every slot, or humans plus the bot cap.
+    pub fn roster_target(&self) -> usize {
+        let humans = self.robots.iter().filter(|r| !r.bot).count();
+        self.bots
+            .map_or(self.capacity, |b| (humans + b).min(self.capacity))
+    }
     pub fn validate(&self) -> Result<(), String> {
         if !["br-solo", "br-squad", "sandbox", "quick-duel"].contains(&self.mode.as_str()) {
             return Err("unknown v4 mode".into());
@@ -86,8 +107,14 @@ impl Config {
         if self.loot_per_site > 32 {
             return Err("loot per site must be 0..32".into());
         }
-        if self.mode == "br-squad" && !self.capacity.is_multiple_of(4) {
-            return Err("squad capacity must be divisible by four".into());
+        if self.team_size > 8 {
+            return Err("team size must be 1..8".into());
+        }
+        if self.mode == "br-squad" && !self.capacity.is_multiple_of(self.squad_size()) {
+            return Err("capacity must be a multiple of the team size".into());
+        }
+        if self.bots.is_some_and(|b| b > self.capacity) {
+            return Err("bots cannot exceed capacity".into());
         }
         let mut ids = std::collections::BTreeSet::new();
         let mut teams = BTreeMap::<String, usize>::new();
@@ -107,7 +134,7 @@ impl Config {
                 }
                 let n = teams.entry(r.team.clone()).or_default();
                 *n += 1;
-                if *n > 4 {
+                if *n > self.squad_size() {
                     return Err("squad is full".into());
                 }
             }

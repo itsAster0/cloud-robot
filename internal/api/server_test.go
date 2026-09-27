@@ -161,6 +161,7 @@ func (f *fakeStore) ReceiveJob(context.Context) (cloud.Job, bool, error) {
 func (f *fakeStore) DeleteJob(context.Context, string) error { return nil }
 
 type fakeProvisioner struct {
+	lateMarkers  bool
 	box          model.BoxRecord
 	ensureErr    error
 	statusErr    error
@@ -200,6 +201,11 @@ func (f *fakeProvisioner) ConfigureAgent(_ context.Context, _ string, config box
 	}
 	f.configured = append(f.configured, config)
 	f.box.AgentStatus = "starting"
+	if f.lateMarkers {
+		// The real supervisor applies markers asynchronously; its first
+		// status reply after configuring can still be empty.
+		return f.box, nil
+	}
 	// Mirror box-supervisor: configuring an agent sets the active markers.
 	f.box.ActiveRobotID, f.box.ActiveMatchID = config.RobotID, config.MatchID
 	return f.box, nil

@@ -126,11 +126,17 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 	}
 	// Fill remaining v4 roster slots at start. Bots use same Rust sensing and
 	// action rules as human robots, so an unregistered practice lobby still moves.
-	for len(m.Robots) < config.Capacity {
+	target := config.Capacity
+	if config.Bots != nil {
+		target = min(config.Capacity, humanRobots(m.Robots)+*config.Bots)
+	}
+	for bot := 0; len(m.Robots) < target; bot++ {
 		i := len(m.Robots)
 		team := fmt.Sprintf("bot-%03d", i)
 		if config.Mode == "br-squad" {
-			team = fmt.Sprintf("squad-%02d", i/4)
+			// Bot teams get their own names so they never merge into a
+			// player-named team.
+			team = fmt.Sprintf("bots-%02d", bot/config.SquadSize())
 		}
 		m.Robots = append(m.Robots, model.RobotSubmission{
 			RobotID: fmt.Sprintf("bot-%03d", i), DisplayName: fmt.Sprintf("Game Bot %d", i+1),

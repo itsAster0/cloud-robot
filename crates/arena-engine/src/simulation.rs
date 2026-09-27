@@ -69,7 +69,9 @@ impl Arena {
             *teams.entry(r.team.clone()).or_default() += 1;
         }
         let mut bot_id = 0;
-        while config.robots.len() < config.capacity {
+        let target = config.roster_target();
+        let squad_size = config.squad_size();
+        while config.robots.len() < target {
             let id = loop {
                 let candidate = format!("bot-{bot_id:03}");
                 bot_id += 1;
@@ -80,7 +82,7 @@ impl Arena {
             let team = if config.mode == "br-squad" {
                 let available = teams
                     .iter()
-                    .find(|(_, n)| **n < 4)
+                    .find(|(_, n)| **n < squad_size)
                     .map(|(name, _)| name.clone());
                 let team = available.unwrap_or_else(|| {
                     let mut n = 0;
