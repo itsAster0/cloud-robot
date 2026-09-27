@@ -175,6 +175,12 @@ patrol_obs.self.x, patrol_obs.self.y = goal_a.x, goal_a.y
 local next_goal = arena.patrol(patrol_obs, memory_a)
 check("patrol moves on after arrival", arena.distance(next_goal, goal_a) > 1 or memory_a.count == 2)
 
+local pond = { { id = "pond", shape = "aabb", x = 100, y = -50, width = 100, height = 100, material = "water" } }
+check("water blocks paths", not arena.line_of_sight(0, 0, 300, 0, pond))
+check("shots cross water", arena.line_of_fire(0, 0, 300, 0, pond))
+local wall = { { id = "wall", shape = "aabb", x = 100, y = -50, width = 100, height = 100, material = "brick" } }
+check("walls block shots", not arena.line_of_fire(0, 0, 300, 0, wall))
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)

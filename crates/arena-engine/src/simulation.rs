@@ -1546,7 +1546,7 @@ impl Arena {
         if w.id == "railgun" {
             let nx = x + angle.to_radians().cos() * w.range;
             let ny = y + angle.to_radians().sin() * w.range;
-            let wall = self.world.wall_hit(x, y, nx, ny, 0.).unwrap_or(1.);
+            let wall = self.world.shot_hit(x, y, nx, ny, 0.).unwrap_or(1.);
             let target = self
                 .robot_grid
                 .query(x.min(nx), y.min(ny), (nx - x).abs(), (ny - y).abs())
@@ -1601,7 +1601,7 @@ impl Arena {
         for mut p in std::mem::take(&mut self.projectiles) {
             let nx = p.x + p.vx * DT;
             let ny = p.y + p.vy * DT;
-            let wall = self.world.wall_hit(p.x, p.y, nx, ny, 2.).unwrap_or(2.);
+            let wall = self.world.shot_hit(p.x, p.y, nx, ny, 2.).unwrap_or(2.);
             let target = self
                 .robot_grid
                 .query(

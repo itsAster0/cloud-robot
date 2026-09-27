@@ -43,6 +43,15 @@
     for (let gx = 0; gx <= preview.width; gx += 1024) {
       c.beginPath(); c.moveTo(X(gx), oy); c.lineTo(X(gx), oy + preview.height * scale); c.stroke();
     }
+    // Biome regions: each site's climate tints the ground around it.
+    const biomeTint: Record<string, string> = { urban: '#7c8a93', industrial: '#6b5f4c', forest: '#2f6b3a', desert: '#b8964f', snow: '#dce8f2', swamp: '#4c5a24' };
+    const spread = Math.max(preview.width, preview.height) / Math.max(1, Math.ceil(Math.sqrt((preview.sites ?? []).length))) * scale * 0.75;
+    c.globalAlpha = 0.22;
+    for (const s of preview.sites ?? []) {
+      c.fillStyle = biomeTint[s.biome ?? ''] ?? '#2f6b3a';
+      c.beginPath(); c.arc(X(s.x), Y(s.y), spread, 0, Math.PI * 2); c.fill();
+    }
+    c.globalAlpha = 1;
     for (const h of preview.hazards ?? []) {
       c.fillStyle = h.kind === 'slow' ? 'rgba(255,200,87,0.16)' : 'rgba(255,91,77,0.18)';
       c.fillRect(X(h.x), Y(h.y), Math.max(2, h.width * scale), Math.max(2, h.height * scale));
@@ -51,6 +60,12 @@
       hedge: ['#2e5b34', '#6fae6f'],
       glass: ['rgba(127,179,200,0.35)', '#9fd4e8'],
       rock: ['#57503f', '#8a7f63'],
+      cliff: ['#4a4036', '#7a6c5a'],
+      water: ['#1d5a7a', '#3f8fb5'],
+      pine: ['#1f4a33', '#5d9a78'],
+      ice: ['#9fcfe2', '#d8f0fa'],
+      deadtree: ['#4a3a26', '#7a6446'],
+      reeds: ['#56662a', '#9aa84a'],
       wall: ['#304e42', '#668b75'],
     };
     for (const o of preview.obstacles ?? []) {

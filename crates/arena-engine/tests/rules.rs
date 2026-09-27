@@ -8,11 +8,20 @@ use arena_engine::{
 use serde_json::json;
 use std::collections::BTreeMap;
 /// Site rings and wild scatter; district fill is covered by its own test.
+/// Site cover plus five pieces per gap between sites; a gap that became a
+/// landform (ridge or lake) counts as its five scatter slots.
 fn core_obstacles(w: &World) -> usize {
+    let landform_gaps: std::collections::BTreeSet<&str> = w
+        .obstacles
+        .iter()
+        .filter(|o| o.id.starts_with("land-"))
+        .map(|o| &o.id[..o.id.rfind('-').unwrap()])
+        .collect();
     w.obstacles
         .iter()
-        .filter(|o| !o.id.starts_with("district-"))
+        .filter(|o| o.id.starts_with("cover-") || o.id.starts_with("wild-"))
         .count()
+        + 5 * landform_gaps.len()
 }
 fn config(n: usize) -> Config {
     serde_json::from_value(json!({"matchId":"test","mode":"sandbox","capacity":n,"width":42000,"height":26250,"durationSeconds":1080,"seed":42,"robots":(0..n).map(|i|json!({"robotId":format!("human-{i:03}"),"name":format!("Robot {i}"),"bot":false})).collect::<Vec<_>>()})).unwrap()
@@ -921,7 +930,10 @@ fn districts_fill_cells_with_themed_walkable_structures() {
     let w = World::generate(&world_config(json!({})));
     let biomes: std::collections::BTreeSet<&str> =
         w.sites.iter().map(|s| s.biome.as_str()).collect();
-    assert_eq!(biomes.len(), 4, "every theme appears: {biomes:?}");
+    assert!(
+        biomes.len() >= 5,
+        "climate yields varied biomes: {biomes:?}"
+    );
     let district: Vec<&Obstacle> = w
         .obstacles
         .iter()
@@ -1034,7 +1046,7 @@ fn district_layout_is_byte_stable() {
     let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
     });
-    assert_eq!(format!("{hash:016x}"), "505cdac4ea22f50b");
+    assert_eq!(format!("{hash:016x}"), "7ac4a5ee7e2f0b9a");
 }
 
 #[test]
@@ -1132,5 +1144,84 @@ fn arena_joins_inside_a_step_are_reported() {
     assert!(
         a.events.iter().any(|e| e.r#type == "join_rejected"),
         "duplicate join rejected in the same tick"
+    );
+}
+
+#[test]
+fn climate_biomes_bring_landforms_and_ground_effects() {
+    let w = World::generate(&world_config(json!({})));
+    let lands: Vec<&Obstacle> = w
+        .obstacles
+        .iter()
+        .filter(|o| o.id.starts_with("land-"))
+        .collect();
+    assert!(lands.iter().any(|o| o.material == "water"), "no lakes");
+    assert!(lands.iter().any(|o| o.material == "cliff"), "no ridges");
+    for o in &lands {
+        for s in &w.sites {
+            let (cx, cy) = (o.x + o.width / 2., o.y + o.height / 2.);
+            assert!(
+                distance(cx, cy, s.x, s.y) > 300.,
+                "{} crowds {}",
+                o.id,
+                s.id
+            );
+        }
+    }
+    let materials: std::collections::BTreeSet<&str> =
+        w.obstacles.iter().map(|o| o.material.as_str()).collect();
+    for m in ["pine", "ice", "deadtree", "reeds", "water"] {
+        assert!(materials.contains(m), "missing {m}: {materials:?}");
+    }
+    assert!(
+        w.hazards.iter().any(|h| h.id.starts_with("biome-")),
+        "no biome ground effects"
+    );
+    // Same seed, same climate.
+    let again = World::generate(&world_config(json!({})));
+    assert!(
+        w.sites
+            .iter()
+            .zip(&again.sites)
+            .all(|(a, b)| a.biome == b.biome)
+    );
+}
+
+#[test]
+fn small_maps_still_mix_biomes() {
+    for seed in 1..40u64 {
+        let w = World::generate(&world_config(
+            json!({"width":2400,"height":1500,"siteCount":4,"seed":seed}),
+        ));
+        let biomes: std::collections::BTreeSet<&str> =
+            w.sites.iter().map(|s| s.biome.as_str()).collect();
+        assert_eq!(biomes.len(), 4, "seed {seed}: {biomes:?}");
+    }
+}
+
+#[test]
+fn water_blocks_movement_but_not_shots() {
+    let mut w = World::generate(&world_config(
+        json!({"width":2400,"height":1500,"siteCount":1,"coverPerSite":0,"seed":3}),
+    ));
+    w.obstacles.retain(|o| o.material == "water");
+    w.obstacles.push(Obstacle {
+        id: "pond".into(),
+        shape: "aabb".into(),
+        x: 1000.,
+        y: 100.,
+        width: 200.,
+        height: 200.,
+        material: "water".into(),
+    });
+    w.reindex();
+    assert!(!w.clear(1100., 200., 18.), "robots cannot stand in water");
+    assert!(
+        w.wall_hit(900., 200., 1300., 200., 18.).is_some(),
+        "water stops movement"
+    );
+    assert!(
+        w.los(900., 200., 1300., 200.),
+        "shots and sight cross water"
     );
 }
