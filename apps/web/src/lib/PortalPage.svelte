@@ -4,6 +4,12 @@
   import type { AdminStatus, CloudStatus, Match, PlayerStats, QueueStatus, Replay, RobotBox } from './types';
   import type { Route } from './router';
   import DocsPage from './DocsPage.svelte';
+  import Button from './components/ui/button.svelte';
+  import Card from './components/ui/card.svelte';
+  import CardContent from './components/ui/card-content.svelte';
+  import Input from './components/ui/input.svelte';
+  import Select from './components/ui/select.svelte';
+  import Badge from './components/ui/badge.svelte';
   import { matchHref, matchModeLabel, matchRosterLabel } from './matchNavigation';
 
   interface Props { route: Route; user: User | null; match: Match | null; cloud: CloudStatus | null; box?: RobotBox | null; onSignIn: () => void; onCreateMatch: () => void; onReleaseBox: () => Promise<void>; }
@@ -30,7 +36,7 @@
   let title = $derived(route.name === 'profile' ? `${route.parameter ?? 'Player'} profile` : route.name.replace('-', ' '));
   let visibleMatches = $derived(matches.filter((entry) =>
     (filter === 'all' || entry.status === filter) &&
-    `${entry.matchId} ${matchModeLabel(entry.mode)} ${entry.robots.map(robot => robot.displayName).join(' ')}`.toLowerCase().includes(search.trim().toLowerCase())
+    `${entry.matchId} ${matchModeLabel(entry.mode)} ${(entry.robots ?? []).map(robot => robot.displayName).join(' ')}`.toLowerCase().includes(search.trim().toLowerCase())
   ));
 
   async function loadPage() {
@@ -99,13 +105,13 @@
   $effect(() => { if (!queueing) return; const timer = setInterval(() => void refreshQueue(), 2000); return () => clearInterval(timer); });
 </script>
 
-<svelte:head><title>{title} // Robot Arena</title></svelte:head>
+<svelte:head><title>{title.charAt(0).toUpperCase() + title.slice(1)} · Robot Arena</title></svelte:head>
 {#if pageError}<div class="portal-alert" role="alert">{pageError}{#if blockedByActiveRobot}<button onclick={releaseActiveMatch} disabled={releasing}>{releasing ? 'RELEASING…' : 'EXIT ACTIVE MATCH'}</button>{/if}</div>{/if}
 
 {#if route.name === 'home'}
   <section class="portal hero-page">
     <div class="hero-copy"><div class="eyebrow">PROGRAMMABLE ROBOT COMBAT</div><h1>Write tactics.<br /><em>Watch them fight.</em></h1><p>Deploy Lua into a persistent SSH box. Server runs deterministic matches. Anyone can watch.</p><div class="hero-actions"><button class="deploy" onclick={() => requireUser(onCreateMatch)}>{user ? 'PLAY NOW' : 'SIGN IN TO PLAY'} <span>↗</span></button><a class="secondary-action" href="#/spectate">WATCH LIVE</a></div></div>
-    <article class="feature-card"><div class="eyebrow">{match?.status === 'running' ? 'LIVE NOW' : 'FEATURED MATCH'}</div>{#if match}<h2>{match.mode} // {match.mapId ?? 'Open Field'}</h2><p>{match.robots.map((robot) => robot.displayName).join(' vs ') || 'Lobby forming'}</p><a href={`#/match/${match.matchId}`}>OPEN MATCH</a>{:else}<h2>No match live</h2><p>Create one or open Spectate to browse active matches.</p><a href="#/play">PRACTICE VS BOTS</a>{/if}</article>
+    <article class="feature-card"><div class="eyebrow">{match?.status === 'running' ? 'LIVE NOW' : 'FEATURED MATCH'}</div>{#if match}<h2>{match.mode} // {match.mapId ?? 'Open Field'}</h2><p>{(match.robots ?? []).map((robot) => robot.displayName).join(' vs ') || 'Lobby forming'}</p><a href={`#/match/${match.matchId}`}>OPEN MATCH</a>{:else}<h2>No match live</h2><p>Create one or open Spectate to browse active matches.</p><a href="#/play">PRACTICE VS BOTS</a>{/if}</article>
     <section class="quick-grid" aria-label="How to start"><article><b>01</b><h3>Provision box</h3><p>One persistent, resource-limited workspace per account.</p></article><article><b>02</b><h3>Deploy Lua</h3><p>Edit <code>/workspace/main.lua</code> over SSH.</p></article><article><b>03</b><h3>Enter arena</h3><p>Agent sends intent. Server owns state and scoring.</p></article></section>
   </section>
 {:else if route.name === 'play'}
@@ -119,25 +125,43 @@
     <div class="roster-preview">{#if mode === 'squad'}<div><span>RED // 5</span><strong>{displayName || user?.firstName || 'You'} + 4 bots</strong></div><div><span>BLUE // 5</span><strong>5 bots</strong></div>{:else if mode === 'solo'}<div><span>FREE-FOR-ALL</span><strong>{displayName || user?.firstName || 'You'}</strong></div><div><span>OPPONENTS</span><strong>{soloBotCount === 0 ? 'Empty sandbox' : `${soloBotCount} bot${soloBotCount > 1 ? 's' : ''}`}</strong></div>{:else}<div><span>RED // R</span><strong>{displayName || user?.firstName || 'You'}</strong></div><div><span>BLUE // B</span><strong>{queue.status === 'waiting' ? 'Searching…' : 'Waiting'}</strong></div>{/if}</div>
   </section>
 {:else if route.name === 'matches' || route.name === 'spectate'}
-  <section class="portal match-library">
-    <div class="page-head">
-      <div><div class="eyebrow">{route.name === 'spectate' ? 'WATCH AND LEARN' : 'MATCH LIBRARY'}</div><h1>{route.name === 'spectate' ? 'Live matches' : 'Matches & replays'}</h1><p class="library-lede">{route.name === 'spectate' ? 'Watch robot strategies play out. Public viewing is open to everyone.' : 'Revisit a run, inspect its outcome, and take what you learn back to your code.'}</p></div>
-      <a class="secondary-action" href="#/workspace/matches">Create a match →</a>
-    </div>
-    <div class="library-toolbar">
-      <label class="library-search">Find a match<input type="search" bind:value={search} placeholder="Search robot, mode, or match ID" /></label>
-      {#if route.name === 'matches'}<label>Status<select bind:value={filter}><option value="all">All statuses</option><option value="lobby">Lobby</option><option value="queued">Queued</option><option value="running">Live</option><option value="finished">Finished</option><option value="failed">Failed</option></select></label>{/if}
-      <button class="library-refresh" onclick={loadPage} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</button>
-    </div>
-    <p class="library-count" aria-live="polite">{loading ? 'Loading matches…' : `${visibleMatches.length} ${visibleMatches.length === 1 ? 'match' : 'matches'} shown · latest 50 records`}</p>
-    <div class="card-list">
+  <section class="mx-auto grid max-w-[1100px] gap-5 px-4 py-8 sm:px-8">
+    <header class="flex flex-wrap items-end justify-between gap-4">
+      <div class="min-w-0">
+        <p class="m-0 font-mono text-[11px] tracking-widest text-muted-foreground">{route.name === 'spectate' ? 'WATCH AND LEARN' : 'MATCH LIBRARY'}</p>
+        <h1 class="m-0 text-3xl font-semibold tracking-tight">{route.name === 'spectate' ? 'Live matches' : 'Matches & replays'}</h1>
+        <p class="m-0 mt-1 text-sm text-muted-foreground">{route.name === 'spectate' ? 'Watch robot strategies play out. Public viewing is open to everyone.' : 'Revisit a run, inspect its outcome, and take what you learn back to your code.'}</p>
+      </div>
+      <a class="inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground no-underline hover:bg-primary/90" href="#/workspace/matches">Create a match</a>
+    </header>
+    <Card>
+      <CardContent class="flex flex-wrap items-center gap-2 p-3">
+        <Input class="min-w-56 flex-1" type="search" bind:value={search} placeholder="Search robot, mode, or match ID" ariaLabel="Find a match"/>
+        {#if route.name === 'matches'}<Select class="w-40" bind:value={filter} ariaLabel="Status"><option value="all">All statuses</option><option value="lobby">Lobby</option><option value="queued">Queued</option><option value="running">Live</option><option value="finished">Finished</option><option value="failed">Failed</option></Select>{/if}
+        <Button variant="secondary" onclick={loadPage} disabled={loading}>{loading ? 'Refreshing…' : 'Refresh'}</Button>
+      </CardContent>
+    </Card>
+    <p class="m-0 text-xs text-muted-foreground" aria-live="polite">{loading ? 'Loading matches…' : `${visibleMatches.length} ${visibleMatches.length === 1 ? 'match' : 'matches'} shown · latest 50 records`}</p>
+    <div class="grid gap-2">
       {#each visibleMatches as listed (listed.matchId)}
-        <a class="match-card" href={matchHref(listed)}>
-          <div class="library-match-info"><div class="library-match-meta"><span class="pill" data-tone={listed.status === 'running' ? 'ok' : listed.status === 'failed' ? 'bad' : 'idle'}>{listed.status === 'running' ? 'Live' : listed.status}</span><span>{listed.engineVersion === 4 ? 'Arena V2' : 'Classic arena'}</span><span>{listed.matchId.slice(0, 8)}</span></div><h2>{matchModeLabel(listed.mode)}</h2><p class="library-roster">{matchRosterLabel(listed)}</p><p>{new Date(listed.createdAt).toLocaleString()}{#if listed.status === 'running'} · {listed.viewers ?? 0} watching{/if}</p></div>
-          <strong>{listed.status === 'finished' ? 'View results →' : listed.status === 'lobby' ? 'Open lobby →' : listed.status === 'failed' ? 'View match →' : 'Watch match →'}</strong>
+        <a class="group flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3 text-foreground no-underline transition-colors hover:border-primary/50 hover:bg-muted/40" href={matchHref(listed)}>
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <strong class="text-base font-semibold">{matchModeLabel(listed.mode)}</strong>
+              <Badge variant={listed.status === 'running' ? 'live' : listed.status === 'failed' ? 'danger' : listed.status === 'finished' ? 'default' : 'muted'}>{listed.status === 'running' ? 'Live' : listed.status}</Badge>
+              <span class="font-mono text-[11px] text-muted-foreground">{listed.engineVersion === 4 ? 'Arena V2' : 'Classic'} · {listed.matchId.slice(0, 8)}</span>
+            </div>
+            <p class="m-0 mt-1 truncate text-sm text-muted-foreground">{matchRosterLabel(listed)}</p>
+            <p class="m-0 text-xs text-muted-foreground">{new Date(listed.createdAt).toLocaleString()}{#if listed.status === 'running'} · {listed.viewers ?? 0} watching{/if}</p>
+          </div>
+          <span class="shrink-0 text-sm font-medium text-primary">{listed.status === 'finished' ? 'View results →' : listed.status === 'lobby' ? 'Open lobby →' : listed.status === 'failed' ? 'View match →' : 'Watch →'}</span>
         </a>
       {:else}
-        <div class="empty-state"><h2>{loading ? 'Loading matches…' : pageError ? 'Matches could not be loaded' : search || filter !== 'all' ? 'No matches found' : route.name === 'spectate' ? 'No matches are live' : 'Your next experiment starts here'}</h2><p>{pageError ? 'Check the connection and refresh to try again.' : search || filter !== 'all' ? 'Try another search or status filter.' : 'Create a sandbox to test your robot, or start a match with game bots.'}</p><a class="secondary-action" href="#/workspace/matches">Open match setup →</a></div>
+        <Card><CardContent class="grid justify-items-start gap-2 p-6">
+          <strong>{loading ? 'Loading matches…' : pageError ? 'Matches could not be loaded' : search || filter !== 'all' ? 'No matches found' : route.name === 'spectate' ? 'No matches are live' : 'Your next experiment starts here'}</strong>
+          <p class="m-0 text-sm text-muted-foreground">{pageError ? 'Check the connection and refresh to try again.' : search || filter !== 'all' ? 'Try another search or status filter.' : 'Create a sandbox to test your robot, or start a match with game bots.'}</p>
+          <a class="text-sm" href="#/workspace/matches">Open match setup →</a>
+        </CardContent></Card>
       {/each}
     </div>
   </section>
@@ -160,22 +184,3 @@
 {:else}
   <section class="portal narrow-page"><div class="eyebrow">404</div><h1>Route not found.</h1><a class="secondary-action" href="#/">RETURN HOME</a></section>
 {/if}
-
-<style>
-  .match-library { max-width: 1200px; }
-  .library-lede { max-width: 650px; color: var(--muted); font-size: 14px; line-height: 1.7; }
-  .library-toolbar { display: flex; align-items: end; gap: 14px; padding: 18px; border: 1px solid var(--line); background: var(--panel); border-radius: 10px; }
-  .library-toolbar label { display: grid; gap: 8px; color: var(--muted); font-size: 12px; }
-  .library-search { flex: 1; }
-  .library-toolbar input, .library-toolbar select { width: 100%; min-height: 42px; margin: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--background, #0b1018); color: var(--ink); padding: 10px 12px; font: inherit; }
-  .library-refresh { min-height: 42px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--ink); font-size: 12px; }
-  .library-refresh:disabled { opacity: .5; cursor: wait; }
-  .library-count { color: var(--muted); font-size: 12px; margin: 20px 0 12px; }
-  .library-match-info { min-width: 0; }
-  .library-match-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 11px; }
-  .match-library .match-card { border-radius: 10px; gap: 20px; }
-  .match-library .match-card h2 { margin: 14px 0 8px; font-size: 19px; }
-  .match-library .match-card > strong { font-size: 12px; white-space: nowrap; color: var(--acid); }
-  .library-roster { overflow-wrap: anywhere; }
-  @media(max-width: 650px) { .library-toolbar { flex-wrap: wrap; } .library-search { flex-basis: 100%; } .library-toolbar label:not(.library-search) { flex: 1; } .match-library .match-card { flex-direction: column; align-items: start; } .match-library .page-head { flex-wrap: wrap; gap: 16px; } }
-</style>

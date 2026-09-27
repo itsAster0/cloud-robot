@@ -64,7 +64,35 @@ func main() {
 	}
 }
 
+// adminList reports every robot box container, for the admin console.
+func (s *server) adminList(w http.ResponseWriter, r *http.Request) {
+	lines, err := output(r.Context(), "docker", "ps", "-a", "--filter", "label=robot-arena.box=true",
+		"--format", "{{.Names}}|{{.State}}|{{.Status}}|{{.CreatedAt}}")
+	if err != nil {
+		writeError(w, 502, err.Error())
+		return
+	}
+	type summary struct {
+		BoxID     string `json:"boxId"`
+		State     string `json:"state"`
+		Status    string `json:"status"`
+		CreatedAt string `json:"createdAt"`
+	}
+	boxes := []summary{}
+	for _, line := range strings.Split(strings.TrimSpace(lines), "\n") {
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) == 4 {
+			boxes = append(boxes, summary{parts[0], parts[1], parts[2], parts[3]})
+		}
+	}
+	writeJSON(w, 200, map[string]any{"boxes": boxes})
+}
+
 func (s *server) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/boxes" && r.Method == http.MethodGet {
+		s.adminList(w, r)
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/boxes/")
 	parts := strings.Split(path, "/")
 	boxID := parts[0]
@@ -110,6 +138,19 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			result, err = s.status(r.Context(), boxID)
 		}
+	case r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "logs":
+		// Agent and supervisor output is the container's stdout/stderr.
+		tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
+		if tail <= 0 || tail > 2000 {
+			tail = 300
+		}
+		logs, logErr := output(r.Context(), "docker", "logs", "--timestamps", "--tail", strconv.Itoa(tail), boxID)
+		if logErr != nil {
+			writeError(w, 502, logErr.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]string{"logs": logs})
+		return
 	case r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "main.lua":
 		output, readErr := output(r.Context(), "docker", "exec", boxID, "/usr/local/bin/robot-box-supervisor", "read-main")
 		if readErr != nil {

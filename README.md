@@ -67,6 +67,29 @@ mise run demo:start     # boxes are rediscovered on next sign-in
 Logged-out visitors can open public match history, spectate, replays, and the
 SDK docs. Signing in is required only for boxes, lobbies, and registration.
 
+## Admin console
+
+Open **More → Admin console** (`/#/admin`) and log in with `ADMIN_USERNAME` /
+`ADMIN_PASSWORD` (local default `admin` / `local-admin-change-me`). This
+login is separate from WorkOS player sign-in and is disabled when
+`ADMIN_PASSWORD` is empty. Change the password before exposing the stack;
+the console shows a warning while the default is set. Sessions are signed
+tokens that last 8 hours. Five failed logins in a minute pause login.
+
+- **Overview:** uptime, memory, live match workers with their ticks,
+  connected agents, viewers, queue, match counts, error and warning totals,
+  cloud endpoints.
+- **Logs:** a live tail of API server logs, match worker output (Rust stderr
+  plus start, finish, and failure events), agent connects and rejected inputs,
+  and admin logins. Filter by source, level, match, or text. Logs are kept in
+  memory: the last 5,000 entries since the API started.
+- **Matches:** recent matches with owners, status, and errors; open a match
+  or jump to its worker logs.
+- **Boxes:** every robot box container and its recent supervisor and Lua
+  agent output, read through the provisioner.
+
+Players see their own box output on **More → SSH & runtime**.
+
 ## What the arena does
 
 - **Modes:** solo and squad battle royale (up to 256 slots), quick duel, and
@@ -140,6 +163,8 @@ All endpoints, credentials, ports, and limits come from environment variables (s
 | `QUEUE_CONNECT_GRACE_SECONDS` | Agent connection deadline after pairing | `30` |
 | `QUEUE_BOT_FILL_SECONDS` | Wait before filling a duel with a bot | `45` |
 | `ADMIN_USER_IDS` | Comma-separated WorkOS IDs allowed on admin status | unset |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Admin console login; empty password disables it | `admin` / `local-admin-change-me` |
+| `ADMIN_SESSION_SECRET` | HMAC key for admin sessions (16+ chars); random per start when unset | unset |
 | `MAINTENANCE_MODE` | Refuse new matches while current matches finish | `false` |
 
 Never commit `WORKOS_API_KEY` or any robot token.

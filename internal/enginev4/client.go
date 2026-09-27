@@ -33,12 +33,17 @@ type Client struct {
 }
 
 func Start(ctx context.Context, executable string, config any) (*Client, Result, error) {
-	return startWithKind(ctx, executable, "start", config)
+	return startWithKind(ctx, executable, "start", config, os.Stderr)
+}
+
+// StartLogged is Start with the worker's stderr sent to `stderr`.
+func StartLogged(ctx context.Context, executable string, config any, stderr io.Writer) (*Client, Result, error) {
+	return startWithKind(ctx, executable, "start", config, stderr)
 }
 func Restore(ctx context.Context, executable string, checkpoint any) (*Client, Result, error) {
-	return startWithKind(ctx, executable, "restore", checkpoint)
+	return startWithKind(ctx, executable, "restore", checkpoint, os.Stderr)
 }
-func startWithKind(ctx context.Context, executable, kind string, config any) (*Client, Result, error) {
+func startWithKind(ctx context.Context, executable, kind string, config any, stderr io.Writer) (*Client, Result, error) {
 	dir, err := os.MkdirTemp("/tmp", "ra-")
 	if err != nil {
 		return nil, Result{}, err
@@ -46,7 +51,7 @@ func startWithKind(ctx context.Context, executable, kind string, config any) (*C
 	path := filepath.Join(dir, "w.sock")
 	c := &Client{dir: dir, done: make(chan error, 1)}
 	c.cmd = exec.CommandContext(ctx, executable, path)
-	c.cmd.Stderr = os.Stderr
+	c.cmd.Stderr = stderr
 	if err = c.cmd.Start(); err != nil {
 		os.RemoveAll(dir)
 		return nil, Result{}, err

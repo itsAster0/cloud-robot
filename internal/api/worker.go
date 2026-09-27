@@ -310,6 +310,7 @@ func (s *Server) updatePlayerStats(ctx context.Context, match model.Match) {
 }
 
 func (s *Server) failMatch(ctx context.Context, match model.Match, failure error) error {
+	slog.Error("match failed", "source", "worker", "match", match.MatchID, "error", failure)
 	finished := time.Now().UTC()
 	match.Status, match.Error, match.FinishedAt = model.MatchFailed, failure.Error(), &finished
 	_ = s.store.PutMatch(ctx, match)

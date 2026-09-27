@@ -1181,13 +1181,28 @@ function arena.run(config)
   while true do
     local ok, failure = pcall(function()
       local ws = connect(config)
+      io.stderr:write("[arena] connected (SDK " .. arena.VERSION .. ")\n")
       retry_delay = 1
       local sequence = 0
+      local announced, rejected, last_rejection = false, 0, nil
       while true do
         local payload = assert(ws:receive(35))
         local observation, _, decode_error = json.decode(payload)
         assert(observation, decode_error)
+        if observation.type == "action_rejected" then
+          -- A broken script is rejected every decision; log on change and
+          -- every 50th repeat so the box log stays readable.
+          rejected = (observation.code == last_rejection) and rejected + 1 or 1
+          last_rejection = observation.code
+          if rejected == 1 or rejected % 50 == 0 then
+            io.stderr:write("[arena] action rejected: " .. tostring(observation.code) .. " (x" .. rejected .. ")\n")
+          end
+        end
         if observation.type == "observation" then
+          if not announced then
+            announced = true
+            io.stderr:write("[arena] receiving observations for match " .. tostring(observation.matchId) .. "\n")
+          end
           if cached_layout.match_id ~= observation.matchId then
             cached_layout = { match_id = observation.matchId, obstacles = {}, hazards = {} }
           end
@@ -1233,7 +1248,7 @@ function arena.run(config)
       end
     end)
     if not ok then
-      io.stderr:write("robot connection lost: " .. tostring(failure) .. "\n")
+      io.stderr:write("[arena] connection lost: " .. tostring(failure) .. "; retrying in " .. retry_delay .. " s\n")
       cqueues.sleep(retry_delay)
       retry_delay = math.min(retry_delay * 2, 15)
     end

@@ -244,6 +244,11 @@ return arena.control({throttle=0.8,turn=0.1,fire=true,label="SSH_SMOKE"}) end})
 	if !fired {
 		t.Fatal("Lua agents never fired")
 	}
+	// Box output reaches the provisioner: supervisor and SDK lifecycle lines.
+	boxLogs, err := provisioner.Logs(ctx, boxes.IDForUser(identity.users["a"]), 200)
+	if err != nil || !strings.Contains(boxLogs, "[supervisor] starting agent") || !strings.Contains(boxLogs, "[arena] connected") {
+		t.Fatalf("box output missing lifecycle lines (%v):\n%s", err, boxLogs)
+	}
 	t.Logf("two SSH workspaces survived restart; two Lua agents fired; match %s and replay persisted in Floci", id)
 }
 
