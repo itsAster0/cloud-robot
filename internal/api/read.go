@@ -134,6 +134,13 @@ func publicMatch(m model.Match) model.Match {
 	if m.EngineVersion != 4 {
 		return m
 	}
+	// Summaries name players by public handle, never by account ID.
+	m.RobotSummaries = append([]model.RobotSummary(nil), m.RobotSummaries...)
+	for i := range m.RobotSummaries {
+		if m.RobotSummaries[i].PlayerID != "" {
+			m.RobotSummaries[i].PlayerID = playerHandle(m.RobotSummaries[i].PlayerID)
+		}
+	}
 	for i := range m.Robots {
 		m.Robots[i].Loadout = nil
 		m.Robots[i].ScriptObjectKey = ""

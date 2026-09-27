@@ -60,6 +60,7 @@
         await request(`/api/matches/${arena.match.matchId}/robots`, { method: 'POST', body: JSON.stringify({ displayName: robot.name, runtime: 'lua5.4', startCommand: 'lua main.lua', sdkVersion: '0.4.0', loadout: robot.loadout }) });
         current = 5;
         try { sessionStorage.setItem('robot-arena:welcome', arena.match.matchId); } catch { /* banner is optional */ }
+        try { localStorage.setItem('robot-arena:camera', 'you'); } catch { /* camera preference is optional */ }
         window.location.hash = `#/v2/${arena.match.matchId}`;
         return;
       }
@@ -80,6 +81,7 @@
       current = 6; await sleep(400);
       current = 7;
       try { sessionStorage.setItem('robot-arena:welcome', match.matchId); } catch { /* banner is optional */ }
+      try { localStorage.setItem('robot-arena:camera', 'you'); } catch { /* camera preference is optional */ }
       window.location.hash = `#/v2/${match.matchId}`;
     } catch (e) {
       failure = explain(e instanceof Error ? e.message : String(e));

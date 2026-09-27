@@ -18,6 +18,9 @@
 
   let view = $state<Route>(routeFromLocation());
   let menuOpen = $state(false);
+  // Public handle for the signed-in player's profile link.
+  let myHandle = $state('');
+  $effect(() => { if (user) api.myPlayer().then(r => myHandle = r.handle).catch(() => myHandle = ''); else myHandle = ''; });
   let workspaceRoute = $derived(view.name === 'workspace' || view.name === 'v2');
   let workspacePanel = $derived(view.panel ?? (view.name === 'v2' && view.parameter ? 'match' : 'code'));
   let matchesActive = $derived((workspaceRoute && (workspacePanel === 'match' || workspacePanel === 'results')) || ['matches', 'spectate', 'match', 'match-detail'].includes(view.name));
@@ -264,7 +267,7 @@
   }
 
   onMount(() => {
-    const onHash = () => { view = routeFromLocation(); menuOpen = false; void loadRouteMatch(); };
+    const onHash = () => { view = routeFromLocation(); menuOpen = false; error = ''; void loadRouteMatch(); };
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') menuOpen = false; };
     window.addEventListener('hashchange', onHash);
     window.addEventListener('keydown', onKey);
@@ -553,6 +556,7 @@
       <a class:active={view.name === 'play'} aria-current={view.name === 'play' ? 'page' : undefined} href="#/play">Play</a>
       <a class:active={workspaceRoute && !matchesActive} aria-current={workspaceRoute && !matchesActive ? 'page' : undefined} href="#/workspace">My robot</a>
       <a class:active={matchesActive} aria-current={matchesActive ? 'page' : undefined} href="#/workspace/matches">Matches</a>
+      <a class:active={view.name === 'leaderboard' || view.name === 'profile'} aria-current={view.name === 'leaderboard' ? 'page' : undefined} href="#/leaderboard">Leaderboard</a>
       <a class:active={docsActive} aria-current={docsActive ? 'page' : undefined} href="#/docs/sdk">Docs</a>
     </nav>
     <div class="account">
@@ -562,6 +566,7 @@
         <nav class="more-menu" aria-label="Additional navigation">
           <span class="menu-label">Explore</span>
           <a href="#/matches">Match history</a>
+          {#if myHandle}<a href={`#/profile/${myHandle}`}>My profile &amp; stats</a>{/if}
           <a href="#/spectate">Watch live</a>
           <span class="menu-label">Advanced</span>
           <a href="#/box" aria-current={view.name === 'box' ? 'page' : undefined}>SSH &amp; runtime <i class="nav-dot" class:ok={robotBox?.status === 'running'} class:bad={robotBox?.status === 'failed' || !!robotBox?.error} aria-hidden="true"></i></a>

@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { matchHref, matchRosterLabel } from './matchNavigation';
 
 it('opens Rust results in the V2 replay workspace instead of the legacy recap', () => {
@@ -13,4 +13,13 @@ it('preserves legacy recap and live routes', () => {
 
 it('treats a null roster as an open lobby', () => {
   expect(matchRosterLabel({ robots: null as unknown as [] })).toBe('Open lobby · robots join before the match starts');
+});
+
+describe('roster label', () => {
+  it('lists players first and counts bots', () => {
+    const robots = [
+      { displayName: 'Game Bot 1', bot: true }, { displayName: 'Ada' }, { displayName: 'Game Bot 2', bot: true },
+    ] as unknown as Parameters<typeof matchRosterLabel>[0]['robots'];
+    expect(matchRosterLabel({ robots })).toBe('Ada · 2 bots');
+  });
 });

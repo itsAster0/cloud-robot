@@ -29,6 +29,23 @@ export interface RobotSummary {
   damageTaken?: number;
   kills?: number;
   itemsPickedUp?: number;
+  // Arena V2: public player handle, bot flag, deaths, and arena score.
+  playerId?: string;
+  bot?: boolean;
+  deaths?: number;
+  score?: number;
+}
+
+export interface PlayerLine {
+  handle: string;
+  name: string;
+  matches: number;
+  wins: number;
+  kills: number;
+  deaths: number;
+  score: number;
+  damageDealt: number;
+  bestScore: number;
 }
 
 export interface Match {
