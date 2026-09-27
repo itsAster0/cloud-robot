@@ -92,8 +92,15 @@ Players see their own box output on **More → SSH & runtime**.
 
 ## What the arena does
 
-- **Modes:** solo and squad battle royale (up to 256 slots), quick duel, and
-  sandbox with pause and single-tick stepping. All matches are unranked.
+- **The Arena:** an always-on free-for-all the server keeps running. Players
+  join and leave at any time from **Play → The Arena**; destroyed robots
+  respawn after 5 seconds and keep their score; there is no zone. Bots fill
+  empty slots and give way when a player joins. Sessions last
+  `ARENA_SESSION_SECONDS` (default 30 minutes), then a fresh map starts.
+- **Modes:** solo and duo/trio/squad battle royale (up to 256 slots, optional
+  bot count), quick duel, and sandbox with pause and single-tick stepping.
+  Lobbies have invite links. Players can leave any match to free their box.
+  All matches are unranked.
 - **World:** deterministic from the seed. Sites with four district themes
   (urban, industrial, forest, desert) fill with rooms, container yards, groves,
   rock formations, and sandbag outposts, joined by roads. Hazards, transit
@@ -164,6 +171,9 @@ All endpoints, credentials, ports, and limits come from environment variables (s
 | `QUEUE_BOT_FILL_SECONDS` | Wait before filling a duel with a bot | `45` |
 | `ADMIN_USER_IDS` | Comma-separated WorkOS IDs allowed on admin status | unset |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Admin console login; empty password disables it | `admin` / `local-admin-change-me` |
+| `ARENA_ENABLED` | Keep the always-on arena running | `true` |
+| `ARENA_CAPACITY` | Arena slots (2..128); map size grows with it | `24` |
+| `ARENA_SESSION_SECONDS` | Arena session length before a new map (60..21600) | `1800` |
 | `ADMIN_SESSION_SECRET` | HMAC key for admin sessions (16+ chars); random per start when unset | unset |
 | `MAINTENANCE_MODE` | Refuse new matches while current matches finish | `false` |
 

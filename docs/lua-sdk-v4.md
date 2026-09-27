@@ -133,3 +133,12 @@ Register with `sdkVersion: "0.4.0"` and a legal 60-point loadout. Registration
 freezes the main script for the current match. Browser saves and SSH edits apply
 to the workspace for the next registration. Save, syntax validation, testing,
 and registration are separate operations.
+
+## Arena mode
+
+In the always-on arena (`mode = "arena"`) there is no zone (`obs.zone.active`
+is false). When your robot is destroyed, `obs.self.alive` is false for five
+seconds and actions are ignored; it then respawns at full health somewhere
+away from enemies and observations continue. `obs.self.deaths` counts lives
+lost and `obs.self.respawnAt` is the tick it returns (compare with `obs.tick`). Kills and
+damage carry over between lives.

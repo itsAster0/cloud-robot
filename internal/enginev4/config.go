@@ -49,7 +49,7 @@ func (c Config) SquadSize() int {
 }
 
 func IsMode(mode string) bool {
-	return mode == "br-solo" || mode == "br-squad" || mode == "sandbox" || mode == "quick-duel"
+	return mode == "br-solo" || mode == "br-squad" || mode == "sandbox" || mode == "quick-duel" || mode == "arena"
 }
 func (c *Config) Defaults() {
 	if c.Mode == "" {
@@ -87,8 +87,13 @@ func (c Config) Validate() error {
 	if c.Bots != nil && (*c.Bots < 0 || *c.Bots > c.Capacity) {
 		return errors.New("bots must be 0..capacity")
 	}
-	if c.DurationSeconds < 10 || c.DurationSeconds > 2700 {
-		return errors.New("duration must be 10..2700 seconds")
+	// The persistent arena runs hour-long sessions; other modes stay short.
+	maxDuration := 2700
+	if c.Mode == "arena" {
+		maxDuration = 21600
+	}
+	if c.DurationSeconds < 10 || c.DurationSeconds > maxDuration {
+		return fmt.Errorf("duration must be 10..%d seconds", maxDuration)
 	}
 	if c.SiteCount < 0 || c.SiteCount > 256 {
 		return errors.New("site count must be 0..256")

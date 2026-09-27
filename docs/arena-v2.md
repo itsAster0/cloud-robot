@@ -232,3 +232,20 @@ units in a 90 s duel). SDK bugs caused it:
 
 Strategies now share `arena.tactics`. `mise run v4:behaviour` shows each
 travelling 1,500-2,800 units and firing.
+
+## Persistent arena (2026-09-27)
+
+- Engine mode `arena`: no zone, respawn after 100 ticks at a spawn away from
+  enemies, kills/deaths/damage kept across lives, joins inside the step input
+  (`{"joins": [Registration]}`) so replays reproduce them, bots displaced by
+  joins and refilled when players leave, session ends on time and the most
+  kills wins.
+- Go: `RunArena` keeps one system arena queued or running; registration into
+  a running arena goes through the worker's join queue; leaving frees the box
+  at once.
+- Browser: Play → The Arena, live player count on the home page, arena join
+  card, scoreboard with K/D/damage and a respawn countdown.
+- Verified live in Chrome: join, death and respawn, leave, rejoin.
+- Known issue worked around: a job enqueued during the worker's first Floci
+  receive after startup stayed invisible for 120 seconds, so the first arena
+  is created 10 seconds after start.

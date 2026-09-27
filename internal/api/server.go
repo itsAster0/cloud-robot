@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v4/me/loadout", s.requireUser(http.HandlerFunc(s.v4Loadout)))
 	mux.Handle("POST /api/v4/matches", s.requireUser(s.rateLimit("create-match", http.HandlerFunc(s.createV4Match))))
 	mux.HandleFunc("GET /api/v4/catalogue", s.v4Catalogue)
+	mux.HandleFunc("GET /api/v4/arena", s.arenaStatus)
 	mux.Handle("POST /api/v4/maps/preview", s.requireUser(s.rateLimit("preview", http.HandlerFunc(s.previewV4Map))))
 	mux.Handle("POST /api/v4/matches/{matchID}/control", s.requireUser(http.HandlerFunc(s.controlV4)))
 	mux.HandleFunc("GET /api/v4/matches/{matchID}/final", s.v4Final)
@@ -402,7 +403,16 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "match not found")
 		return
 	}
-	if match.Status != model.MatchLobby {
+	// The persistent arena takes players while it runs; the robot enters
+	// through the worker's join queue instead of the start roster.
+	var liveArena *v4Control
+	if match.Mode == "arena" && match.Status == model.MatchRunning {
+		liveArena = s.v4[match.MatchID]
+		if liveArena == nil {
+			writeError(w, http.StatusConflict, "the arena is restarting; try again in a few seconds")
+			return
+		}
+	} else if match.Status != model.MatchLobby {
 		writeError(w, http.StatusConflict, "match is not accepting robots")
 		return
 	}
@@ -452,6 +462,13 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 	var displacedBot *model.RobotSubmission
 	switch match.Mode {
 	case "br-solo", "br-squad", "sandbox", "quick-duel":
+	case "arena":
+		// Players displace bots in the engine, so only humans count.
+		if humanRobots(match.Robots) >= rosterCap {
+			writeError(w, http.StatusConflict, "the arena is full; try again soon")
+			return
+		}
+		rosterCap = len(match.Robots) + 1
 	case "squad":
 		if input.Team != "red" && input.Team != "blue" {
 			writeError(w, http.StatusBadRequest, "team must be red or blue")
@@ -515,11 +532,12 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	match.Robots = append(match.Robots, model.RobotSubmission{
+	submission := model.RobotSubmission{
 		RobotID: robotID, DisplayName: input.DisplayName, Team: input.Team,
 		Loadout: mustJSON(input.Loadout), SDKVersion: input.SDKVersion,
 		PlayerID: userID, OwnerBoxID: boxID, ScriptObjectKey: scriptKey, StartCommand: input.StartCommand, Runtime: input.Runtime, SubmittedAt: time.Now().UTC(),
-	})
+	}
+	match.Robots = append(match.Robots, submission)
 	if err := s.store.PutMatch(r.Context(), match); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -548,6 +566,12 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 	// reply can still be empty; record the binding the API just created.
 	configured.ActiveRobotID, configured.ActiveMatchID = robotID, match.MatchID
 	_ = s.store.PutBox(r.Context(), userID, configured)
+	if liveArena != nil {
+		reg := enginev4.Registration{RobotID: robotID, Name: input.DisplayName, Team: input.Team, Loadout: input.Loadout}
+		if !liveArena.RequestJoin(arenaJoin{Registration: reg, Submission: submission}) {
+			slog.Warn("arena join queue full", "match", match.MatchID, "robot", robotID)
+		}
+	}
 	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	writeJSON(w, http.StatusCreated, robotResponse{Match: match, Agent: agentEnrollment{RobotID: robotID, Status: configured.AgentStatus}})
 }
@@ -729,6 +753,20 @@ func (s *Server) releaseBox(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		if control == nil || !control.RequestWithdraw(box.ActiveRobotID) {
 			writeError(w, http.StatusConflict, "match is not accepting withdrawals")
+			return
+		}
+		if match.Mode == "arena" {
+			// The arena keeps running, so the box is free as soon as the
+			// robot is withdrawn rather than when the session ends.
+			s.mu.Lock()
+			if current, err := s.store.GetMatch(r.Context(), match.MatchID); err == nil {
+				current.Robots = withoutRobots(current.Robots, []string{box.ActiveRobotID})
+				_ = s.store.PutMatch(r.Context(), current)
+			}
+			s.mu.Unlock()
+			box.ActiveRobotID, box.ActiveMatchID = "", ""
+			_ = s.store.PutBox(r.Context(), userID, box)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
 			return
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "withdrawing", "matchId": match.MatchID})

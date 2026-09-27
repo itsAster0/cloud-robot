@@ -125,6 +125,9 @@ export interface RobotState {
   damageDealt?: number;
   damageTaken?: number;
   kills?: number;
+  // Arena mode: deaths so far and ticks until the robot respawns.
+  deaths?: number;
+  respawnIn?: number | null;
   robotId: string;
   name: string;
   team: ArenaTeam;
@@ -331,6 +334,8 @@ export interface Snapshot {
   width?: number;
   height?: number;
   mapId?: string;
+  mode?: string;
+  endTick?: number;
   obstacles?: ArenaObstacle[];
   items?: ArenaItem[];
   mines?: MineState[];

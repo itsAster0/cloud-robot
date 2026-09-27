@@ -1056,3 +1056,81 @@ fn team_size_and_bot_cap_shape_the_roster() {
     assert_eq!(arena.robots.len(), 6, "2 humans plus a 4-bot cap");
     assert_eq!(arena.robots.iter().filter(|r| r.bot).count(), 4);
 }
+
+fn arena_config(capacity: usize, seconds: u32) -> Config {
+    serde_json::from_value(json!({"matchId":"arena","mode":"arena","capacity":capacity,"width":2400,"height":1500,"durationSeconds":seconds,"seed":11,"robots":[]})).unwrap()
+}
+
+#[test]
+fn arena_mode_respawns_and_never_closes() {
+    let mut a = Arena::new(arena_config(6, 600)).unwrap();
+    assert_eq!(a.robots.len(), 6);
+    let mut respawned = false;
+    for _ in 0..3000 {
+        a.step(BTreeMap::new(), &[]).unwrap();
+        assert!(!a.zone().active, "arena has no closing zone");
+        assert!(!a.finished, "arena only ends on time");
+        respawned |= a.events.iter().any(|e| e.r#type == "robot_respawned");
+    }
+    assert!(respawned, "destroyed robots come back");
+    assert!(a.robots.iter().any(|r| r.deaths > 0));
+    assert!(
+        a.robots.iter().all(|r| r.placement.is_none()),
+        "no placements in the arena"
+    );
+}
+
+#[test]
+fn arena_join_displaces_a_bot_and_leave_refills() {
+    let mut a = Arena::new(arena_config(4, 600)).unwrap();
+    let human = serde_json::from_value(json!({"robotId":"human-1","name":"Ada","team":"","bot":false,"loadout":{"chassis":"generalist","weapon":"plasma"}})).unwrap();
+    a.join(human).unwrap();
+    assert_eq!(a.robots.len(), 4, "a bot made room");
+    assert!(a.robots.iter().any(|r| r.robot_id == "human-1" && r.alive));
+    a.step(BTreeMap::new(), &[]).unwrap();
+    // Leave: the robot is destroyed, then removed, and a bot takes the slot.
+    a.step(BTreeMap::new(), &["human-1".to_string()]).unwrap();
+    a.step(BTreeMap::new(), &[]).unwrap();
+    assert!(
+        !a.robots.iter().any(|r| r.robot_id == "human-1"),
+        "left robots are removed"
+    );
+    assert_eq!(
+        a.robots.iter().filter(|r| !r.left).count(),
+        4,
+        "bots refill the arena"
+    );
+    let solo = Arena::new(serde_json::from_value(json!({"matchId":"s","mode":"br-solo","capacity":2,"width":2400,"height":1500,"durationSeconds":60,"robots":[]})).unwrap());
+    let reg = serde_json::from_value(
+        json!({"robotId":"late","name":"x","loadout":{"chassis":"generalist","weapon":"plasma"}}),
+    )
+    .unwrap();
+    assert!(
+        solo.unwrap().join(reg).is_err(),
+        "only arenas accept late joins"
+    );
+}
+
+#[test]
+fn arena_session_ends_on_time_with_a_winner() {
+    let mut a = Arena::new(arena_config(4, 10)).unwrap();
+    while !a.finished {
+        a.step(BTreeMap::new(), &[]).unwrap();
+    }
+    assert_eq!(a.tick, 200);
+    assert!(!a.winner_team.is_empty());
+}
+
+#[test]
+fn arena_joins_inside_a_step_are_reported() {
+    let mut a = Arena::new(arena_config(4, 600)).unwrap();
+    let good: Registration = serde_json::from_value(json!({"robotId":"human-9","name":"Bo","loadout":{"chassis":"generalist","weapon":"plasma"}})).unwrap();
+    let dup = good.clone();
+    a.step_joining(BTreeMap::new(), &[], vec![good, dup])
+        .unwrap();
+    assert!(a.events.iter().any(|e| e.r#type == "robot_joined"));
+    assert!(
+        a.events.iter().any(|e| e.r#type == "join_rejected"),
+        "duplicate join rejected in the same tick"
+    );
+}

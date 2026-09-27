@@ -61,6 +61,136 @@ pub struct BotMemory {
     pub hunt_y: f64,
     pub hunt_until: u32,
 }
+/// The four server-bot builds, cycled by index.
+pub(crate) fn bot_loadout(index: usize) -> catalog::Loadout {
+    match index % 4 {
+        0 => catalog::Loadout {
+            chassis: "scout".into(),
+            weapon: "machine_gun".into(),
+            modules: vec!["optics".into(), "mobility_tuning".into()],
+            utilities: vec!["cloak_emitter".into()],
+        },
+        1 => catalog::Loadout {
+            chassis: "generalist".into(),
+            weapon: "railgun".into(),
+            modules: vec!["optics".into(), "cooling_system".into()],
+            utilities: vec![],
+        },
+        2 => catalog::Loadout {
+            chassis: "generalist".into(),
+            weapon: "plasma".into(),
+            modules: vec!["capacitor".into()],
+            utilities: vec!["repair_field".into(), "smoke_projector".into()],
+        },
+        _ => catalog::Loadout {
+            chassis: "generalist".into(),
+            weapon: "machine_gun".into(),
+            modules: vec!["reinforced_plating".into(), "cooling_system".into()],
+            utilities: vec!["mine_dispenser".into()],
+        },
+    }
+}
+
+/// A robot at full health with its registered loadout, standing at (x, y).
+pub(crate) fn fresh_robot(config: &Config, reg: &Registration, x: f64, y: f64) -> Robot {
+    let c = catalog::chassis(&reg.loadout.chassis).unwrap();
+    let mut charges = BTreeMap::new();
+    for u in &reg.loadout.utilities {
+        charges.insert(
+            u.clone(),
+            match u.as_str() {
+                "mine_dispenser" => 3,
+                "smoke_projector" => 2,
+                _ => 0,
+            },
+        );
+    }
+    let has = |m: &str| reg.loadout.modules.iter().any(|s| s == m);
+    let hp = c.hp + if has("reinforced_plating") { 20. } else { 0. };
+    let energy = if has("capacitor") { 130. } else { 100. };
+    Robot {
+        robot_id: reg.robot_id.clone(),
+        name: reg.name.clone(),
+        team: if config.mode == "br-squad" {
+            reg.team.clone()
+        } else {
+            reg.robot_id.clone()
+        },
+        bot: reg.bot,
+        x,
+        y,
+        heading: 0.,
+        turret_heading: 0.,
+        vx: 0.,
+        vy: 0.,
+        speed: 0.,
+        hp,
+        max_hp: hp,
+        shield: 0.,
+        max_shield: if has("shield_reservoir") { 75. } else { 50. },
+        energy,
+        max_energy: energy,
+        vision_range: if has("optics") { 900. } else { 600. },
+        alive: true,
+        loadout: reg.loadout.clone(),
+        weapons: vec![WeaponSlot {
+            kind: reg.loadout.weapon.clone(),
+            ..Default::default()
+        }],
+        active_weapon: 0,
+        inventory: vec![],
+        pickup_priorities: vec![],
+        charges,
+        cooldowns: BTreeMap::new(),
+        burn_until: 0,
+        slow_until: 0,
+        emp_until: 0,
+        cloak_until: 0,
+        cruise: false,
+        channel: None,
+        damage_dealt: 0.,
+        damage_taken: 0.,
+        kills: 0,
+        placement: None,
+        messages: vec![],
+        action_results: vec![],
+        last_action: String::new(),
+        last_damage_tick: None,
+        transit_channel: None,
+        deaths: 0,
+        respawn_at: None,
+        left: false,
+    }
+}
+
+/// First clear spot on a golden-angle spiral around `site`, away from other
+/// live robots. Deterministic for the same inputs.
+pub(crate) fn find_spawn(
+    config: &Config,
+    world: &World,
+    robots: &[Robot],
+    site: (f64, f64),
+    angle: f64,
+) -> Option<(f64, f64)> {
+    for attempt in 0..512 {
+        let direction = angle + attempt as f64 * 2.399963229728653;
+        let radius = 170. + (attempt / 8) as f64 * 30.;
+        let x = (site.0 + direction.cos() * radius).clamp(RADIUS, config.width - RADIUS);
+        let y = (site.1 + direction.sin() * radius).clamp(RADIUS, config.height - RADIUS);
+        if world.clear(x, y, RADIUS)
+            && !robots
+                .iter()
+                .any(|v| v.alive && distance(v.x, v.y, x, y) < RADIUS * 2. + 4.)
+        {
+            return Some((x, y));
+        }
+    }
+    None
+}
+
+/// Arena respawn delay: five seconds at 20 Hz.
+pub const ARENA_RESPAWN_TICKS: u32 = 100;
+
 impl Arena {
     pub fn new(mut config: Config) -> Result<Self, String> {
         config.validate()?;
@@ -104,32 +234,7 @@ impl Arena {
                 name: id,
                 team,
                 bot: true,
-                loadout: match bot_id % 4 {
-                    0 => catalog::Loadout {
-                        chassis: "scout".into(),
-                        weapon: "machine_gun".into(),
-                        modules: vec!["optics".into(), "mobility_tuning".into()],
-                        utilities: vec!["cloak_emitter".into()],
-                    },
-                    1 => catalog::Loadout {
-                        chassis: "generalist".into(),
-                        weapon: "railgun".into(),
-                        modules: vec!["optics".into(), "cooling_system".into()],
-                        utilities: vec![],
-                    },
-                    2 => catalog::Loadout {
-                        chassis: "generalist".into(),
-                        weapon: "plasma".into(),
-                        modules: vec!["capacitor".into()],
-                        utilities: vec!["repair_field".into(), "smoke_projector".into()],
-                    },
-                    _ => catalog::Loadout {
-                        chassis: "generalist".into(),
-                        weapon: "machine_gun".into(),
-                        modules: vec!["reinforced_plating".into(), "cooling_system".into()],
-                        utilities: vec!["mine_dispenser".into()],
-                    },
-                },
+                loadout: bot_loadout(bot_id),
             });
         }
         config.robots.sort_by(|a, b| a.robot_id.cmp(&b.robot_id));
@@ -139,7 +244,6 @@ impl Arena {
         let team_order: Vec<_> = teams.keys().cloned().collect();
         let mut team_slots: BTreeMap<String, usize> = BTreeMap::new();
         for (i, reg) in config.robots.iter().enumerate() {
-            let c = catalog::chassis(&reg.loadout.chassis).unwrap();
             let site_index = if config.mode == "br-squad" {
                 team_order.iter().position(|t| t == &reg.team).unwrap()
             } else {
@@ -155,90 +259,9 @@ impl Arena {
                 i / world.sites.len()
             };
             let angle = layer as f64 * 2.399963229728653 + 0.7;
-            let mut charges = BTreeMap::new();
-            for u in &reg.loadout.utilities {
-                charges.insert(
-                    u.clone(),
-                    match u.as_str() {
-                        "mine_dispenser" => 3,
-                        "smoke_projector" => 2,
-                        _ => 0,
-                    },
-                );
-            }
-            let has = |m: &str| reg.loadout.modules.iter().any(|s| s == m);
-            let hp = c.hp + if has("reinforced_plating") { 20. } else { 0. };
-            let energy = if has("capacitor") { 130. } else { 100. };
-            let mut r = Robot {
-                robot_id: reg.robot_id.clone(),
-                name: reg.name.clone(),
-                team: if config.mode == "br-squad" {
-                    reg.team.clone()
-                } else {
-                    reg.robot_id.clone()
-                },
-                bot: reg.bot,
-                x: (site.x + angle.cos() * 170.).clamp(RADIUS, config.width - RADIUS),
-                y: (site.y + angle.sin() * 170.).clamp(RADIUS, config.height - RADIUS),
-                heading: 0.,
-                turret_heading: 0.,
-                vx: 0.,
-                vy: 0.,
-                speed: 0.,
-                hp,
-                max_hp: hp,
-                shield: 0.,
-                max_shield: if has("shield_reservoir") { 75. } else { 50. },
-                energy,
-                max_energy: energy,
-                vision_range: if has("optics") { 900. } else { 600. },
-                alive: true,
-                loadout: reg.loadout.clone(),
-                weapons: vec![WeaponSlot {
-                    kind: reg.loadout.weapon.clone(),
-                    ..Default::default()
-                }],
-                active_weapon: 0,
-                inventory: vec![],
-                pickup_priorities: vec![],
-                charges,
-                cooldowns: BTreeMap::new(),
-                burn_until: 0,
-                slow_until: 0,
-                emp_until: 0,
-                cloak_until: 0,
-                cruise: false,
-                channel: None,
-                damage_dealt: 0.,
-                damage_taken: 0.,
-                kills: 0,
-                placement: None,
-                messages: vec![],
-                action_results: vec![],
-                last_action: String::new(),
-                last_damage_tick: None,
-                transit_channel: None,
-            };
-            for attempt in 0..512 {
-                if world.clear(r.x, r.y, RADIUS)
-                    && !robots
-                        .iter()
-                        .any(|v| distance(v.x, v.y, r.x, r.y) < RADIUS * 2. + 4.)
-                {
-                    break;
-                }
-                let direction = angle + attempt as f64 * 2.399963229728653;
-                let radius = 170. + (attempt / 8) as f64 * 30.;
-                r.x = (site.x + direction.cos() * radius).clamp(RADIUS, config.width - RADIUS);
-                r.y = (site.y + direction.sin() * radius).clamp(RADIUS, config.height - RADIUS);
-            }
-            if !world.clear(r.x, r.y, RADIUS)
-                || robots
-                    .iter()
-                    .any(|v| distance(v.x, v.y, r.x, r.y) < RADIUS * 2.)
-            {
-                return Err("no clear spawn available for capacity".into());
-            }
+            let (x, y) = find_spawn(&config, &world, &robots, (site.x, site.y), angle)
+                .ok_or("no clear spawn available for capacity")?;
+            let mut r = fresh_robot(&config, reg, x, y);
             r.heading = heading(r.x, r.y, site.x, site.y);
             r.turret_heading = r.heading;
             robots.push(r);
@@ -301,6 +324,136 @@ impl Arena {
             message,
         });
     }
+    /// Arena housekeeping at the start of a tick: drop robots whose players
+    /// left, and respawn destroyed robots whose timer has run out.
+    fn arena_upkeep(&mut self) {
+        let before = self.robots.len();
+        let gone: Vec<String> = self
+            .robots
+            .iter()
+            .filter(|r| r.left && !r.alive)
+            .map(|r| r.robot_id.clone())
+            .collect();
+        if !gone.is_empty() {
+            self.robots.retain(|r| !(r.left && !r.alive));
+            for id in &gone {
+                self.bot_intents.remove(id);
+                self.bot_memory.remove(id);
+            }
+        }
+        for i in 0..self.robots.len() {
+            let due = self.robots[i].respawn_at.is_some_and(|t| t <= self.tick);
+            if !due || self.robots[i].alive {
+                continue;
+            }
+            let reg = Registration {
+                robot_id: self.robots[i].robot_id.clone(),
+                name: self.robots[i].name.clone(),
+                team: self.robots[i].team.clone(),
+                bot: self.robots[i].bot,
+                loadout: self.robots[i].loadout.clone(),
+            };
+            if let Some((x, y)) = self.arena_spawn(i as u64) {
+                let old = &self.robots[i];
+                let mut fresh = fresh_robot(&self.config, &reg, x, y);
+                fresh.team = old.team.clone();
+                fresh.kills = old.kills;
+                fresh.deaths = old.deaths;
+                fresh.damage_dealt = old.damage_dealt;
+                fresh.damage_taken = old.damage_taken;
+                fresh.messages = old.messages.clone();
+                self.robots[i] = fresh;
+                let id = self.robots[i].robot_id.clone();
+                self.event("robot_respawned", Some(id), None, None, None);
+            }
+        }
+        // Keep a full arena: when players leave and bots fill empty slots,
+        // new bots take their place.
+        if self.config.bots.is_none() {
+            let mut live = self.robots.iter().filter(|r| !r.left).count();
+            let mut n = 0u64;
+            while live < self.config.capacity {
+                let id = format!("bot-r{}-{}", self.tick, n);
+                let reg = Registration {
+                    robot_id: id.clone(),
+                    name: format!("Game Bot {}", self.robots.len() + 1),
+                    team: String::new(),
+                    bot: true,
+                    loadout: bot_loadout(self.tick as usize + n as usize),
+                };
+                match self.arena_spawn(1000 + n) {
+                    Some((x, y)) => self.robots.push(fresh_robot(&self.config, &reg, x, y)),
+                    None => break,
+                }
+                live += 1;
+                n += 1;
+            }
+        }
+        if self.robots.len() != before || !self.robots.is_empty() {
+            self.reindex_robots();
+        }
+    }
+
+    /// A clear spawn at a site chosen from the tick and a salt, so arrivals
+    /// spread across the map deterministically.
+    fn arena_spawn(&self, salt: u64) -> Option<(f64, f64)> {
+        if self.world.sites.is_empty() {
+            return None;
+        }
+        let pick = (self.tick as u64)
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(salt.wrapping_mul(7919));
+        let site = &self.world.sites[(pick % self.world.sites.len() as u64) as usize];
+        find_spawn(
+            &self.config,
+            &self.world,
+            &self.robots,
+            (site.x, site.y),
+            (pick % 360) as f64,
+        )
+    }
+
+    /// Records a join the arena could not honour, for the API to report.
+    pub fn reject_join(&mut self, robot_id: String, reason: String) {
+        self.event("join_rejected", Some(robot_id), None, None, Some(reason));
+    }
+
+    /// Arena mode: add a player's robot mid-match. When the arena is full a
+    /// bot makes room; a full arena of players rejects the join.
+    pub fn join(&mut self, reg: Registration) -> Result<(), String> {
+        if self.config.mode != "arena" {
+            return Err("only arena matches accept players mid-match".into());
+        }
+        if self.robots.iter().any(|r| r.robot_id == reg.robot_id) {
+            return Err("robot already in the arena".into());
+        }
+        crate::catalog::validate(&reg.loadout)?;
+        let live = self.robots.iter().filter(|r| !r.left).count();
+        if live >= self.config.capacity {
+            let bot = self
+                .robots
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.bot)
+                .min_by_key(|(_, r)| (r.alive, r.kills))
+                .map(|(i, _)| i)
+                .ok_or("the arena is full")?;
+            let id = self.robots.remove(bot).robot_id;
+            self.bot_intents.remove(&id);
+            self.bot_memory.remove(&id);
+        }
+        let (x, y) = self
+            .arena_spawn(self.robots.len() as u64 + 1)
+            .ok_or("no clear spawn in the arena")?;
+        let robot = fresh_robot(&self.config, &reg, x, y);
+        self.robots.push(robot);
+        self.config.robots.push(reg);
+        self.reindex_robots();
+        let id = self.robots.last().unwrap().robot_id.clone();
+        self.event("robot_joined", Some(id), None, None, None);
+        Ok(())
+    }
+
     pub fn zone(&self) -> Zone {
         let mut zone = Zone {
             active: false,
@@ -323,7 +476,7 @@ impl Arena {
             zone.radius += (p.radius - zone.radius) * amount;
             zone.damage = p.damage;
             zone.stage = i + 1;
-            zone.active = self.config.mode != "sandbox";
+            zone.active = self.config.mode != "sandbox" && self.config.mode != "arena";
             if self.tick < p.end_tick {
                 break;
             }
@@ -756,6 +909,16 @@ impl Arena {
         inputs: BTreeMap<String, Action>,
         withdrawals: &[String],
     ) -> Result<(), String> {
+        self.step_joining(inputs, withdrawals, Vec::new())
+    }
+    /// A step that first admits arena joins (see `join`); rejected joins
+    /// become `join_rejected` events in this tick.
+    pub fn step_joining(
+        &mut self,
+        inputs: BTreeMap<String, Action>,
+        withdrawals: &[String],
+        joins: Vec<Registration>,
+    ) -> Result<(), String> {
         if self.finished {
             return Ok(());
         }
@@ -763,6 +926,15 @@ impl Arena {
             a.validate()?;
         }
         self.events.clear();
+        if self.config.mode == "arena" {
+            self.arena_upkeep();
+        }
+        for reg in joins {
+            let id = reg.robot_id.clone();
+            if let Err(reason) = self.join(reg) {
+                self.reject_join(id, reason);
+            }
+        }
         for r in &mut self.robots {
             r.action_results.clear();
         }
@@ -792,6 +964,11 @@ impl Arena {
         let mut hits = vec![];
         for (i, action) in actions.iter().enumerate() {
             if !self.robots[i].alive {
+                // A player leaving while waiting to respawn still leaves.
+                if self.config.mode == "arena" && withdrawals.contains(&self.robots[i].robot_id) {
+                    self.robots[i].left = true;
+                    self.robots[i].respawn_at = None;
+                }
                 continue;
             }
             if withdrawals.contains(&self.robots[i].robot_id) {
@@ -888,9 +1065,21 @@ impl Arena {
             .map(|(i, _)| i)
             .collect();
         let place = alive_before - deaths.len() + 1;
+        let arena_mode = self.config.mode == "arena";
         for i in deaths {
             self.robots[i].alive = false;
-            self.robots[i].placement = Some(place);
+            if arena_mode {
+                // Arena robots come back after five seconds unless the player
+                // left; there are no placements in a never-ending arena.
+                self.robots[i].deaths += 1;
+                if withdrawals.contains(&self.robots[i].robot_id) {
+                    self.robots[i].left = true;
+                } else {
+                    self.robots[i].respawn_at = Some(self.tick + ARENA_RESPAWN_TICKS);
+                }
+            } else {
+                self.robots[i].placement = Some(place);
+            }
             self.robots[i].speed = 0.;
             let id = self.robots[i].robot_id.clone();
             self.event("robot_destroyed", Some(id.clone()), None, None, None);
@@ -1157,6 +1346,24 @@ impl Arena {
         self.robots[target].y = y + (ny - y) * fraction;
     }
     fn finish(&mut self) {
+        if self.config.mode == "arena" {
+            // Arena sessions only end on time; the top scorer wins.
+            if self.tick >= self.config.duration_seconds * 20 {
+                self.finished = true;
+                self.winner_team = self
+                    .robots
+                    .iter()
+                    .max_by(|a, b| {
+                        a.kills
+                            .cmp(&b.kills)
+                            .then(b.deaths.cmp(&a.deaths))
+                            .then(b.robot_id.cmp(&a.robot_id))
+                    })
+                    .map(|r| r.team.clone())
+                    .unwrap_or_else(|| "draw".into());
+            }
+            return;
+        }
         if self.config.mode == "sandbox" && self.tick < self.config.duration_seconds * 20 {
             return;
         }
@@ -1225,7 +1432,7 @@ impl Arena {
         }
     }
     pub fn snapshot(&self) -> Value {
-        let robots:Vec<_>=self.robots.iter().map(|r|json!({"robotId":r.robot_id,"name":r.name,"team":r.team,"bot":r.bot,"x":r.x,"y":r.y,"vx":r.vx,"vy":r.vy,"heading":r.heading,"turretHeading":r.turret_heading,"hp":r.hp,"maxHp":r.max_hp,"shield":r.shield,"maxShield":r.max_shield,"energy":r.energy,"maxEnergy":r.max_energy,"alive":r.alive,"weapon":r.weapon(),"visionRange":r.vision_range,"placement":r.placement,"damageDealt":r.damage_dealt,"damageTaken":r.damage_taken,"kills":r.kills,"effects":self.visible_effects(r)})).collect();
+        let robots:Vec<_>=self.robots.iter().map(|r|json!({"robotId":r.robot_id,"name":r.name,"team":r.team,"bot":r.bot,"x":r.x,"y":r.y,"vx":r.vx,"vy":r.vy,"heading":r.heading,"turretHeading":r.turret_heading,"hp":r.hp,"maxHp":r.max_hp,"shield":r.shield,"maxShield":r.max_shield,"energy":r.energy,"maxEnergy":r.max_energy,"alive":r.alive,"weapon":r.weapon(),"visionRange":r.vision_range,"placement":r.placement,"damageDealt":r.damage_dealt,"damageTaken":r.damage_taken,"kills":r.kills,"deaths":r.deaths,"respawnIn":r.respawn_at.map(|t|t.saturating_sub(self.tick)),"effects":self.visible_effects(r)})).collect();
         let items: Vec<_> = self
             .world
             .containers
@@ -1233,7 +1440,7 @@ impl Arena {
             .filter(|c| !c.contents.is_empty())
             .map(|c| json!({"itemId":c.item_id,"x":c.x,"y":c.y,"type":"container","active":true}))
             .collect();
-        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"events":self.events})
+        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"events":self.events})
     }
     /// Status effects a spectator could see on the robot's body.
     fn visible_effects(&self, r: &Robot) -> Vec<&'static str> {

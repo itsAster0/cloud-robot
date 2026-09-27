@@ -38,6 +38,7 @@ func main() {
 	app.SetLogs(logs)
 	app.RecoverMatches(ctx)
 	go app.RunWorker(ctx)
+	go app.RunArena(ctx)
 	address := os.Getenv("API_ADDR")
 	if address == "" {
 		address = ":8080"

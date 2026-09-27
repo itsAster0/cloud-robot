@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type v4Control struct {
 	paused       bool
 	steps        int
 	withdrawals  []string
+	joins        []arenaJoin
 	tick         uint32
 	observations map[string]json.RawMessage
 	edits        chan editRequest
@@ -42,6 +44,25 @@ func (c *v4Control) RequestWithdraw(id string) bool {
 	c.withdrawals = append(c.withdrawals, id)
 	return true
 }
+
+// arenaJoin carries a player entering a running arena: the engine
+// registration and the roster entry the worker adds to its match copy.
+type arenaJoin struct {
+	Registration enginev4.Registration
+	Submission   model.RobotSubmission
+}
+
+// RequestJoin queues a robot to enter a running arena at the next tick.
+func (c *v4Control) RequestJoin(join arenaJoin) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.joins) >= 64 {
+		return false
+	}
+	c.joins = append(c.joins, join)
+	return true
+}
+
 func (s *Server) createV4Match(w http.ResponseWriter, r *http.Request) {
 	if envOr("MAINTENANCE_MODE", "false") == "true" {
 		writeError(w, 503, "maintenance mode")
@@ -327,8 +348,19 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 		}
 		control.mu.Lock()
 		withdrawals := control.withdrawals
-		control.withdrawals = nil
+		joining := control.joins
+		control.withdrawals, control.joins = nil, nil
 		control.mu.Unlock()
+		joins := make([]enginev4.Registration, 0, len(joining))
+		for _, join := range joining {
+			joins = append(joins, join.Registration)
+			m.Robots = append(m.Robots, join.Submission)
+		}
+		if config.Mode == "arena" && len(withdrawals) > 0 {
+			// Arena players leave for good; dropping them here stops action
+			// collection and the missing-agent timer for them.
+			m.Robots = withoutRobots(m.Robots, withdrawals)
+		}
 		for _, edit := range pendingEdits {
 			var timing struct {
 				EffectiveTick uint32 `json:"effectiveTick"`
@@ -360,7 +392,7 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 			}
 		}
 		pendingEdits = kept
-		input := map[string]any{"actions": actions, "withdrawals": withdrawals}
+		input := map[string]any{"actions": actions, "withdrawals": withdrawals, "joins": joins}
 		if withdrawals == nil {
 			input["withdrawals"] = []string{}
 		}
@@ -568,4 +600,14 @@ func humanRobots(robots []model.RobotSubmission) int {
 		}
 	}
 	return n
+}
+
+func withoutRobots(robots []model.RobotSubmission, ids []string) []model.RobotSubmission {
+	kept := robots[:0]
+	for _, r := range robots {
+		if !slices.Contains(ids, r.RobotID) {
+			kept = append(kept, r)
+		}
+	}
+	return kept
 }
