@@ -31,3 +31,14 @@ for cell in "${cells[@]}"; do
 done
 magick montage "$work"/[0-9]*.png -tile 8x -geometry 64x64+0+0 -background none "$out"
 echo "wrote $out"
+
+# Robot sprites: Kenney's CC0 "Top-down Tanks" hull and barrel, converted to
+# grayscale so the renderer can tint them with any team colour. Both face
+# down (+y) in the source; WorldView rotates them by heading - 90 degrees.
+tanks_url="https://kenney.nl/media/pages/assets/top-down-tanks/0385fcb3e0-1677699019/kenney_top-down-tanks.zip"
+robot_out="$(dirname "$out")/robot-sprites.png"
+curl -fsSL "$tanks_url" -o "$work/tanks.zip"
+unzip -q "$work/tanks.zip" -d "$work/tanks"
+magick "$work/tanks/PNG/Tanks/tankBeige_outline.png" "$work/tanks/PNG/Tanks/barrelBeige_outline.png" \
+  -background none -gravity north -extent 83x78 -colorspace gray -modulate 125 +append "$robot_out"
+echo "wrote $robot_out"
