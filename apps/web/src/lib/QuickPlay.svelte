@@ -13,6 +13,8 @@
     { id: 'sniper', name: 'Sniper', glyph: '◎', tag: 'Patient and precise', text: 'Keeps its distance with a railgun and takes steady long shots.', loadout: { chassis: 'generalist', weapon: 'railgun', modules: ['optics', 'cooling_system'], utilities: [] } },
     { id: 'scout', name: 'Scout', glyph: '➤', tag: 'Fast and sneaky', text: 'Moves quickly, scans constantly, rides transit links, and slips away when hurt.', loadout: { chassis: 'scout', weapon: 'machine_gun', modules: ['optics', 'mobility_tuning'], utilities: ['cloak_emitter'] } },
     { id: 'sentinel', name: 'Guardian', glyph: '▣', tag: 'Holds its ground', text: 'Guards the centre of the safe zone with a cannon and mines the approaches.', loadout: { chassis: 'heavy', weapon: 'cannon', modules: [], utilities: ['mine_dispenser'] } },
+    { id: 'zone-runner', name: 'Zone Runner', glyph: '⌬', tag: 'Multi-file brain', text: 'A state machine split over five files: rides the drifting zone, hunts bounties, and heals when hurt.', loadout: { chassis: 'generalist', weapon: 'plasma', modules: ['reinforced_plating', 'cooling_system'], utilities: [] } },
+    { id: 'bounty-hunter', name: 'Bounty Hunter', glyph: '$', tag: 'Multi-file hunter', text: 'Remembers every robot on a kill streak, predicts where it went, and snipes it. Four files.', loadout: { chassis: 'scout', weapon: 'railgun', modules: ['optics', 'mobility_tuning'], utilities: [] } },
     { id: 'scavenger', name: 'Scavenger', glyph: '✚', tag: 'Loots everything', text: 'Races for weapons and supplies first, then fights with whatever it found.', loadout: { chassis: 'scout', weapon: 'machine_gun', modules: ['mobility_tuning'], utilities: [] } },
   ];
   // `config: null` is the always-on arena: no lobby, no start, respawns.

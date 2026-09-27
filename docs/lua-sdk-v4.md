@@ -162,3 +162,26 @@ second; a mixed crowd is `contested` and scores nothing. `arena.uplink(obs)`
 returns it or nil. `arena.tactics` goes to the Uplink and holds it when there
 is nothing to fight or loot; pass `uplink = false` to keep your own `idle`.
 `obs.self` also has `score`, `streak`, and `protectedUntil`.
+
+## Multi-file robots
+
+Put modules next to `main.lua` in `/workspace` and load them with `require`:
+`require "brain.plan"` loads `/workspace/brain/plan.lua`. When you register,
+the server snapshots `main.lua` and every other `.lua` file up to three
+folders deep (hidden folders skipped): at most 32 modules, 16 KiB each and
+128 KiB in total. The registered robot loads modules from that snapshot, so
+editing the workspace mid-match does not change it.
+
+Two multi-file templates show the layout (deploy them from the box page or
+pick them in Quick Play):
+
+- `zone-runner`: `main.lua` wires a state machine from `brain/fsm.lua`,
+  `brain/sense.lua` (observation to facts), `brain/plan.lua` (prioritised
+  rules with hysteresis), and `brain/act.lua` (what each state does).
+- `bounty-hunter`: `lib/memory.lua` (contact memory with dead reckoning),
+  `lib/pick.lua` (target scoring), `lib/aim.lua` (railgun fire discipline).
+
+`arena.tactics` accepts `first(obs, ctx)`, which runs before its built-in
+priorities and may return an action, a goal point, or nil. Visible robots in
+`obs.robots` carry `bounty` (points for destroying them) and `protected`
+(spawn protection).

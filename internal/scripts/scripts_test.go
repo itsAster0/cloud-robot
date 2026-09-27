@@ -1,6 +1,7 @@
 package scripts
 
 import (
+	"github.com/kryxen/cloud-robot/internal/boxes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,8 +10,8 @@ import (
 
 func TestListReturnsCuratedTemplates(t *testing.T) {
 	templates := List()
-	if len(templates) != 7 {
-		t.Fatalf("expected 7 templates, got %d: %+v", len(templates), templates)
+	if len(templates) != 9 {
+		t.Fatalf("expected 9 templates, got %d: %+v", len(templates), templates)
 	}
 	for _, template := range templates {
 		if template.Description == "" {
@@ -34,9 +35,18 @@ func TestListReturnsCuratedTemplates(t *testing.T) {
 func TestExamplesMatchDeployableTemplates(t *testing.T) {
 	for _, template := range List() {
 		var examplePath string
-		if template.Name == "v4" {
+		switch {
+		case template.Name == "v4":
 			examplePath = filepath.Join("..", "..", "examples", "lua-v4", "main.lua")
-		} else {
+		case len(template.Files) > 0:
+			examplePath = filepath.Join("..", "..", "examples", "lua-v4", template.Name, "main.lua")
+			for rel, source := range template.Files {
+				module, err := os.ReadFile(filepath.Join("..", "..", "examples", "lua-v4", template.Name, rel))
+				if err != nil || string(module) != source {
+					t.Fatalf("example module %s/%s drifted from its template", template.Name, rel)
+				}
+			}
+		default:
 			examplePath = filepath.Join("..", "..", "examples", "lua-v4", template.Name+".lua")
 		}
 		example, err := os.ReadFile(examplePath)
@@ -59,5 +69,29 @@ func TestGetTemplateAndUnknownRejection(t *testing.T) {
 	}
 	if _, err := Get("does-not-exist"); err == nil {
 		t.Fatal("unknown template accepted")
+	}
+}
+
+func TestMultiFileTemplatesShipTheirModules(t *testing.T) {
+	for name, modules := range map[string][]string{
+		"zone-runner":   {"brain/fsm.lua", "brain/sense.lua", "brain/plan.lua", "brain/act.lua"},
+		"bounty-hunter": {"lib/memory.lua", "lib/pick.lua", "lib/aim.lua"},
+	} {
+		template, err := GetTemplate(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := boxes.ValidateModules(template.Files); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, module := range modules {
+			if template.Files[module] == "" {
+				t.Fatalf("%s is missing %s", name, module)
+			}
+			require := strings.TrimSuffix(strings.ReplaceAll(module, "/", "."), ".lua")
+			if !strings.Contains(template.Source, `require "`+require+`"`) {
+				t.Fatalf("%s main.lua does not require %s", name, require)
+			}
+		}
 	}
 }

@@ -124,7 +124,8 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	case r.Method == http.MethodPut && len(parts) == 2 && parts[1] == "agent":
 		var input boxes.AgentConfig
-		if err = decode(r.Body, &input); err == nil {
+		// Room for main.lua plus a full module bundle.
+		if err = decodeLimit(r.Body, &input, 320*1024); err == nil {
 			var payload []byte
 			payload, err = json.Marshal(input)
 			if err == nil {
@@ -153,6 +154,31 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			err = run(r.Context(), "docker", "restart", boxID)
+		}
+		if err == nil {
+			result, err = s.status(r.Context(), boxID)
+		}
+	case r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "bundle":
+		bundle, bundleErr := output(r.Context(), "docker", "exec", boxID, "/usr/local/bin/robot-box-supervisor", "read-bundle")
+		if bundleErr != nil {
+			writeError(w, 422, bundleErr.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(bundle))
+		return
+	case r.Method == http.MethodPut && len(parts) == 2 && parts[1] == "files":
+		var input struct {
+			Files map[string]string `json:"files"`
+		}
+		if err = decodeLimit(r.Body, &input, 320*1024); err == nil {
+			if err = boxes.ValidateModules(input.Files); err == nil {
+				var payload []byte
+				payload, err = json.Marshal(input)
+				if err == nil {
+					err = s.execInput(r.Context(), boxID, string(payload), "write-files")
+				}
+			}
 		}
 		if err == nil {
 			result, err = s.status(r.Context(), boxID)
@@ -421,8 +447,10 @@ func output(ctx context.Context, name string, args ...string) (string, error) {
 	}
 	return string(data), nil
 }
-func decode(reader io.Reader, target any) error {
-	decoder := json.NewDecoder(io.LimitReader(reader, 20*1024))
+func decode(reader io.Reader, target any) error { return decodeLimit(reader, target, 20*1024) }
+
+func decodeLimit(reader io.Reader, target any, limit int64) error {
+	decoder := json.NewDecoder(io.LimitReader(reader, limit))
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(target)
 }

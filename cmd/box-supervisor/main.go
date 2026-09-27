@@ -48,6 +48,10 @@ func main() {
 		setKey()
 	case "configure-agent":
 		configureAgent()
+	case "write-files":
+		writeFiles()
+	case "read-bundle":
+		readBundle()
 	case "clear-agent":
 		// The match is over: remove the configuration; the daemon stops the
 		// agent on its next sync.
@@ -173,6 +177,12 @@ func (s *supervisor) sync(ctx context.Context) {
 		s.configHash = hash
 		command := exec.CommandContext(ctx, "su", "-s", "/bin/sh", "developer", "-c", "cd /workspace && exec "+config.StartCommand)
 		command.Env = append(os.Environ(), "ROBOT_ARENA_URL="+config.URL, "ROBOT_TOKEN="+config.Token, "ROBOT_ID="+config.RobotID)
+		if config.ImmutableSource != "" {
+			// Registered robots require() modules from their snapshot, not
+			// the live workspace, so later edits cannot change a running robot.
+			path := strings.Replace(os.Getenv("LUA_PATH"), "/workspace/?.lua", "/opt/robot-arena-run/?.lua;/opt/robot-arena-run/?/init.lua", 1)
+			command.Env = append(command.Env, "LUA_PATH="+path)
+		}
 		command.Stdout, command.Stderr = os.Stdout, os.Stderr
 		if err := command.Start(); err != nil {
 			s.record.AgentStatus = "failed"
@@ -243,7 +253,7 @@ func setKey() {
 	fatal(writeAtomic(filepath.Join(controlDir, "authorized_keys"), []byte(key+"\n"), 0644))
 }
 func configureAgent() {
-	data, err := io.ReadAll(io.LimitReader(os.Stdin, 128*1024))
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, 320*1024))
 	if err != nil {
 		fatal(err)
 	}
@@ -259,8 +269,20 @@ func configureAgent() {
 	}
 	if config.ImmutableSource != "" {
 		fatal(validateSource([]byte(config.ImmutableSource)))
+		for path, source := range config.ImmutableFiles {
+			if err := validateSource([]byte(source)); err != nil {
+				fatal(fmt.Errorf("%s: %w", path, err))
+			}
+		}
+		// A fresh run directory: main.lua plus the snapshotted modules.
+		fatal(os.RemoveAll("/opt/robot-arena-run"))
 		fatal(os.MkdirAll("/opt/robot-arena-run", 0755))
 		fatal(writeAtomic("/opt/robot-arena-run/main.lua", []byte(config.ImmutableSource), 0644))
+		for path, source := range config.ImmutableFiles {
+			target := filepath.Join("/opt/robot-arena-run", path)
+			fatal(os.MkdirAll(filepath.Dir(target), 0755))
+			fatal(os.WriteFile(target, []byte(source), 0644))
+		}
 		config.StartCommand = "lua /opt/robot-arena-run/main.lua"
 		data, err = json.Marshal(config)
 		fatal(err)
@@ -557,4 +579,52 @@ func writeMainRevision(path, source, expected string) error {
 // container output and the admin console reads it through the provisioner.
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stdout, "[supervisor] "+format+"\n", args...)
+}
+
+// writeFiles writes template modules into /workspace, owned by developer.
+func writeFiles() {
+	var input struct {
+		Files map[string]string `json:"files"`
+	}
+	fatal(json.NewDecoder(io.LimitReader(os.Stdin, 320*1024)).Decode(&input))
+	fatal(boxes.ValidateModules(input.Files))
+	for path, source := range input.Files {
+		target := filepath.Join("/workspace", path)
+		dir := filepath.Dir(target)
+		fatal(os.MkdirAll(dir, 0755))
+		for d := dir; d != "/workspace" && strings.HasPrefix(d, "/workspace/"); d = filepath.Dir(d) {
+			fatal(os.Chown(d, 1000, 1000))
+		}
+		fatal(writeValidatedLua(target, []byte(source)))
+	}
+}
+
+// readBundle prints the workspace's .lua modules other than main.lua as
+// JSON, refusing bundles over the limits so registration can say why.
+func readBundle() {
+	files := map[string]string{}
+	err := filepath.WalkDir("/workspace", func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel := strings.TrimPrefix(path, "/workspace/")
+		if entry.IsDir() {
+			if path != "/workspace" && (strings.HasPrefix(entry.Name(), ".") || strings.Count(rel, "/") >= 2) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(rel, ".lua") || !boxes.ValidModulePath(rel) {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		files[rel] = string(data)
+		return nil
+	})
+	fatal(err)
+	fatal(boxes.ValidateModules(files))
+	fatal(json.NewEncoder(os.Stdout).Encode(map[string]any{"files": files}))
 }
