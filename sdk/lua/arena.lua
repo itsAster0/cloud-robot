@@ -1223,6 +1223,11 @@ function arena.run(config)
         local payload = assert(ws:receive(35))
         local observation, _, decode_error = json.decode(payload)
         assert(observation, decode_error)
+        if observation.type == "retired" then
+          -- The match ended or the robot left: stop instead of reconnecting.
+          io.stderr:write("[arena] robot retired: " .. tostring(observation.reason) .. "; agent stopping\n")
+          os.exit(0)
+        end
         if observation.type == "action_rejected" then
           -- A broken script is rejected every decision; log on change and
           -- every 50th repeat so the box log stays readable.

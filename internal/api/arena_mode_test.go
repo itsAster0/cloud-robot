@@ -2,8 +2,16 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+	"github.com/kryxen/cloud-robot/internal/cloud"
 
 	"github.com/kryxen/cloud-robot/internal/enginev4"
 	"github.com/kryxen/cloud-robot/internal/model"
@@ -21,12 +29,12 @@ func runningArena(t *testing.T, h *harness) *v4Control {
 }
 
 func TestArenaGrowsWithLastSessionPeak(t *testing.T) {
-	small, busy := arenaConfig(0), arenaConfig(30)
-	if small.Capacity != 24 || busy.Capacity != 72 || busy.Width <= small.Width {
-		t.Fatalf("want 24 then 72 slots on a wider map, got %d (%.0f) and %d (%.0f)", small.Capacity, small.Width, busy.Capacity, busy.Width)
+	small, busy := arenaConfig(0), arenaConfig(100)
+	if small.Capacity != 128 || busy.Capacity != 208 || busy.Width <= small.Width {
+		t.Fatalf("want 128 then 208 slots on a wider map, got %d (%.0f) and %d (%.0f)", small.Capacity, small.Width, busy.Capacity, busy.Width)
 	}
-	if arenaConfig(500).Capacity != 128 {
-		t.Fatal("arena capacity is capped at 128")
+	if arenaConfig(500).Capacity != 256 {
+		t.Fatal("arena capacity is capped at 256")
 	}
 	if err := busy.Validate(); err != nil {
 		t.Fatal(err)
@@ -106,5 +114,25 @@ func TestEnsureArenaQueuesOneSession(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("want exactly one arena session, got %d", count)
+	}
+}
+
+func TestAgentForFinishedMatchIsRetired(t *testing.T) {
+	h := newHarness(t)
+	token := "retire-me"
+	hash := sha256.Sum256([]byte(token))
+	h.store.credentials["gone"] = cloud.AgentCredential{RobotID: "gone", MatchID: "old", TokenHash: base64.RawURLEncoding.EncodeToString(hash[:])}
+	h.store.matches["old"] = model.Match{MatchID: "old", EngineVersion: 4, Status: model.MatchFinished}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(h.server.URL, "http")+"/agent/connect/gone", &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}}, Subprotocols: []string{"robot-arena.v4"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	var message map[string]string
+	if err := wsjson.Read(ctx, c, &message); err != nil || message["type"] != "retired" {
+		t.Fatalf("want retired message, got %v %v", message, err)
 	}
 }

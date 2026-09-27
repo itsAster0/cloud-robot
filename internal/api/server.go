@@ -1104,10 +1104,6 @@ func (s *Server) connectAgent(w http.ResponseWriter, r *http.Request) {
 	isV4 := matchErr == nil && agentMatch.EngineVersion == 4
 	protocols := []string{"robot-arena.v1"}
 	if isV4 {
-		if agentMatch.Status != model.MatchLobby && agentMatch.Status != model.MatchQueued && agentMatch.Status != model.MatchRunning {
-			writeError(w, http.StatusConflict, "match no longer accepts agent connections")
-			return
-		}
 		enrolled := false
 		for _, robot := range agentMatch.Robots {
 			if robot.RobotID == robotID {
@@ -1115,8 +1111,15 @@ func (s *Server) connectAgent(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		if !enrolled {
-			writeError(w, http.StatusForbidden, "robot no longer registered")
+		active := agentMatch.Status == model.MatchLobby || agentMatch.Status == model.MatchQueued || agentMatch.Status == model.MatchRunning
+		if !active || !enrolled {
+			// Tell the agent it is done instead of failing the handshake, so
+			// SDK 0.4 exits cleanly rather than retrying a dead match forever.
+			reason := "match is over"
+			if active {
+				reason = "robot left the match"
+			}
+			retireAgent(w, r, reason)
 			return
 		}
 		if r.Header.Get("X-Robot-SDK-Version") != "0.4.0" {
@@ -1329,4 +1332,19 @@ func openTeam(robots []model.RobotSubmission, size int) string {
 		}
 	}
 	return fmt.Sprintf("team-%02d", len(order)+1)
+}
+
+// retireAgent accepts the socket only to send a final "retired" message.
+func retireAgent(w http.ResponseWriter, r *http.Request, reason string) {
+	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
+		Subprotocols:   []string{"robot-arena.v4"},
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	_ = wsjson.Write(ctx, connection, map[string]string{"type": "retired", "reason": reason})
+	_ = connection.Close(websocket.StatusNormalClosure, reason)
 }
