@@ -273,3 +273,15 @@ travelling 1,500-2,800 units and firing.
 - `pickThing` (tested) resolves a click to loot, transit pad, obstacle,
   hazard, site, or ground; `ThingInspector` explains it with the biome.
 - Verified live in Chrome: site, loot crate, and lake clicks.
+
+## Verification, 2026-09-27
+
+- `mise run check` and `mise run test`: pass (Rust 44 rules tests, Go, web 43).
+- `mise run sdk:test`: pass. `mise run v4:smoke`: pass.
+- `mise run v4:behaviour`: 5 of 7 strategies passed on the first run. Scout
+  and scavenger failed once and passed on rerun; scavenger's failure was
+  "Lua agents never fired", because two loot-first robots did not meet within
+  the 60-second duel. Agent timing is not deterministic, so this check is
+  flaky for loot-heavy strategies.
+- Live in Chrome: arena join, respawn countdown, leave and rejoin; biome
+  rendering (snow, swamp, lakes, ridges); loot, site, and lake inspection.
