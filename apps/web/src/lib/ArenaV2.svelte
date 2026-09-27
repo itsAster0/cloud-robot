@@ -8,6 +8,7 @@
   import MapPreview, { type MapPreviewData } from './MapPreview.svelte';
   import MatchOverview from './MatchOverview.svelte';
   import MatchSetup from './MatchSetup.svelte';
+  import LoadoutBuilder from './LoadoutBuilder.svelte';
   import RobotInspector from './RobotInspector.svelte';
   import { killsLeader } from './matchStats';
   type Panel = 'code' | 'build' | 'match' | 'debug' | 'results';
@@ -221,18 +222,7 @@
         <div class="editor-next"><span>{dirty ? 'Save your changes before testing.' : 'Ready to see how your robot behaves?'}</span><button class="primary" onclick={prepareSandbox}>Test in sandbox →</button></div>
       </div>
       {#if panel === 'build'}
-        <section class="surface controls"><div class="section-heading"><div><p class="eyebrow">ROBOT CONFIGURATION</p><h2>Starting loadout</h2></div><span class="budget" class:over={cost > 60}>{cost}<small> / 60</small></span></div>
-          <div class="budget-bar"><span style:width={`${Math.min(100, cost / 60 * 100)}%`} class:over={cost > 60}></span></div>
-          <p class="hint">Spend up to 60 points. Pick a preset or tune each part.</p>
-          <div class="presets">{#each ['scout','assault','sniper','support','sentinel','scavenger'] as p}<button onclick={() => preset(p)}>{p}</button>{/each}</div>
-          <label>Chassis<select bind:value={chassis}>{#each Object.entries(chassisCosts) as [id, points]}<option value={id}>{title(id)} · {points} pts</option>{/each}</select></label>
-          <label>Starter weapon<select bind:value={weapon}>{#each Object.entries(weapons) as [id, points]}<option value={id}>{title(id)} · {points} pts</option>{/each}</select></label>
-          <fieldset><legend>Passive modules <span>up to 2</span></legend>{#each passive as id}<label class="check"><input type="checkbox" value={id} bind:group={modules} disabled={!modules.includes(id) && modules.length >= 2}/><span>{title(id)}</span><small>10 pts</small></label>{/each}</fieldset>
-          <fieldset><legend>Utilities <span>up to 2</span></legend>{#each Object.entries(utilityCosts) as [id, points]}<label class="check"><input type="checkbox" value={id} bind:group={utilities} disabled={!utilities.includes(id) && utilities.length >= 2}/><span>{title(id)}</span><small>{points} pts</small></label>{/each}</fieldset>
-          {#if cost > 60}<p class="validation-error">Remove {cost - 60} points to save or register this loadout.</p>{/if}
-          <button class="primary full" onclick={saveBuild} disabled={busy || !signedIn || cost > 60}>Save loadout</button>
-          <p class="hint">Registration uses the loadout shown here. Changes affect your next match.</p>
-        </section>
+        <section class="surface controls"><p class="eyebrow">ROBOT CONFIGURATION</p><h2>Starting loadout</h2><p class="hint">Pick a chassis, weapon, modules, and utilities within the 60-point budget. The build is saved to your account and used when you register.</p><button class="full" onclick={() => showPanel('code')}>Back to your code →</button></section>
       {:else if panel === 'match' || panel === 'debug'}
         <section class="surface controls"><p class="eyebrow">{panel === 'debug' ? 'TEST ENVIRONMENT' : 'NEW MATCH'}</p><h2>{match ? 'Current arena open' : panel === 'debug' ? 'Set up a sandbox' : 'Set up a match'}</h2>
           <p class="hint">{match ? 'Close the current arena to configure a new one.' : 'Pick a mode, size, and map on the right, then create the lobby.'}</p>
@@ -254,9 +244,29 @@
     </aside>
     <main>
       <section class="surface arena-panel">
+        {#if panel !== 'build' && (match || panel !== 'results')}
         <div class="matchbar"><div><p class="eyebrow">{match ? 'CURRENT ARENA' : 'RUN & OBSERVE'}</p><h2><span class="status-dot" class:live={match?.status === 'running'}></span>{match ? title(match.mode) : 'Your next run starts here'}</h2>{#if match}<a class="match-id" href={`#/v2/${match.matchId}`}>{match.matchId}</a>{/if}</div>{#if match}<span class="state-label">{match.status}</span>{/if}</div>
-        {#if !match && (panel === 'match' || panel === 'debug')}
+        {/if}
+        {#if panel === 'build'}
+          <div class="setup-wrap"><LoadoutBuilder bind:chassis bind:weapon bind:modules bind:utilities {busy} {signedIn} onsave={saveBuild}/></div>
+        {:else if !match && (panel === 'match' || panel === 'debug')}
           <div class="setup-wrap"><MatchSetup bind:mode bind:capacity bind:size bind:duration bind:siteCount bind:coverPerSite bind:lootPerSite bind:seed bind:liveEdit {signedIn} {busy} preview={mapPreview} {previewLoading} testing={panel === 'debug'} onmodechange={modeDefaults} oncreate={create} onrandomize={randomizeSeed} {onSignIn}/></div>
+        {:else if !match && panel === 'results'}
+          <div class="setup-wrap grid gap-3">
+            <p class="m-0 text-sm text-muted-foreground">Pick a finished match to scrub its replay, click robots to inspect them, and check your robot's recorded decisions.</p>
+            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {#each recentMatches.filter(item => item.status === 'finished').slice(0, 12) as item (item.matchId)}
+                <a class="grid gap-1 rounded-xl border border-border bg-background p-4 text-foreground no-underline transition-colors hover:border-primary/60 hover:bg-muted/40" href={`#/v2/${item.matchId}`}>
+                  <span class="flex items-center justify-between gap-2"><strong class="text-sm">{title(item.mode)}</strong><span class="font-mono text-[11px] text-muted-foreground">{item.matchId.slice(0, 8)}</span></span>
+                  <span class="text-xs text-muted-foreground">{new Date(item.createdAt).toLocaleString()}</span>
+                  <span class="text-sm">{item.winnerTeam ? `Winner: ${item.winnerTeam}` : 'Finished'}</span>
+                  <span class="text-xs text-primary">Open replay →</span>
+                </a>
+              {:else}
+                <p class="m-0 text-sm text-muted-foreground">{matchesLoading ? 'Loading results…' : 'No finished matches yet. Run a sandbox to create your first replay.'}</p>
+              {/each}
+            </div>
+          </div>
         {:else if !match}
           <div class="empty-arena"><div class="arena-mark" aria-hidden="true"><span>lua</span><span>→</span><span>arena</span></div><h2>Turn a script into a competitor.</h2><p>Keep your code and tools together. Run a small sandbox, inspect what happened, then bring the same robot into a match.</p>
             <ol class="run-steps"><li class:done={editorLoaded && !dirty}><span>01</span><div><strong>Prepare your script</strong><p>Load main.lua or deploy a strategy, then save your changes.</p></div></li><li><span>02</span><div><strong>Test and debug</strong><p>Create a sandbox, register your robot, and start the simulation.</p></div></li><li><span>03</span><div><strong>Compete and review</strong><p>Choose a mode. Replay a finished match to improve your next run.</p></div></li></ol>
@@ -326,29 +336,18 @@
   .v2 button.primary:hover:not(:disabled) { background:#9defdc; }
   .v2 button.quiet { background:transparent; border-color:transparent; color:var(--v2-muted); }
   .v2 .full { width:100%; }
-  .v2 :is(button,a,input,select,textarea,summary):focus-visible { outline:2px solid var(--v2-accent); outline-offset:3px; }
+  .v2 :is(button,a,input,textarea,summary):focus-visible { outline:2px solid var(--v2-accent); outline-offset:3px; }
   .v2 label { display:block; font-size:12px; line-height:1.5; color:#b7c5d2; margin:17px 0; }
   .v2 label > strong { float:right; color:var(--v2-text); font-weight:500; }
-  .v2 input:not([type=checkbox]):not([type=range]),.v2 select,.v2 textarea { width:100%; min-width:0; background:#090f17; border:1px solid #304354; border-radius:5px; padding:10px; color:var(--v2-text); box-sizing:border-box; margin:7px 0 0; font:12px/1.5 'DM Mono',monospace; }
+  .v2 input:not([type=checkbox]):not([type=range]),.v2 textarea { width:100%; min-width:0; background:#090f17; border:1px solid #304354; border-radius:5px; padding:10px; color:var(--v2-text); box-sizing:border-box; margin:7px 0 0; font:12px/1.5 'DM Mono',monospace; }
   .v2 input[type=range] { display:block; width:100%; margin:12px 0; accent-color:var(--v2-accent); }
   .v2 input[type=checkbox] { width:15px; height:15px; margin:0; accent-color:var(--v2-accent); flex-shrink:0; }
   .v2 .check { display:flex; align-items:center; gap:9px; margin:12px 0; }
-  .v2 .check span { flex:1; }
-  .v2 .check small { font:10px 'DM Mono',monospace; color:var(--v2-muted); }
-  .v2 fieldset { border:1px solid var(--v2-border); border-radius:5px; margin:22px 0; padding:3px 12px; }
-  .v2 legend { font-size:11px; color:#b7c5d2; padding:0 5px; }
-  .v2 legend span { color:var(--v2-muted); font-size:10px; margin-left:5px; }
   .v2 .hint { font:12px/1.65 inherit; color:var(--v2-muted); overflow-wrap:anywhere; margin:10px 0; }
-  .v2 .actions,.v2 .presets { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+  .v2 .actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
   .v2 .actions a { font-size:12px; padding:8px 0; }
-  .v2 .presets button { font-size:11px; padding:5px 9px; min-height:29px; }
-  .v2 .budget { font:25px 'DM Mono',monospace; color:var(--v2-accent); }
-  .v2 .budget small { font-size:12px; color:var(--v2-muted); }
-  .v2 .budget.over,.v2 .validation-error { color:#f2a49b; }
+  .v2 .validation-error { color:#f2a49b; }
   .v2 .validation-error { font-size:12px; line-height:1.6; }
-  .v2 .budget-bar { height:4px; background:#263544; border-radius:3px; overflow:hidden; }
-  .v2 .budget-bar span { display:block; height:100%; background:var(--v2-accent); }
-  .v2 .budget-bar span.over { background:#f2a49b; }
   .v2 .notice { display:flex; align-items:start; justify-content:space-between; gap:12px; background:#122d2a; color:#bfe8df; border:1px solid #28544c; border-radius:6px; padding:12px 15px; margin:0 0 18px; font-size:12px; line-height:1.6; }
   .v2 .notice button { background:transparent; border-color:transparent; color:inherit; min-height:24px; padding:0 6px; }
   .v2 .notice.error { background:#302125; border-color:#68404a; color:#ffcbc4; }

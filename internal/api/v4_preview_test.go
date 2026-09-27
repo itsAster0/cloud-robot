@@ -55,3 +55,17 @@ func TestV4MapPreviewRendersGeometry(t *testing.T) {
 		t.Fatal("preview missing hazard fields")
 	}
 }
+
+func TestV4CatalogueServesEngineStats(t *testing.T) {
+	path, _ := filepath.Abs("../../crates/arena-engine/target/release/arena-engine")
+	if _, err := os.Stat(path); err != nil {
+		t.Skip("build Rust worker before integration tests")
+	}
+	t.Setenv("ARENA_ENGINE_PATH", path)
+	h := newHarness(t)
+	response, body := h.requestAs(t, "GET", "/api/v4/catalogue", "", false)
+	weapons, _ := body["weapons"].([]any)
+	if response.StatusCode != 200 || len(weapons) < 5 || body["budget"] == nil {
+		t.Fatalf("catalogue: %d %v", response.StatusCode, body)
+	}
+}
