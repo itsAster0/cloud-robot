@@ -632,6 +632,8 @@ local function connect(config)
   local ws = websocket.new_from_uri(assert(config.url, "arena URL is required"), { "robot-arena.v4", "robot-arena.v1" })
   ws.request.headers:upsert("authorization", "Bearer " .. assert(config.token, "robot token is required"), true)
   ws.request.headers:upsert("x-robot-sdk-version", arena.VERSION)
+  -- Tells the server this SDK exits cleanly on a "retired" message.
+  ws.request.headers:upsert("x-robot-sdk-features", "retire")
   assert(ws:connect(10))
   return ws
 end

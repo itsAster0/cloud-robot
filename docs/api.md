@@ -265,3 +265,26 @@ Handles are the first 12 hex digits of SHA-256 of the account ID, so account
 IDs never appear in these responses; v4 match `robotSummaries[].playerId` also
 carries the handle. Arena summaries include players who left before the
 session ended, with their last recorded stats.
+
+## Box explorer (caller's own box, auth)
+
+- `GET /api/me/box/stats`: one `docker stats` sample plus container
+  metadata (`cpuPercent`, `memoryBytes`, `memoryLimitBytes`, `pids`,
+  `netRxBytes`, `netTxBytes`, block I/O, `image`, `startedAt`, `restarts`).
+- `GET /api/me/box/processes`: `docker top` rows (pid, user, rssKb, elapsed,
+  cpuTime, command).
+- `GET /api/me/box/files`: `/workspace` entries up to depth 4, hidden files
+  skipped, at most 500.
+- `GET /api/me/box/file?path=`: first 256 KiB of one workspace file; paths
+  are relative, without `..`.
+- `GET /api/me/box/logs?tail=&since=`: box output, up to 5000 lines,
+  optionally after an RFC 3339 time.
+
+## Agent lifecycle
+
+When a match ends or a player leaves, the API clears the box's agent
+configuration and the supervisor stops the program. SDK 0.4 agents that send
+`X-Robot-SDK-Features: retire` receive `{"type":"retired"}` when they
+reconnect to a finished match and exit; older agents get HTTP 409 and back
+off. A crashing program restarts after 2, 4, 8 ... up to 60 seconds. Restart
+box recreates an outdated box on the current image, keeping its volumes.

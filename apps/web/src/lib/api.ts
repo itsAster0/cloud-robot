@@ -1,4 +1,4 @@
-import type { PlayerLine, AdminStatus, CloudStatus, Match, PlayerStats, QueueStatus, Replay, RobotBox, RobotEnrollmentResponse, ScriptTemplate, ScriptVersion, Team } from './types';
+import type { BoxFile, BoxProcess, BoxStats, PlayerLine, AdminStatus, CloudStatus, Match, PlayerStats, QueueStatus, Replay, RobotBox, RobotEnrollmentResponse, ScriptTemplate, ScriptVersion, Team } from './types';
 
 let tokenProvider: (() => Promise<string>) | null = null;
 
@@ -41,7 +41,11 @@ export interface ListedMatch extends Match {
 }
 
 export const api = {
-  getBoxLogs: () => request<{ logs: string }>('/api/me/box/logs'),
+  getBoxLogs: (tail = 200, since = '') => request<{ logs: string }>(`/api/me/box/logs?tail=${tail}${since ? `&since=${encodeURIComponent(since)}` : ''}`),
+  boxStats: () => request<BoxStats>('/api/me/box/stats'),
+  boxProcesses: () => request<{ processes: BoxProcess[] }>('/api/me/box/processes'),
+  boxFiles: () => request<{ files: BoxFile[] }>('/api/me/box/files'),
+  boxFile: (path: string) => request<{ path: string; content: string }>(`/api/me/box/file?path=${encodeURIComponent(path)}`),
   cloudStatus: () => request<CloudStatus>('/api/cloud/status'),
   createMatch: (input?: { mode?: string; mapId?: string; arenaWidth?: number; arenaHeight?: number; practice?: boolean; bots?: number; botDifficulty?: string; friendlyFire?: boolean; regenPerTick?: number; rammingDamage?: boolean; botPersonality?: string }) => request<Match>('/api/matches', { method: 'POST', body: input ? JSON.stringify(input) : undefined }),
   listMatches: (status?: string, limit = 50) => request<{ matches: ListedMatch[] }>(`/api/matches?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ''}`),

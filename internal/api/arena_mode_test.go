@@ -126,7 +126,7 @@ func TestAgentForFinishedMatchIsRetired(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(h.server.URL, "http")+"/agent/connect/gone", &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}}, Subprotocols: []string{"robot-arena.v4"}})
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + token}, "X-Robot-SDK-Features": {"retire"}}, Subprotocols: []string{"robot-arena.v4"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,5 +134,23 @@ func TestAgentForFinishedMatchIsRetired(t *testing.T) {
 	var message map[string]string
 	if err := wsjson.Read(ctx, c, &message); err != nil || message["type"] != "retired" {
 		t.Fatalf("want retired message, got %v %v", message, err)
+	}
+}
+
+func TestOldAgentForFinishedMatchGetsAnError(t *testing.T) {
+	h := newHarness(t)
+	token := "old-sdk"
+	hash := sha256.Sum256([]byte(token))
+	h.store.credentials["old"] = cloud.AgentCredential{RobotID: "old", MatchID: "done", TokenHash: base64.RawURLEncoding.EncodeToString(hash[:])}
+	h.store.matches["done"] = model.Match{MatchID: "done", EngineVersion: 4, Status: model.MatchFinished}
+	request, _ := http.NewRequest(http.MethodGet, h.server.URL+"/agent/connect/old", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("SDKs without retirement back off on an error; got %d", response.StatusCode)
 	}
 }

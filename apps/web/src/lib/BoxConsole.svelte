@@ -11,6 +11,9 @@
   import CardContent from './components/ui/card-content.svelte';
   import Badge from './components/ui/badge.svelte';
   import Progress from './components/ui/progress.svelte';
+  import BoxMonitor from './BoxMonitor.svelte';
+  import BoxLogs from './BoxLogs.svelte';
+  import BoxFiles from './BoxFiles.svelte';
 
   interface Props {
     user: User | null;
@@ -37,14 +40,7 @@
   let scriptError = $state('');
   let versions = $state<ScriptVersion[]>([]);
   let restoring = $state('');
-  let boxLogs = $state<string | null>(null), logsLoading = $state(false), showKeyForm = $state(false);
-
-  async function loadLogs() {
-    logsLoading = true;
-    try { boxLogs = (await api.getBoxLogs()).logs || ''; }
-    catch (failure) { boxLogs = failure instanceof Error ? failure.message : String(failure); }
-    finally { logsLoading = false; }
-  }
+  let showKeyForm = $state(false);
 
   onMount(() => { void loadScripts(); });
   // The box record usually arrives after mount; load its history and output
@@ -55,7 +51,6 @@
     if (!id || id === loadedFor) return;
     loadedFor = id;
     void loadVersions();
-    void loadLogs();
   });
 
   async function loadScripts() {
@@ -233,10 +228,9 @@
       </div>
     </div>
 
-    <Card class="overflow-hidden">
-      <CardHeader class="flex-row items-center justify-between gap-3"><div><CardTitle>Box output</CardTitle><CardDescription>Recent supervisor and agent output: connections, rejected actions, and script errors.</CardDescription></div><Button size="sm" variant="secondary" onclick={loadLogs} disabled={logsLoading}>{logsLoading ? 'Loading…' : 'Refresh'}</Button></CardHeader>
-      <CardContent><pre class="m-0 max-h-72 overflow-auto rounded-md bg-background p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">{boxLogs === null ? 'Loading…' : boxLogs.trim() || 'No output yet. It appears here once your robot is registered in a match.'}</pre></CardContent>
-    </Card>
+    <BoxMonitor/>
+    <BoxLogs/>
+    <BoxFiles/>
 
     <Card class="overflow-hidden">
       <CardHeader class="flex-row items-center justify-between gap-3"><div><CardTitle><code>/workspace/main.lua</code></CardTitle><CardDescription>{mainSource === null ? 'The file your next registration snapshots.' : `${lineCount} lines · ${mainSource.length.toLocaleString()} bytes`}</CardDescription></div>

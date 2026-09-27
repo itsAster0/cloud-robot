@@ -27,7 +27,13 @@ type supervisor struct {
 	mu         sync.Mutex
 	process    *exec.Cmd
 	configHash [32]byte
-	record     model.BoxRecord
+	// doneHash is the configuration whose agent exited cleanly; it is not
+	// restarted until the configuration changes.
+	doneHash [32]byte
+	// A crashing program restarts after a growing delay, not every sync.
+	failures int
+	retryAt  time.Time
+	record   model.BoxRecord
 }
 
 func main() {
@@ -42,6 +48,12 @@ func main() {
 		setKey()
 	case "configure-agent":
 		configureAgent()
+	case "clear-agent":
+		// The match is over: remove the configuration; the daemon stops the
+		// agent on its next sync.
+		if err := os.Remove(filepath.Join(controlDir, "agent.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fatal(err)
+		}
 	case "validate-main":
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, 16*1024+1))
 		fatal(err)
@@ -113,7 +125,17 @@ func (s *supervisor) sync(ctx context.Context) {
 		return
 	}
 	if configErr != nil {
+		s.mu.Lock()
+		running := s.process != nil
+		s.mu.Unlock()
+		if running {
+			logf("agent configuration cleared; agent stopped")
+			s.stop()
+		}
 		s.record.AgentStatus = "idle"
+		s.record.ActiveRobotID, s.record.ActiveMatchID = "", ""
+		s.record.Error = ""
+		s.failures = 0
 		s.writeStatus()
 		return
 	}
@@ -121,7 +143,19 @@ func (s *supervisor) sync(ctx context.Context) {
 	s.mu.Lock()
 	changed := hash != s.configHash
 	running := s.process != nil
+	done := hash == s.doneHash
 	s.mu.Unlock()
+	if done && !changed && !running {
+		s.record.AgentStatus = "stopped"
+		s.writeStatus()
+		return
+	}
+	if changed {
+		s.failures, s.retryAt = 0, time.Time{}
+	} else if !running && time.Now().Before(s.retryAt) {
+		s.writeStatus()
+		return
+	}
 	if running {
 		s.record.AgentStatus = "running"
 	}
@@ -163,10 +197,14 @@ func (s *supervisor) wait(command *exec.Cmd) {
 		if err != nil {
 			s.record.AgentStatus = "failed"
 			s.record.Error = err.Error()
-			logf("agent exited: %v", err)
+			s.failures++
+			delay := min(time.Duration(1<<min(s.failures, 6))*time.Second, time.Minute)
+			s.retryAt = time.Now().Add(delay)
+			logf("agent exited: %v; restarting in %s", err, delay)
 		} else {
 			s.record.AgentStatus = "stopped"
-			logf("agent exited cleanly")
+			s.doneHash = s.configHash
+			logf("agent exited cleanly; waiting for the next registration")
 		}
 	}
 	s.mu.Unlock()
