@@ -197,6 +197,31 @@ pub(crate) fn find_spawn(
     None
 }
 
+/// A clear point near `site` with no living robot within
+/// SAFE_SPAWN_DISTANCE, searching outward; None when the area is crowded.
+pub(crate) fn find_safe_spawn(
+    config: &Config,
+    world: &World,
+    robots: &[Robot],
+    site: (f64, f64),
+    angle: f64,
+) -> Option<(f64, f64)> {
+    for attempt in 0..256 {
+        let direction = angle + attempt as f64 * 2.399963229728653;
+        let radius = 170. + (attempt / 8) as f64 * 45.;
+        let x = (site.0 + direction.cos() * radius).clamp(RADIUS, config.width - RADIUS);
+        let y = (site.1 + direction.sin() * radius).clamp(RADIUS, config.height - RADIUS);
+        if world.clear(x, y, RADIUS)
+            && !robots
+                .iter()
+                .any(|v| v.alive && distance(v.x, v.y, x, y) < SAFE_SPAWN_DISTANCE)
+        {
+            return Some((x, y));
+        }
+    }
+    None
+}
+
 /// Arena respawn delay: five seconds at 20 Hz.
 pub const ARENA_RESPAWN_TICKS: u32 = 100;
 /// Arena scoring and pacing. The Uplink objective moves to another site
@@ -207,7 +232,12 @@ pub const BOUNTY_PER_KILL: u32 = 50;
 pub const HILL_TICKS: u32 = 1200;
 pub const HILL_RADIUS: f64 = 260.;
 pub const HILL_POINTS: u32 = 5;
-pub const SPAWN_PROTECT_TICKS: u32 = 40;
+pub const SPAWN_PROTECT_TICKS: u32 = 60;
+/// Missing arena bots return together in a reinforcement wave every 90
+/// seconds instead of one by one the moment a slot opens.
+pub const BOT_WAVE_TICKS: u32 = 1800;
+/// Arrivals prefer points at least this far from every living robot.
+pub const SAFE_SPAWN_DISTANCE: f64 = 400.;
 pub const SALVAGE_TICKS: u32 = 600;
 pub const RESTOCK_TICKS: u32 = 600;
 /// Drifting zone: each leg lasts 90 seconds and moves 60% of the radius, so
@@ -416,9 +446,8 @@ impl Arena {
                 self.event("robot_respawned", Some(id), None, None, None);
             }
         }
-        // Keep a full arena: when players leave and bots fill empty slots,
-        // new bots take their place.
-        {
+        // Keep a full arena: missing bots return together in a wave.
+        if self.tick > 0 && self.tick.is_multiple_of(BOT_WAVE_TICKS) {
             let target = self.population_target();
             let mut live = self.robots.iter().filter(|r| !r.left).count();
             let mut n = 0u64;
@@ -432,11 +461,20 @@ impl Arena {
                     loadout: bot_loadout(self.tick as usize + n as usize),
                 };
                 match self.arena_spawn(1000 + n) {
-                    Some((x, y)) => self.robots.push(fresh_robot(&self.config, &reg, x, y)),
+                    Some((x, y)) => {
+                        let mut bot = fresh_robot(&self.config, &reg, x, y);
+                        bot.protected_until = self.tick + SPAWN_PROTECT_TICKS;
+                        self.robots.push(bot);
+                        // Later arrivals in the wave see this one and spread out.
+                        self.reindex_robots();
+                    }
                     None => break,
                 }
                 live += 1;
                 n += 1;
+            }
+            if n > 0 {
+                self.event("reinforcements", None, None, None, Some(n.to_string()));
             }
         }
         if self.robots.len() != before || !self.robots.is_empty() {
@@ -462,7 +500,22 @@ impl Arena {
                     let (x, y, _) = self.drift_zone(d, self.tick);
                     (x, y)
                 } else {
-                    let site = &self.world.sites[inside[(pick % inside.len() as u64) as usize]];
+                    // The site in the zone farthest from every living robot,
+                    // so arrivals are not dropped into a fight.
+                    let quiet = |i: usize| {
+                        let s = &self.world.sites[i];
+                        self.robots
+                            .iter()
+                            .filter(|r| r.alive)
+                            .map(|r| distance(r.x, r.y, s.x, s.y))
+                            .fold(f64::MAX, f64::min)
+                    };
+                    let offset = (pick % inside.len() as u64) as usize;
+                    let best = (0..inside.len())
+                        .map(|k| inside[(k + offset) % inside.len()])
+                        .max_by(|&a, &b| quiet(a).total_cmp(&quiet(b)))
+                        .unwrap_or(inside[0]);
+                    let site = &self.world.sites[best];
                     (site.x, site.y)
                 }
             }
@@ -471,13 +524,9 @@ impl Arena {
                 (site.x, site.y)
             }
         };
-        find_spawn(
-            &self.config,
-            &self.world,
-            &self.robots,
-            origin,
-            (pick % 360) as f64,
-        )
+        let angle = (pick % 360) as f64;
+        find_safe_spawn(&self.config, &self.world, &self.robots, origin, angle)
+            .or_else(|| find_spawn(&self.config, &self.world, &self.robots, origin, angle))
     }
 
     /// Zone radius for the current population: more robots, more room.
@@ -516,6 +565,7 @@ impl Arena {
                 self.robots[i].x = x;
                 self.robots[i].y = y;
             }
+            self.robots[i].protected_until = SPAWN_PROTECT_TICKS;
         }
     }
 
@@ -735,7 +785,8 @@ impl Arena {
         let (x, y) = self
             .arena_spawn(self.robots.len() as u64 + 1)
             .ok_or("no clear spawn in the arena")?;
-        let robot = fresh_robot(&self.config, &reg, x, y);
+        let mut robot = fresh_robot(&self.config, &reg, x, y);
+        robot.protected_until = self.tick + SPAWN_PROTECT_TICKS;
         self.robots.push(robot);
         self.config.robots.push(reg);
         self.reindex_robots();
@@ -1765,7 +1816,7 @@ impl Arena {
             .filter(|c| !c.contents.is_empty())
             .map(|c| json!({"itemId":c.item_id,"x":c.x,"y":c.y,"type":"container","active":true,"contents":c.contents}))
             .collect();
-        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"hill":self.hill(),"events":self.events,"feed":self.recent_events.iter().filter(|e|matches!(e.r#type.as_str(),"kill"|"bounty_claimed"|"hill_moved"|"robot_joined"|"zone_moved")).collect::<Vec<_>>()})
+        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"hill":self.hill(),"events":self.events,"feed":self.recent_events.iter().filter(|e|matches!(e.r#type.as_str(),"kill"|"bounty_claimed"|"hill_moved"|"robot_joined"|"zone_moved"|"reinforcements")).collect::<Vec<_>>()})
     }
     /// Status effects a spectator could see on the robot's body.
     fn visible_effects(&self, r: &Robot) -> Vec<&'static str> {

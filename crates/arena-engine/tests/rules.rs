@@ -2,7 +2,10 @@ use arena_engine::{
     catalog::{self, Loadout},
     edit::Edit,
     model::*,
-    simulation::{Arena, DRIFT_LEG_TICKS, KILL_POINTS, RESTOCK_TICKS, SPAWN_PROTECT_TICKS},
+    simulation::{
+        Arena, BOT_WAVE_TICKS, DRIFT_LEG_TICKS, KILL_POINTS, RESTOCK_TICKS, SAFE_SPAWN_DISTANCE,
+        SPAWN_PROTECT_TICKS,
+    },
     world::*,
 };
 use serde_json::json;
@@ -1118,8 +1121,16 @@ fn arena_join_displaces_a_bot_and_leave_refills() {
     );
     assert_eq!(
         a.robots.iter().filter(|r| !r.left).count(),
+        3,
+        "bots do not refill instantly"
+    );
+    while a.tick < BOT_WAVE_TICKS + 1 {
+        a.step(BTreeMap::new(), &[]).unwrap();
+    }
+    assert_eq!(
+        a.robots.iter().filter(|r| !r.left).count(),
         4,
-        "bots refill the arena"
+        "a reinforcement wave refills the arena"
     );
     let solo = Arena::new(serde_json::from_value(json!({"matchId":"s","mode":"br-solo","capacity":2,"width":2400,"height":1500,"durationSeconds":60,"robots":[]})).unwrap());
     let reg = serde_json::from_value(
@@ -1349,6 +1360,8 @@ fn arena_scores_kills_bounties_and_the_uplink() {
 fn arena_spawn_protection_blocks_damage_until_expiry() {
     let mut a = Arena::new(arena_config(2, 600)).unwrap();
     let t = a.tick;
+    // A bot would fire and end its own protection; make it idle.
+    a.robots[0].bot = false;
     a.robots[0].protected_until = t + SPAWN_PROTECT_TICKS;
     a.robots[0].burn_until = t + 10;
     let hp = a.robots[0].hp;
@@ -1387,5 +1400,35 @@ fn arena_salvage_expires_and_site_loot_restocks() {
             .count()
             > site_loot / 2,
         "site loot restocks"
+    );
+}
+
+#[test]
+fn arena_spawns_are_protected_and_away_from_other_robots() {
+    let c: Config = serde_json::from_value(json!({"matchId":"safe","mode":"arena","capacity":20,"width":24000,"height":15000,"durationSeconds":10,"seed":9,"siteCount":16,"robots":[]})).unwrap();
+    let mut a = Arena::new(c).unwrap();
+    assert!(
+        a.robots
+            .iter()
+            .all(|r| r.protected_until == SPAWN_PROTECT_TICKS),
+        "starting robots are protected"
+    );
+    let reg = serde_json::from_value(json!({"robotId":"late","name":"Late","loadout":{"chassis":"generalist","weapon":"plasma"}})).unwrap();
+    a.step(BTreeMap::new(), &[]).unwrap();
+    a.join(reg).unwrap();
+    let me = a.robots.iter().find(|r| r.robot_id == "late").unwrap();
+    assert!(
+        me.protected_until >= a.tick + SPAWN_PROTECT_TICKS - 1,
+        "joiners are protected for 3 seconds"
+    );
+    let nearest = a
+        .robots
+        .iter()
+        .filter(|r| r.robot_id != "late" && r.alive)
+        .map(|r| distance(r.x, r.y, me.x, me.y))
+        .fold(f64::MAX, f64::min);
+    assert!(
+        nearest >= SAFE_SPAWN_DISTANCE,
+        "joined {nearest:.0} units from another robot"
     );
 }

@@ -102,8 +102,9 @@ in that browser; it does not erase the container log.
   that overlaps the old one, so the fight keeps moving; outside it robots
   take 4 HP a second. The zone's radius follows the live population. Bots
   keep at least `ARENA_ROBOTS` (128) robots in play and step aside for
-  players; players can join until the engine limit of 256 robots. Destroyed
-  robots respawn inside the zone after 5 seconds with 2 seconds of spawn
+  players; missing bots return together in a wave every 90 seconds;
+  players can join until the engine limit of 256 robots. Destroyed robots
+  respawn inside the zone after 5 seconds with 3 seconds of spawn
   protection and keep their score. Score: +100 per kill, +5 per second for
   holding the Uplink objective alone (a site inside the zone, moving every
   minute), and a bounty of 50 per streak kill for ending a 3+ kill streak.
