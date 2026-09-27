@@ -181,6 +181,9 @@ check("shots cross water", arena.line_of_fire(0, 0, 300, 0, pond))
 local wall = { { id = "wall", shape = "aabb", x = 100, y = -50, width = 100, height = 100, material = "brick" } }
 check("walls block shots", not arena.line_of_fire(0, 0, 300, 0, wall))
 
+check("uplink is nil outside the arena", arena.uplink({ hill = nil }) == nil)
+check("uplink reads the observation", arena.uplink({ hill = { x = 10, y = 20, radius = 260 } }).radius == 260)
+
 if failures > 0 then
   print(failures .. " failure(s)")
   os.exit(1)

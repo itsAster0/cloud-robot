@@ -318,6 +318,15 @@ pub struct Robot {
     pub respawn_at: Option<u32>,
     #[serde(default)]
     pub left: bool,
+    /// Arena score: kills, bounties, and Uplink time.
+    #[serde(default)]
+    pub score: u32,
+    /// Kills since the robot last died; three or more carries a bounty.
+    #[serde(default)]
+    pub streak: u32,
+    /// Spawn protection: damage is ignored before this tick.
+    #[serde(default)]
+    pub protected_until: u32,
 }
 impl Robot {
     pub fn has(&self, m: &str) -> bool {
@@ -365,6 +374,9 @@ pub struct Container {
     pub x: f64,
     pub y: f64,
     pub contents: Vec<Stack>,
+    /// Arena salvage disappears at this tick so wrecks do not pile up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u32>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

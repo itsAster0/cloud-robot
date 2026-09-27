@@ -9,6 +9,8 @@
   import MatchOverview from './MatchOverview.svelte';
   import ArenaScoreboard from './ArenaScoreboard.svelte';
   import ThingInspector from './ThingInspector.svelte';
+  import KillFeed from './KillFeed.svelte';
+  import type { ArenaEvent } from './types';
   import type { Picked } from './picking';
   import MatchSetup from './MatchSetup.svelte';
   import LoadoutBuilder from './LoadoutBuilder.svelte';
@@ -112,6 +114,24 @@
   let watching = $derived(!!match && panel !== 'code' && panel !== 'build' && (!!snapshot || match.status === 'running' || match.status === 'finished'));
   // Map thing the viewer clicked (loot, terrain, hazard, site); robots win.
   let picked = $state<Picked | null>(null);
+  // Kill feed: merge each snapshot's recent feed, dedupe, keep ~8 seconds.
+  let feed = $state<(ArenaEvent & { seen: number })[]>([]);
+  function mergeFeed(events: ArenaEvent[] | undefined) {
+    if (!events?.length) return;
+    const now = Date.now(), key = (e: ArenaEvent) => `${e.tick}:${e.type}:${e.robotId}:${e.targetId}`;
+    const known = new Set(feed.map(key));
+    const fresh = events.filter(e => !known.has(key(e))).map(e => ({ ...e, seen: now }));
+    if (fresh.length) feed = [...fresh.reverse(), ...feed].filter(e => now - e.seen < 8000).slice(0, 6);
+  }
+  $effect(() => { const t = setInterval(() => { const now = Date.now(); if (feed.some(e => now - e.seen >= 8000)) feed = feed.filter(e => now - e.seen < 8000); }, 1000); return () => clearInterval(t); });
+  // Arena ranks by score; other modes by kills.
+  let leaderId = $derived.by(() => {
+    const robots = overview.length ? overview : snapshot?.robots ?? [];
+    if (match?.mode !== 'arena') return killsLeader(robots)?.robotId ?? '';
+    let best: RobotState | undefined;
+    for (const r of robots) if ((r.score ?? 0) > (best?.score ?? 0)) best = r;
+    return best?.robotId ?? '';
+  });
   let confirmLeave = $state(false);
   // Frees the box: lobby registrations are dropped and a running robot
   // concedes; the player keeps watching as a spectator.
@@ -206,7 +226,7 @@
   function connect(id: string) { clearTimeout(retryTimer); const previous=socket; socket=null; previous?.close(); viewerEpoch++; connectionStatus="Connecting"; overview=[]; publicLayout={}; snapshot=null;replayEnd=0;replayTick=0;trace=""; const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/matches/${encodeURIComponent(id)}`); socket = ws;
     ws.onopen=()=>{if(socket===ws){connectionStatus='Connected';}};
     ws.onclose=()=>{if(socket!==ws || disposed || match?.status==='finished')return; connectionStatus='Reconnecting'; retryTimer=setTimeout(()=>{if(!disposed && socket===ws)connect(id);},Math.min(10000,500*2**Math.min(reconnectAttempt++,5)));};
-    ws.onmessage = ({ data }) => { if (socket !== ws) return; reconnectAttempt=0; const event = JSON.parse(data); if (event.type === 'snapshot') { if(event.obstacles) publicLayout={obstacles:event.obstacles,transit:event.transit,hazards:event.hazards,sites:event.sites}; if(event.overview) overview=event.overview; if(!privateView) snapshot={...publicLayout,...event}; } if (event.type === 'match_state' || event.type === 'match_finished') { match = event.match; if (event.type === 'match_finished') void loadFinal().catch(e => { error = e instanceof Error ? e.message : String(e); }); } };
+    ws.onmessage = ({ data }) => { if (socket !== ws) return; reconnectAttempt=0; const event = JSON.parse(data); if (event.type === 'snapshot') { if(event.obstacles) publicLayout={obstacles:event.obstacles,transit:event.transit,hazards:event.hazards,sites:event.sites}; if(event.overview) overview=event.overview; mergeFeed(event.feed); if(!privateView) snapshot={...publicLayout,...event}; } if (event.type === 'match_state' || event.type === 'match_finished') { match = event.match; if (event.type === 'match_finished') void loadFinal().catch(e => { error = e instanceof Error ? e.message : String(e); }); } };
     ws.onerror = () => { if(socket===ws) connectionStatus='Connection interrupted'; };
   }
   async function open() { await task(async () => {
@@ -395,13 +415,13 @@
           {#if snapshot || match.status === 'running' || match.status === 'finished'}
             <div class="world-split">
               <div class="world-main">
-                {#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} {picked} onselect={id => { selected = id; picked = null; }} onpick={thing => { picked = thing; selected = ''; }}/>{/key}
+                <div class="map-stage">{#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} {leaderId} youId={myRobotId} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} {picked} onselect={id => { selected = id; picked = null; }} onpick={thing => { picked = thing; selected = ''; }}/>{/key}{#if replayEnd === 0}<KillFeed events={feed} robots={overview.length ? overview : snapshot?.robots ?? []}/>{/if}</div>
                 {#if match.status !== 'finished'}<div class="view-controls"><label class="check"><input type="checkbox" bind:checked={privateView} disabled={!signedIn || !registered} onchange={() => snapshot = null}/>My robot's live view</label><span>{connectionStatus} · {privateView ? 'Robot observations' : 'Public view delayed 5s'}</span></div>{/if}
                 {#if match.status === 'running' && !snapshot}<p class="hint loading-snapshot">Waiting for a snapshot. Public spectating starts after five seconds of simulation.</p>{/if}
                 <MatchOverview {snapshot} roster={privateView || replayEnd > 0 ? [] : overview} youId={privateView ? selected : ''}/>
               </div>
               <aside class="world-side" aria-label="Robot details">
-                {#if picked && !selected}<ThingInspector {picked} sites={snapshot?.sites ?? matchPreview?.sites ?? []} onclose={() => picked = null}/>{:else}<RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/>{/if}
+                {#if picked && !selected}<ThingInspector {picked} sites={snapshot?.sites ?? matchPreview?.sites ?? []} onclose={() => picked = null}/>{:else}<RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} {leaderId} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/>{/if}
                 {#if match.mode === 'arena'}<ArenaScoreboard robots={overview.length ? overview : snapshot?.robots ?? []} youId={myRobotId} endTick={snapshot?.endTick ?? 0} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} onselect={id => selected = id}/>{/if}
                 <VirtualRoster robots={privateView || replayEnd > 0 ? snapshot?.robots ?? [] : overview} {selected} youId={privateView ? selected : ''} onselect={id => selected = id}/>
               </aside>
@@ -432,6 +452,7 @@
   .v2 .world-split { display:grid; gap:16px; padding:0 22px 16px; grid-template-columns:minmax(0,1fr); }
   .v2 .world-main, .v2 .world-side { display:grid; gap:14px; align-content:start; min-width:0; }
   .v2 .workspace-v2.watching { grid-template-columns:minmax(0,1fr); }
+  .v2 .map-stage { position:relative; min-width:0; }
   .v2 .workspace-v2.watching > aside { display:none; }
   .v2 .workspace-v2.watching .matchbar { padding:10px 20px; }
   .v2 .workspace-v2.watching .matchbar .eyebrow { display:none; }

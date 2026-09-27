@@ -1076,6 +1076,16 @@ end
 --   decorate(obs, action, ctx)  adjusts every action (utilities, messages)
 -- ctx.travel(obs, goal, label) follows a bounded path with recovery;
 -- ctx.state is persistent strategy memory.
+-- The arena's Uplink objective ({ x, y, radius, holder, contested,
+-- movesAt, pointsPerSecond }) or nil outside arena mode. Holding it alone
+-- scores points every second; it moves to another site every minute.
+function arena.uplink(obs)
+  obs = obs or latest_observation
+  local hill = obs and obs.hill
+  if type(hill) ~= "table" or hill.x == nil then return nil end
+  return hill
+end
+
 function arena.tactics(options)
   options = options or {}
   local prefix = options.name and (options.name .. "_") or ""
@@ -1159,6 +1169,14 @@ function arena.tactics(options)
     if loot and loot_distance < (obs.tick < 400 and reach[1] or reach[2]) then
       state.target = loot.itemId
       return ctx.travel(obs, loot, "LOOT")
+    end
+    -- Arena objective: with nothing to fight or loot, contest the Uplink.
+    -- Set options.uplink = false to keep a custom idle instead.
+    local hill = arena.uplink(obs)
+    if hill and options.uplink ~= false then
+      local inside = arena.distance(obs.self, hill) < hill.radius * 0.6
+      if not inside then return ctx.travel(obs, hill, "UPLINK") end
+      return arena.control({ brake = true, label = prefix .. "HOLD_UPLINK" })
     end
     local idle = options.idle and options.idle(obs, ctx)
     if idle and idle.x and not idle.label then return ctx.travel(obs, idle, "MOVE") end

@@ -196,6 +196,7 @@ impl World {
                         count: 1,
                         ..Default::default()
                     }],
+                    expires_at: None,
                 });
             }
         }

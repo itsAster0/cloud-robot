@@ -8,18 +8,25 @@
   import { hash2, loadTerrain, paintChunk, roadsFor, type Road } from './terrain';
   import type { Snapshot, RobotState, WorldHazard, WorldSite } from './types';
   export type SiteMark = WorldSite;
-  let { snapshot, selected = '', leaderId = '', overview = [], sites = [], picked = null, onregion, onselect, onpick }: { snapshot: Snapshot | null; selected?: string; leaderId?: string; overview?: RobotState[]; sites?: SiteMark[]; picked?: Picked | null; onregion?: (region: {x:number;y:number;width:number;height:number}) => void; onselect?: (robotId: string) => void; onpick?: (thing: Picked) => void } = $props();
+  let { snapshot, selected = '', leaderId = '', youId = '', overview = [], sites = [], picked = null, onregion, onselect, onpick }: { snapshot: Snapshot | null; selected?: string; leaderId?: string; youId?: string; overview?: RobotState[]; sites?: SiteMark[]; picked?: Picked | null; onregion?: (region: {x:number;y:number;width:number;height:number}) => void; onselect?: (robotId: string) => void; onpick?: (thing: Picked) => void } = $props();
   // Robot positions as drawn in the last frame, for click and hover hit-tests.
   let drawn: { robotId: string; x: number; y: number }[] = [];
   let press = { x: 0, y: 0, moved: false };
   // Selecting a robot (map, roster, or inspector) resumes camera follow.
-  $effect(() => { if (selected) follow = true; });
+  // Camera modes: follow the clicked robot, the leader, your own robot, or
+  // roam freely. The choice is remembered per browser.
+  type Cam = 'selected' | 'leader' | 'you' | 'free';
+  const CAM_KEY = 'robot-arena:camera';
+  let cam = $state<Cam>((() => { try { const v = localStorage.getItem(CAM_KEY); return v === 'leader' || v === 'you' || v === 'free' ? v : 'selected'; } catch { return 'selected'; } })());
+  let follow = $derived(cam !== 'free');
+  function setCam(mode: Cam) { cam = mode; try { localStorage.setItem(CAM_KEY, mode); } catch { /* optional */ } }
+  $effect(() => { if (selected && cam === 'free') cam = 'selected'; });
   // Settings → Reduced motion (or the OS preference) snaps the camera and
   // skips robot interpolation.
   const reduceMotion = (() => { try { return localStorage.getItem('arena-reduced-motion') === 'true' || matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
   let regionAt = 0;
   let canvas: HTMLCanvasElement;
-  let zoom = $state(1), follow = $state(true), fps = $state(0), frameP95 = $state(0), age = $state(0);
+  let zoom = $state(1), fps = $state(0), frameP95 = $state(0), age = $state(0);
   let camera = { x: 0, y: 0 }, target = { x: 0, y: 0 }, dragged = false, last = { x: 0, y: 0 };
   let keys = new Set<string>();
   let received = 0, width = 900, height = 580;
@@ -122,7 +129,8 @@
         const positions = s.robots.map(r => { const p = old.get(r.robotId) ?? r; const t = s.events?.some(e => e.type === 'teleport' && e.robotId === r.robotId) ? 1 : sample?.amount ?? 1; return { ...r, x: p.x + (r.x - p.x) * t, y: p.y + (r.y - p.y) * t, heading: angleBetween(p.heading, r.heading, t), turretHeading: angleBetween(p.turretHeading ?? p.heading, r.turretHeading ?? r.heading, t) }; });
         const inView = new Set(positions.map(r => r.robotId));
         drawn = [...positions, ...overview.filter(r => !inView.has(r.robotId))];
-        const focus = (positions.find(r => r.robotId === selected) ?? overview.find(r => r.robotId === selected)) ?? positions.find(r => r.alive) ?? overview.find(r => r.alive) ?? positions[0] ?? overview[0];
+        const wanted = cam === 'leader' ? leaderId : cam === 'you' ? youId || selected : selected;
+        const focus = (positions.find(r => r.robotId === wanted) ?? overview.find(r => r.robotId === wanted)) ?? positions.find(r => r.alive) ?? overview.find(r => r.alive) ?? positions[0] ?? overview[0];
         if (focus && follow) target = { x: focus.x, y: focus.y };
         if (focus && camera.x === 0 && camera.y === 0 && target.x === 0 && target.y === 0) {
           camera = { x: focus.x, y: focus.y };
@@ -133,7 +141,7 @@
         const scale = zoom;
         const pan = 900 / scale;
         if (keys.size) {
-          follow = false;
+          cam = 'free';
           if (keys.has('arrowleft') || keys.has('a')) target.x -= pan * 0.05;
           if (keys.has('arrowright') || keys.has('d')) target.x += pan * 0.05;
           if (keys.has('arrowup') || keys.has('w')) target.y -= pan * 0.05;
@@ -179,6 +187,18 @@
           c.fillStyle = 'rgba(0,0,0,.35)'; c.fillRect(item.x - 7, item.y - 1, 14, 2); c.fillRect(item.x - 1, item.y - 7, 2, 14);
         }
         for (const link of s.transit ?? []) if (visible(link.x, link.y)) { c.strokeStyle = '#b58dff'; c.lineWidth = 3; c.beginPath(); c.arc(link.x, link.y, 24, 0, Math.PI * 2); c.stroke(); }
+        if (s.hill) {
+          // Uplink objective: pulsing ring in the holder's colour, grey
+          // when free, striped red when contested.
+          const h = s.hill, pulse = reduceMotion ? 0.5 : Math.sin(now / 300) * 0.5 + 0.5;
+          const ring = h.holder ? teamColor(h.holder) : h.contested ? '#ff5b4d' : '#e8f0ff';
+          c.globalAlpha = 0.12 + pulse * 0.08; c.fillStyle = ring; c.beginPath(); c.arc(h.x, h.y, h.radius, 0, Math.PI * 2); c.fill(); c.globalAlpha = 1;
+          c.strokeStyle = ring; c.lineWidth = 4 / scale; if (h.contested) c.setLineDash([16 / scale, 10 / scale]);
+          c.beginPath(); c.arc(h.x, h.y, h.radius, 0, Math.PI * 2); c.stroke(); c.setLineDash([]);
+          c.fillStyle = ring; c.font = `bold ${14 / Math.max(scale, 0.35)}px monospace`; c.textAlign = 'center';
+          const left = Math.max(0, Math.ceil(((h.movesAt ?? 0) - s.tick) / (s.tickRate ?? 20)));
+          c.fillText(`⬡ UPLINK +${h.pointsPerSecond}/s · moves in ${left}s`, h.x, h.y - h.radius - 12 / scale); c.textAlign = 'left';
+        }
         if (picked) {
           // Pulsing ring on the inspected thing.
           const { x, y, r } = pickedCentre(picked);
@@ -222,6 +242,8 @@
           c.fillStyle = '#e5eadf'; c.font = '11px monospace'; c.textAlign = 'center';
           c.fillText(weaponGlyph(r.weapon), r.x, r.y - 38);
           if (isLeader) { c.fillStyle = '#dfff86'; c.font = '12px monospace'; c.fillText('♛', r.x, r.y - 50); }
+          if (r.bounty) { c.strokeStyle = '#ffc857'; c.lineWidth = 2.5; c.setLineDash([6, 4]); c.beginPath(); c.arc(r.x, r.y, 30, 0, Math.PI * 2); c.stroke(); c.setLineDash([]); c.fillStyle = '#ffc857'; c.font = 'bold 11px monospace'; c.fillText(`$${r.bounty}`, r.x, r.y - (isLeader ? 62 : 50)); }
+          if (r.protected) { c.globalAlpha = 0.35; c.strokeStyle = '#9fe8ff'; c.lineWidth = 3; c.beginPath(); c.arc(r.x, r.y, 26, 0, Math.PI * 2); c.stroke(); c.globalAlpha = 1; }
           if (isFocus) {
             c.strokeStyle = '#ffffff60'; c.lineWidth = 1.5; c.beginPath(); c.arc(r.x, r.y, 24, 0, Math.PI * 2); c.stroke();
             c.strokeStyle = '#dfff8640'; c.lineWidth = 1; c.beginPath(); c.arc(r.x, r.y, r.visionRange ?? 600, 0, Math.PI * 2); c.stroke();
@@ -286,20 +308,20 @@
     const { w, h, mw, mh, mx, my } = minimapBox();
     if (px >= mx && px <= mx + mw && py >= my && py <= my + mh) {
       target = { x: ((px - mx) / mw) * w, y: ((py - my) / mh) * h };
-      follow = false;
+      cam = 'free';
       return;
     }
     const hit = robotAt(px, py);
-    if (hit) { onselect?.(hit); follow = true; return; }
+    if (hit) { onselect?.(hit); cam = 'selected'; return; }
     if (!onpick) return;
     const world = screenToWorld({ x: camera.x, y: camera.y, zoom, width, height }, px, py);
     const s = snapshot;
     onpick(pickThing({ items: s.items, transit: s.transit, obstacles: s.obstacles, hazards: s.hazards, sites: worldSites }, world.x, world.y, zoom));
-    follow = false;
+    cam = 'free';
   }
   function pointerMove(e: PointerEvent) {
     if (dragged) {
-      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > 5) { press.moved = true; follow = false; }
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) > 5) { press.moved = true; cam = 'free'; }
       if (press.moved) { target.x -= (e.clientX - last.x) / zoom; target.y -= (e.clientY - last.y) / zoom; camera.x -= (e.clientX - last.x) / zoom; camera.y -= (e.clientY - last.y) / zoom; }
       last = { x: e.clientX, y: e.clientY };
       return;
@@ -309,10 +331,10 @@
   }
 </script>
 <div class="world">
-  <div class="toolbar"><button onclick={() => follow = !follow}>{follow ? 'Following robot' : 'Free camera'}</button><button onclick={() => zoom = Math.min(4, zoom * 1.3)}>Zoom +</button><button onclick={() => zoom = Math.max(.1, zoom / 1.3)}>Zoom −</button><button onclick={() => { if (snapshot) { target = { x: (snapshot.width ?? 42000) / 2, y: (snapshot.height ?? 26250) / 2 }; follow = false; } }}>Center map</button><span>{snapshot ? `${fps} fps · frame p95 ${frameP95.toFixed(1)} ms · update ${age} ms ago` : "Waiting for match state"}</span></div>
+  <div class="toolbar"><div class="cam" role="radiogroup" aria-label="Camera">{#each [['selected', 'Selected'], ['leader', '♛ Leader'], ['you', 'My robot'], ['free', 'Free']] as [mode, label]}<button type="button" role="radio" aria-checked={cam === mode} class:on={cam === mode} disabled={mode === 'you' && !youId} onclick={() => setCam(mode as Cam)}>{label}</button>{/each}</div><button onclick={() => zoom = Math.min(4, zoom * 1.3)}>Zoom +</button><button onclick={() => zoom = Math.max(.1, zoom / 1.3)}>Zoom −</button><button onclick={() => { if (snapshot) { target = { x: (snapshot.width ?? 42000) / 2, y: (snapshot.height ?? 26250) / 2 }; cam = 'free'; } }}>Center map</button><span>{snapshot ? `${fps} fps · frame p95 ${frameP95.toFixed(1)} ms · update ${age} ms ago` : "Waiting for match state"}</span></div>
   <canvas bind:this={canvas} aria-label="Robot arena. Click a robot, loot crate, site, or terrain to inspect it. Drag to pan, scroll to zoom, use WASD or arrow keys to stroll. Click the minimap to jump." onwheel={wheel} onclick={click} onpointerdown={(e) => { dragged = true; press = { x: e.clientX, y: e.clientY, moved: false }; last = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); }} onpointermove={pointerMove} onpointerup={() => dragged = false} onpointercancel={() => dragged = false}></canvas>
   <div class="legend" aria-label="Map legend">Click a robot, loot crate, site, or terrain to inspect it · loot: <b style="color:#ff7a5c">weapon</b> <b style="color:#5fd68a">heal</b> <b style="color:#6aa8ff">module</b> <b style="color:#c08cff">utility</b> <b style="color:#efc86b">supply</b> · ♛ kill leader · ◉ plasma ⋮ machine-gun ∴ shotgun ● cannon ┃ railgun ✸ grenade ♨ incendiary ❄ cryo ⚡ emp · cyan bar shield · team colors on hulls and minimap</div>
 </div>
 <style>
-  .world{border:1px solid var(--color-border);border-radius:12px;overflow:hidden;background:var(--color-background);min-width:0}.toolbar{display:flex;gap:6px;padding:8px 10px;align-items:center;flex-wrap:wrap;background:var(--color-card);border-bottom:1px solid var(--color-border)}.toolbar button{height:32px;padding:0 12px;border-radius:6px;background:var(--color-secondary);color:var(--color-foreground);border:1px solid var(--color-input);font-size:12px}.toolbar button:hover{border-color:var(--color-primary);color:var(--color-primary)}.toolbar span{margin-left:auto;color:var(--color-muted-foreground);font:11px var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 0;text-align:right}.toolbar button{flex:none;min-width:118px}.toolbar button+button{min-width:0}canvas{width:100%;display:block;touch-action:none;cursor:grab}.legend{padding:8px 12px;color:var(--color-muted-foreground);font:10px var(--font-mono);border-top:1px solid var(--color-border);background:var(--color-card)}
+  .world{border:1px solid var(--color-border);border-radius:12px;overflow:hidden;background:var(--color-background);min-width:0}.toolbar{display:flex;gap:6px;padding:8px 10px;align-items:center;flex-wrap:wrap;background:var(--color-card);border-bottom:1px solid var(--color-border)}.toolbar button{height:32px;padding:0 12px;border-radius:6px;background:var(--color-secondary);color:var(--color-foreground);border:1px solid var(--color-input);font-size:12px}.toolbar button:hover{border-color:var(--color-primary);color:var(--color-primary)}.cam{display:inline-flex;border:1px solid var(--color-input);border-radius:8px;overflow:hidden;flex:none}.cam button{border:0!important;border-radius:0!important;min-width:0!important;background:transparent!important}.cam button.on{background:var(--color-primary)!important;color:var(--color-primary-foreground)!important}.cam button:disabled{opacity:.4}.toolbar span{margin-left:auto;color:var(--color-muted-foreground);font:11px var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 0;text-align:right}.toolbar button{flex:none;min-width:118px}.toolbar button+button{min-width:0}canvas{width:100%;display:block;touch-action:none;cursor:grab}.legend{padding:8px 12px;color:var(--color-muted-foreground);font:10px var(--font-mono);border-top:1px solid var(--color-border);background:var(--color-card)}
 </style>

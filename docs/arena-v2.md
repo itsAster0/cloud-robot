@@ -285,3 +285,17 @@ travelling 1,500-2,800 units and firing.
   flaky for loot-heavy strategies.
 - Live in Chrome: arena join, respawn countdown, leave and rejoin; biome
   rendering (snow, swamp, lakes, ridges); loot, site, and lake inspection.
+
+## Arena gameplay loop (2026-09-27)
+
+- Score = kills × 100 + Uplink seconds × 5 + bounties (50 × victim streak
+  for streaks of 3+). The session winner is the top score.
+- Uplink site is `hash(seed, tick / 1200) % sites`; scored every 20 ticks
+  when exactly one team is inside. Bots split between Uplink and roaming.
+- Spawn protection 40 ticks, cancelled by firing. Arena salvage and drops
+  expire after 600 ticks; generated site loot restocks every 600 ticks.
+- Snapshots add `hill`, per-robot `score`/`streak`/`bounty`/`protected`,
+  and `feed` (kill, bounty_claimed, hill_moved, robot_joined from the last
+  10 ticks) so the every-other-tick viewer stream never drops a kill.
+- Tests: scoring with Uplink and bounties, spawn protection, salvage expiry
+  and restock.

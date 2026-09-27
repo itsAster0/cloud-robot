@@ -472,3 +472,12 @@ textarea { width: 100%; height: 100%; resize: none; border: 0; outline: 0; paddi
   .error-banner { padding: 12px 16px; flex-wrap: wrap; font-size: 11px; }
 }
 }
+
+/* Thin dark scrollbars everywhere; the default light bars clashed with the
+   dark theme in sidebars and lists. */
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--color-muted-foreground) 45%, transparent) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-muted-foreground) 40%, transparent); border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+*::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--color-muted-foreground) 65%, transparent); }
+*::-webkit-scrollbar-corner { background: transparent; }

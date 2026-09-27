@@ -7,7 +7,8 @@
   let { snapshot, roster = [], youId = '' }: { snapshot: Snapshot | null; roster?: RobotState[]; youId?: string } = $props();
   const robots = $derived(roster.length ? roster : snapshot?.robots ?? []);
   const alive = $derived(aliveRobots(robots));
-  const leader = $derived(killsLeader(robots));
+  const arena = $derived(snapshot?.mode === 'arena');
+  const leader = $derived(arena ? robots.reduce<RobotState | null>((best, r) => (r.score ?? 0) > (best?.score ?? 0) ? r : best, null) : killsLeader(robots));
   const standings = $derived(teamStandings(robots).slice(0, 4));
   const you: RobotState | undefined = $derived(robots.find((r) => r.robotId === youId));
   const zone = $derived(snapshot?.zone);
@@ -21,10 +22,10 @@
       <div class="bar"><i style:width={`${robots.length ? (alive.length / robots.length) * 100 : 0}%`}></i></div>
     </div>
     <div class="card">
-      <span>Kill leader</span>
+      <span>{arena ? 'Top score' : 'Kill leader'}</span>
       {#if leader}
         <strong class="leader">♛ {leader.name}</strong>
-        <small><i class="dot" style:background={teamColor(leader.team)}></i>{leader.team} · {leader.kills} kills · {weaponGlyph(leader.weapon)} {weaponLabel(leader.weapon)}</small>
+        <small><i class="dot" style:background={teamColor(leader.team)}></i>{leader.team.slice(0, 8)} · {arena ? `${leader.score ?? 0} pts · ` : ''}{leader.kills} kills · {weaponGlyph(leader.weapon)} {weaponLabel(leader.weapon)}</small>
       {:else}
         <strong>—</strong><small>No kills yet</small>
       {/if}

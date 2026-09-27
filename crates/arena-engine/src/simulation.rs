@@ -21,6 +21,9 @@ pub struct Arena {
     pub bot_intents: BTreeMap<String, Action>,
     #[serde(default)]
     pub bot_memory: BTreeMap<String, BotMemory>,
+    /// Arena site loot as generated, restocked every 30 seconds.
+    #[serde(default)]
+    pub restock: Vec<Container>,
     #[serde(skip)]
     pub robot_grid: Grid,
 }
@@ -160,6 +163,9 @@ pub(crate) fn fresh_robot(config: &Config, reg: &Registration, x: f64, y: f64) -
         deaths: 0,
         respawn_at: None,
         left: false,
+        score: 0,
+        streak: 0,
+        protected_until: 0,
     }
 }
 
@@ -190,6 +196,17 @@ pub(crate) fn find_spawn(
 
 /// Arena respawn delay: five seconds at 20 Hz.
 pub const ARENA_RESPAWN_TICKS: u32 = 100;
+/// Arena scoring and pacing. The Uplink objective moves to another site
+/// every minute; holding it alone scores every second.
+pub const KILL_POINTS: u32 = 100;
+pub const BOUNTY_STREAK: u32 = 3;
+pub const BOUNTY_PER_KILL: u32 = 50;
+pub const HILL_TICKS: u32 = 1200;
+pub const HILL_RADIUS: f64 = 260.;
+pub const HILL_POINTS: u32 = 5;
+pub const SPAWN_PROTECT_TICKS: u32 = 40;
+pub const SALVAGE_TICKS: u32 = 600;
+pub const RESTOCK_TICKS: u32 = 600;
 
 impl Arena {
     pub fn new(mut config: Config) -> Result<Self, String> {
@@ -281,8 +298,12 @@ impl Arena {
             next_id: 0,
             bot_intents: BTreeMap::new(),
             bot_memory: BTreeMap::new(),
+            restock: vec![],
             robot_grid: Grid::default(),
         };
+        if a.config.mode == "arena" {
+            a.restock = a.world.containers.clone();
+        }
         a.reindex();
         Ok(a)
     }
@@ -361,7 +382,9 @@ impl Arena {
                 fresh.deaths = old.deaths;
                 fresh.damage_dealt = old.damage_dealt;
                 fresh.damage_taken = old.damage_taken;
+                fresh.score = old.score;
                 fresh.messages = old.messages.clone();
+                fresh.protected_until = self.tick + SPAWN_PROTECT_TICKS;
                 self.robots[i] = fresh;
                 let id = self.robots[i].robot_id.clone();
                 self.event("robot_respawned", Some(id), None, None, None);
@@ -411,6 +434,93 @@ impl Arena {
             (site.x, site.y),
             (pick % 360) as f64,
         )
+    }
+
+    /// Expiry for dropped containers: arena salvage fades, others persist.
+    pub(crate) fn salvage_expiry(&self) -> Option<u32> {
+        (self.config.mode == "arena").then_some(self.tick + SALVAGE_TICKS)
+    }
+
+    /// The site holding the Uplink this minute, chosen from the seed.
+    pub fn hill_site(&self) -> Option<usize> {
+        if self.config.mode != "arena" || self.world.sites.is_empty() {
+            return None;
+        }
+        let round = u64::from(self.tick / HILL_TICKS);
+        let pick = (self.config.seed ^ round.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .wrapping_mul(0xBF58_476D_1CE4_E5B9)
+            >> 33;
+        Some((pick % self.world.sites.len() as u64) as usize)
+    }
+
+    /// Uplink state for snapshots and observations: where it is, when it
+    /// moves, and which team holds it (empty when nobody or contested).
+    pub fn hill(&self) -> Value {
+        let Some(i) = self.hill_site() else {
+            return Value::Null;
+        };
+        let site = &self.world.sites[i];
+        let inside = self
+            .robots
+            .iter()
+            .any(|r| r.alive && distance(r.x, r.y, site.x, site.y) <= HILL_RADIUS);
+        let teams: std::collections::BTreeSet<&str> = self
+            .robots
+            .iter()
+            .filter(|r| r.alive && distance(r.x, r.y, site.x, site.y) <= HILL_RADIUS)
+            .map(|r| r.team.as_str())
+            .collect();
+        let holder = if teams.len() == 1 {
+            teams.into_iter().next().unwrap_or("")
+        } else {
+            ""
+        };
+        json!({"siteId": site.id, "x": site.x, "y": site.y, "radius": HILL_RADIUS,
+            "movesAt": (self.tick / HILL_TICKS + 1) * HILL_TICKS, "holder": holder,
+            "contested": inside && holder.is_empty(),
+            "pointsPerSecond": HILL_POINTS})
+    }
+
+    /// Scores the Uplink once a second and restocks site loot.
+    fn arena_objectives(&mut self) {
+        if self.tick > 0
+            && self.tick.is_multiple_of(HILL_TICKS)
+            && let Some(i) = self.hill_site()
+        {
+            let site = self.world.sites[i].id.clone();
+            self.event("hill_moved", None, None, None, Some(site));
+        }
+        if self.tick.is_multiple_of(20)
+            && let Some(i) = self.hill_site()
+        {
+            let (sx, sy) = (self.world.sites[i].x, self.world.sites[i].y);
+            let inside: Vec<usize> = (0..self.robots.len())
+                .filter(|&j| {
+                    let r = &self.robots[j];
+                    r.alive && distance(r.x, r.y, sx, sy) <= HILL_RADIUS
+                })
+                .collect();
+            let first = inside.first().map(|&j| self.robots[j].team.clone());
+            if let Some(team) = first
+                && inside.iter().all(|&j| self.robots[j].team == team)
+            {
+                for j in inside {
+                    self.robots[j].score += HILL_POINTS;
+                }
+            }
+        }
+        self.world
+            .containers
+            .retain(|c| c.expires_at.is_none_or(|t| t > self.tick));
+        if self.tick > 0 && self.tick.is_multiple_of(RESTOCK_TICKS) {
+            for c in &self.restock {
+                if self.world.containers.len() < MAX_CONTAINERS
+                    && !self.world.containers.iter().any(|w| w.item_id == c.item_id)
+                {
+                    self.world.containers.push(c.clone());
+                }
+            }
+        }
     }
 
     /// Records a join the arena could not honour, for the API to report.
@@ -526,6 +636,9 @@ impl Arena {
             .filter(|s| distance(s.x, s.y, z.x, z.y) < z.radius * 0.85)
             .map(|s| (s.x, s.y))
             .collect();
+        let hill = self
+            .hill_site()
+            .map(|h| (self.world.sites[h].x, self.world.sites[h].y));
         let mem = self.bot_memory.entry(id).or_default();
         let stale = mem.roam_ticks == 0
             || distance(rx, ry, mem.roam_x, mem.roam_y) < 150.
@@ -536,10 +649,11 @@ impl Arena {
             let pick = (((i as u64) << 32 | mem.roam_count as u64)
                 .wrapping_mul(0x9E37_79B9_7F4A_7C15)
                 >> 33) as usize;
-            let (sx, sy) = if inside.is_empty() {
-                (z.x, z.y)
-            } else {
-                inside[pick % inside.len()]
+            let (sx, sy) = match hill {
+                // Arena bots split between the Uplink and roaming.
+                Some(h) if pick.is_multiple_of(2) => h,
+                _ if inside.is_empty() => (z.x, z.y),
+                _ => inside[pick % inside.len()],
             };
             let angle = pick as f64 * 2.399963229728653;
             let spread = 120. + (pick % 5) as f64 * 40.;
@@ -928,6 +1042,7 @@ impl Arena {
         self.events.clear();
         if self.config.mode == "arena" {
             self.arena_upkeep();
+            self.arena_objectives();
         }
         for reg in joins {
             let id = reg.robot_id.clone();
@@ -1043,6 +1158,9 @@ impl Arena {
         self.reindex_robots();
         for (i, action) in actions.iter().enumerate() {
             if self.robots[i].alive && !withdrawals.contains(&self.robots[i].robot_id) {
+                if action.fire {
+                    self.robots[i].protected_until = 0;
+                }
                 self.shoot(i, action, &mut hits);
             }
         }
@@ -1093,10 +1211,27 @@ impl Arena {
                         && e.damage.is_some_and(|d| d > 0.)
                 })
                 .and_then(|e| e.robot_id.clone());
+            let victim_streak = std::mem::take(&mut self.robots[i].streak);
             if let Some(killer) = killer
-                && let Some(k) = self.robots.iter_mut().find(|r| r.robot_id == killer)
+                && let Some(k) = self.robots.iter().position(|r| r.robot_id == killer)
             {
-                k.kills += 1;
+                self.robots[k].kills += 1;
+                self.event("kill", Some(killer.clone()), Some(id.clone()), None, None);
+                if arena_mode {
+                    self.robots[k].streak += 1;
+                    self.robots[k].score += KILL_POINTS;
+                    if victim_streak >= BOUNTY_STREAK {
+                        let bounty = BOUNTY_PER_KILL * victim_streak;
+                        self.robots[k].score += bounty;
+                        self.event(
+                            "bounty_claimed",
+                            Some(killer),
+                            Some(id.clone()),
+                            Some(f64::from(bounty)),
+                            None,
+                        );
+                    }
+                }
             }
             if self.world.containers.len() < MAX_CONTAINERS {
                 let r = &self.robots[i];
@@ -1127,11 +1262,13 @@ impl Arena {
                 }
                 let (x, y) = (r.x, r.y);
                 let item_id = self.id("salvage");
+                let expires_at = self.salvage_expiry();
                 self.world.containers.push(Container {
                     item_id,
                     x,
                     y,
                     contents,
+                    expires_at,
                 });
             }
         }
@@ -1271,6 +1408,9 @@ impl Arena {
         if h.damage <= 0. {
             return;
         }
+        if !h.bypass && self.robots[h.target].protected_until > self.tick {
+            return;
+        }
         let r = &mut self.robots[h.target];
         let original = r.hp + r.shield;
         let mut d = h.damage;
@@ -1354,8 +1494,9 @@ impl Arena {
                     .robots
                     .iter()
                     .max_by(|a, b| {
-                        a.kills
-                            .cmp(&b.kills)
+                        a.score
+                            .cmp(&b.score)
+                            .then(a.kills.cmp(&b.kills))
                             .then(b.deaths.cmp(&a.deaths))
                             .then(b.robot_id.cmp(&a.robot_id))
                     })
@@ -1427,12 +1568,13 @@ impl Arena {
                             ..Default::default()
                         },
                     ],
+                    expires_at: None,
                 });
             }
         }
     }
     pub fn snapshot(&self) -> Value {
-        let robots:Vec<_>=self.robots.iter().map(|r|json!({"robotId":r.robot_id,"name":r.name,"team":r.team,"bot":r.bot,"x":r.x,"y":r.y,"vx":r.vx,"vy":r.vy,"heading":r.heading,"turretHeading":r.turret_heading,"hp":r.hp,"maxHp":r.max_hp,"shield":r.shield,"maxShield":r.max_shield,"energy":r.energy,"maxEnergy":r.max_energy,"alive":r.alive,"weapon":r.weapon(),"visionRange":r.vision_range,"placement":r.placement,"damageDealt":r.damage_dealt,"damageTaken":r.damage_taken,"kills":r.kills,"deaths":r.deaths,"respawnIn":r.respawn_at.map(|t|t.saturating_sub(self.tick)),"effects":self.visible_effects(r)})).collect();
+        let robots:Vec<_>=self.robots.iter().map(|r|json!({"robotId":r.robot_id,"name":r.name,"team":r.team,"bot":r.bot,"x":r.x,"y":r.y,"vx":r.vx,"vy":r.vy,"heading":r.heading,"turretHeading":r.turret_heading,"hp":r.hp,"maxHp":r.max_hp,"shield":r.shield,"maxShield":r.max_shield,"energy":r.energy,"maxEnergy":r.max_energy,"alive":r.alive,"weapon":r.weapon(),"visionRange":r.vision_range,"placement":r.placement,"damageDealt":r.damage_dealt,"damageTaken":r.damage_taken,"kills":r.kills,"deaths":r.deaths,"respawnIn":r.respawn_at.map(|t|t.saturating_sub(self.tick)),"score":r.score,"streak":r.streak,"bounty":if r.streak>=BOUNTY_STREAK{BOUNTY_PER_KILL*r.streak}else{0},"protected":r.protected_until>self.tick,"effects":self.visible_effects(r)})).collect();
         let items: Vec<_> = self
             .world
             .containers
@@ -1440,7 +1582,7 @@ impl Arena {
             .filter(|c| !c.contents.is_empty())
             .map(|c| json!({"itemId":c.item_id,"x":c.x,"y":c.y,"type":"container","active":true,"contents":c.contents}))
             .collect();
-        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"events":self.events})
+        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"hill":self.hill(),"events":self.events,"feed":self.recent_events.iter().filter(|e|matches!(e.r#type.as_str(),"kill"|"bounty_claimed"|"hill_moved"|"robot_joined")).collect::<Vec<_>>()})
     }
     /// Status effects a spectator could see on the robot's body.
     fn visible_effects(&self, r: &Robot) -> Vec<&'static str> {
@@ -1473,7 +1615,7 @@ impl Arena {
                 })
         };
         let robots:Vec<_>=self.robots.iter().enumerate().filter(|(j,_)|*j!=i&&self.visible(i,*j)).map(|(_,v)|json!({"robotId":v.robot_id,"team":v.team,"x":v.x,"y":v.y,"vx":v.vx,"vy":v.vy,"heading":v.heading,"turretHeading":v.turret_heading,"hp":v.hp,"shield":v.shield,"alive":v.alive,"weapon":v.weapon()})).collect();
-        let mut observation = json!({"type":"observation","version":4,"matchId":self.config.match_id,"tick":self.tick,"tickRate":20,"self":r,"robots":robots,"arenaWidth":self.config.width,"arenaHeight":self.config.height,"visionRange":r.vision_range,"revision":self.world.revision,"items":self.world.containers.iter().filter(|c|!c.contents.is_empty()&&nearby(c.x,c.y)).collect::<Vec<_>>(),"projectiles":self.projectiles.iter().filter(|p|nearby(p.x,p.y)).collect::<Vec<_>>(),"mines":self.mines.iter().filter(|m|nearby(m.x,m.y)).collect::<Vec<_>>(),"zone":self.zone(),"messages":r.messages,"events":self.recent_events.iter().filter(|e|e.robot_id.as_ref()==Some(&r.robot_id)||e.target_id.as_ref()==Some(&r.robot_id)||e.r#type=="supply_announced"||(e.r#type=="scan_emitted"&&e.x.zip(e.y).is_some_and(|(x,y)|distance(r.x,r.y,x,y)<=900.))).collect::<Vec<_>>()});
+        let mut observation = json!({"type":"observation","version":4,"matchId":self.config.match_id,"tick":self.tick,"tickRate":20,"self":r,"robots":robots,"arenaWidth":self.config.width,"arenaHeight":self.config.height,"visionRange":r.vision_range,"revision":self.world.revision,"items":self.world.containers.iter().filter(|c|!c.contents.is_empty()&&nearby(c.x,c.y)).collect::<Vec<_>>(),"projectiles":self.projectiles.iter().filter(|p|nearby(p.x,p.y)).collect::<Vec<_>>(),"mines":self.mines.iter().filter(|m|nearby(m.x,m.y)).collect::<Vec<_>>(),"zone":self.zone(),"hill":self.hill(),"messages":r.messages,"events":self.recent_events.iter().filter(|e|e.robot_id.as_ref()==Some(&r.robot_id)||e.target_id.as_ref()==Some(&r.robot_id)||e.r#type=="supply_announced"||(e.r#type=="scan_emitted"&&e.x.zip(e.y).is_some_and(|(x,y)|distance(r.x,r.y,x,y)<=900.))).collect::<Vec<_>>()});
         if include_geometry {
             observation
                 .as_object_mut()
@@ -1879,11 +2021,13 @@ impl Arena {
             } else {
                 let stack = self.robots[i].inventory.remove(slot);
                 let item_id = self.id("drop");
+                let expires_at = self.salvage_expiry();
                 self.world.containers.push(Container {
                     item_id,
                     x: self.robots[i].x,
                     y: self.robots[i].y,
                     contents: vec![stack],
+                    expires_at,
                 });
                 self.robots[i].channel = None;
             }
