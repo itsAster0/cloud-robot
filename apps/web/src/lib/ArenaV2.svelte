@@ -172,6 +172,15 @@
   async function mapEdit(apply: boolean) { await task(async () => { if (!match) return; const raw = JSON.parse(edit); const result = await request(`/api/v4/matches/${match.matchId}/edit?apply=${apply}`, { method: 'POST', body: JSON.stringify(raw) }); preview = JSON.stringify(result, null, 2); message = apply ? 'Edit scheduled. Its revision applies at the effective tick.' : 'Preview validated; inspect the operations before applying.'; }); }
   async function refreshPrivate() { if (!privateView || !match || match.status !== 'running') return; const viewing=match.matchId; try { const obs = await request<{ tick: number; self: RobotState; robots: RobotState[]; obstacles: Snapshot['obstacles']; projectiles: Snapshot['projectiles']; items: { itemId: string; x: number; y: number }[]; zone: Snapshot['zone']; transit: Snapshot['transit']; sites?: Snapshot['sites']; hazards?: Snapshot['hazards']; debug?: Snapshot['debug']; revision: number; arenaWidth: number; arenaHeight: number }>(`/api/v4/matches/${match.matchId}/view`); if (!privateView || match?.matchId !== viewing) return; const robot = { ...obs.self, name: obs.self.name ?? name }; selected = robot.robotId; snapshot = { type: 'snapshot', version: 4, matchId: match.matchId, tick: obs.tick, tickRate: 20, sequence: obs.tick, status: 'running', robots: [robot, ...obs.robots.map(r => ({ ...r, name: r.name ?? r.robotId.slice(0, 8) }))], projectiles: obs.projectiles, obstacles: obs.obstacles, items: obs.items.map(i => ({ ...i, type: 'container', active: true, spawnTick: 0, pickupRadius: 35 })), zone: obs.zone, transit: obs.transit, sites: obs.sites, hazards: obs.hazards, debug: obs.debug, revision: obs.revision, width: obs.arenaWidth, height: obs.arenaHeight }; } catch (e) { privateView = false; error = e instanceof Error ? e.message : String(e); } }
   $effect(() => { panel = initialPanel; });
+  // Open the workspace file automatically once the runtime is ready, so the
+  // Code tab shows the editor instead of a load button.
+  let autoLoadedFor = '';
+  $effect(() => {
+    const id = signedIn && box?.status === 'running' && panel === 'code' && !editorLoaded ? box.boxId : '';
+    if (!id || id === autoLoadedFor) return;
+    autoLoadedFor = id;
+    untrack(() => void readSource());
+  });
   // Keep the open match's row current as its status changes over the socket;
   // a periodic refresh catches other lobbies starting or finishing.
   $effect(() => {
