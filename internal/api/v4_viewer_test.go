@@ -6,6 +6,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/kryxen/cloud-robot/internal/model"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -124,5 +125,45 @@ func TestWithoutStaticLayoutKeepsEntities(t *testing.T) {
 	}
 	if bad := withoutStaticLayout(json.RawMessage(`not json`)); string(bad) != "not json" {
 		t.Fatal("invalid frame must pass through unchanged")
+	}
+}
+
+func TestDebugMarksValidatedAndAttachedToOwnerView(t *testing.T) {
+	base := v4Input{Type: "action", Version: 4, SDKVersion: "0.4.0"}
+	ok := base
+	ok.Debug = []v4DebugMark{{Kind: "line", X: 1, Y: 2, X2: 3, Y2: 4, Color: "#ff00AA"}, {Kind: "text", X: 5, Y: 6, Text: "GOAL"}}
+	if code := validateV4Input(ok); code != "" {
+		t.Fatalf("valid marks rejected: %s", code)
+	}
+	for name, mark := range map[string]v4DebugMark{
+		"kind":  {Kind: "polygon"},
+		"nan":   {Kind: "point", X: math.NaN()},
+		"color": {Kind: "point", Color: "red"},
+		"text":  {Kind: "text", Text: strings.Repeat("x", 41)},
+	} {
+		bad := base
+		bad.Debug = []v4DebugMark{mark}
+		if validateV4Input(bad) != "OUT_OF_RANGE" {
+			t.Fatalf("%s mark accepted", name)
+		}
+	}
+	many := base
+	many.Debug = make([]v4DebugMark, maxDebugMarks+1)
+	for i := range many.Debug {
+		many.Debug[i] = v4DebugMark{Kind: "point"}
+	}
+	if validateV4Input(many) != "OUT_OF_RANGE" {
+		t.Fatal("too many marks accepted")
+	}
+	view := withDebugMarks(json.RawMessage(`{"tick":3}`), ok.Debug)
+	var got struct {
+		Tick  int           `json:"tick"`
+		Debug []v4DebugMark `json:"debug"`
+	}
+	if err := json.Unmarshal(view, &got); err != nil || got.Tick != 3 || len(got.Debug) != 2 || got.Debug[1].Text != "GOAL" {
+		t.Fatalf("marks not attached: %s", view)
+	}
+	if string(withDebugMarks(json.RawMessage(`{"tick":3}`), nil)) != `{"tick":3}` {
+		t.Fatal("empty marks changed the view")
 	}
 }

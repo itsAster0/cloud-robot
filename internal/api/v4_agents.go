@@ -7,6 +7,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"io"
 	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -41,14 +42,32 @@ type v4Action struct {
 	Message          *string          `json:"message,omitempty"`
 	Label            *string          `json:"label,omitempty"`
 }
+
+// v4DebugMark is an owner-only drawing a script attaches to its input. Marks
+// stay in the API: they are shown in the owner's live view and never reach
+// the simulation, so they cannot affect determinism or other players.
+type v4DebugMark struct {
+	Kind  string  `json:"kind"`
+	X     float64 `json:"x"`
+	Y     float64 `json:"y"`
+	X2    float64 `json:"x2,omitempty"`
+	Y2    float64 `json:"y2,omitempty"`
+	R     float64 `json:"r,omitempty"`
+	Text  string  `json:"text,omitempty"`
+	Color string  `json:"color,omitempty"`
+}
+
+const maxDebugMarks = 24
+
 type v4Input struct {
-	GeometryRevision *uint32  `json:"geometryRevision,omitempty"`
-	Type             string   `json:"type"`
-	Version          int      `json:"version"`
-	SDKVersion       string   `json:"sdkVersion"`
-	Sequence         uint64   `json:"sequence"`
-	ObservedTick     uint32   `json:"observedTick"`
-	Action           v4Action `json:"action"`
+	Debug            []v4DebugMark `json:"debug,omitempty"`
+	GeometryRevision *uint32       `json:"geometryRevision,omitempty"`
+	Type             string        `json:"type"`
+	Version          int           `json:"version"`
+	SDKVersion       string        `json:"sdkVersion"`
+	Sequence         uint64        `json:"sequence"`
+	ObservedTick     uint32        `json:"observedTick"`
+	Action           v4Action      `json:"action"`
 }
 type v4Mailbox struct {
 	mu               sync.Mutex
@@ -60,6 +79,14 @@ type v4Mailbox struct {
 	rejections       chan json.RawMessage
 	geometryRevision uint32
 	geometry         json.RawMessage
+	debug            []v4DebugMark
+}
+
+// debugMarks returns the marks from the latest accepted input.
+func (s *AgentSession) debugMarks() []v4DebugMark {
+	s.mailbox.mu.Lock()
+	defer s.mailbox.mu.Unlock()
+	return append([]v4DebugMark(nil), s.mailbox.debug...)
 }
 
 func (s *AgentSession) readV4(ctx context.Context) error {
@@ -129,6 +156,7 @@ func (s *AgentSession) readV4(ctx context.Context) error {
 				code = "STALE_OBSERVATION"
 			default:
 				s.mailbox.last = input
+				s.mailbox.debug = input.Debug
 				if input.GeometryRevision != nil {
 					s.mailbox.geometryRevision = *input.GeometryRevision
 				}
@@ -220,7 +248,42 @@ func validateV4Input(input v4Input) string {
 			return "OUT_OF_RANGE"
 		}
 	}
+	if len(input.Debug) > maxDebugMarks {
+		return "OUT_OF_RANGE"
+	}
+	for _, m := range input.Debug {
+		if !validDebugMark(m) {
+			return "OUT_OF_RANGE"
+		}
+	}
 	return ""
+}
+
+func validDebugMark(m v4DebugMark) bool {
+	switch m.Kind {
+	case "point", "line", "circle", "text":
+	default:
+		return false
+	}
+	for _, v := range []float64{m.X, m.Y, m.X2, m.Y2, m.R} {
+		if math.IsNaN(v) || math.IsInf(v, 0) || math.Abs(v) > 1e6 {
+			return false
+		}
+	}
+	if m.R < 0 || m.R > 5000 || len(m.Text) > 40 {
+		return false
+	}
+	if m.Color != "" {
+		if len(m.Color) != 7 || m.Color[0] != '#' {
+			return false
+		}
+		for _, c := range m.Color[1:] {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+				return false
+			}
+		}
+	}
+	return true
 }
 func (s *AgentSession) rejectV4(sequence uint64, code string) {
 	raw, _ := json.Marshal(map[string]any{"type": "action_rejected", "version": 4, "sequence": sequence, "code": code})

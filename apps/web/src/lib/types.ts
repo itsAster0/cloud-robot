@@ -303,7 +303,11 @@ export interface WorldHazard {
   damagePerSecond?: number;
 }
 
+// Owner-only drawings from a robot script (arena.draw); never simulated.
+export interface DebugMark { kind: 'point' | 'line' | 'circle' | 'text'; x: number; y: number; x2?: number; y2?: number; r?: number; text?: string; color?: string }
+
 export interface Snapshot {
+  debug?: DebugMark[];
  revision?: number;
  transit?: {id:string; x:number; y:number; targetX:number; targetY:number}[];
   // Engine v4 static layout: sent on first delivery and on revision changes.

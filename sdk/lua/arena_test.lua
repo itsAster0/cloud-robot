@@ -149,6 +149,13 @@ for tick = 1, 12 do
   arena.note_action(resting, { brake = true, throttle = 0 })
 end
 check("unstick ignores intentional stops", escape == nil)
+arena.take_debug()
+arena.draw.line(0, 0, 10, 10, "#ff0000")
+arena.draw.text(1, 2, string.rep("x", 60))
+for _ = 1, 40 do arena.draw.point(0, 0) end
+local marks = arena.take_debug()
+check("draw buffers marks and caps them at 24", #marks == 24 and marks[1].kind == "line" and #marks[2].text == 40)
+check("take_debug clears the buffer", #arena.take_debug() == 0)
 local fight = {}
 local near = arena.engage(steer_obs(0), { robotId = "e", x = 100, y = 0, vx = 0, vy = 0 }, fight)
 check("engage kites when too close", near.label == "KITE" and near.fire == true)
