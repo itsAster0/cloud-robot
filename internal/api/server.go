@@ -99,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v4/me/loadout", s.requireUser(http.HandlerFunc(s.v4Loadout)))
 	mux.Handle("PUT /api/v4/me/loadout", s.requireUser(http.HandlerFunc(s.v4Loadout)))
 	mux.Handle("POST /api/v4/matches", s.requireUser(s.rateLimit("create-match", http.HandlerFunc(s.createV4Match))))
+	mux.HandleFunc("GET /api/v4/catalogue", s.v4Catalogue)
 	mux.Handle("POST /api/v4/maps/preview", s.requireUser(s.rateLimit("preview", http.HandlerFunc(s.previewV4Map))))
 	mux.Handle("POST /api/v4/matches/{matchID}/control", s.requireUser(http.HandlerFunc(s.controlV4)))
 	mux.HandleFunc("GET /api/v4/matches/{matchID}/final", s.v4Final)

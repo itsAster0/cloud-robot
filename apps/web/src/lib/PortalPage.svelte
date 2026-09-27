@@ -18,7 +18,7 @@
   let botPersonality = $state('aggressive'), practiceRegen = $state(false), practiceRamming = $state(false), soloBots = $state(3);
   let soloBotCount = $derived(Number(soloBots));
   let displayName = $state('Robot'), startCommand = $state('lua main.lua');
-  let reducedMotion = $state(false), muted = $state(false), notifications = $state(true);
+  let reducedMotion = $state(false);
   let customWidth = $state(800), customHeight = $state(500), mapName = $state('Untitled arena');
   let matches = $state<ListedMatch[]>([]), profile = $state<PlayerStats | null>(null), recentMatches = $state<Match[]>([]);
   let leaderboard = $state<{ rank: number; player: PlayerStats; rating: number }[]>([]);
@@ -27,10 +27,9 @@
   let loading = $state(false), pageError = $state(''), releasing = $state(false);
   let blockedByActiveRobot = $derived(pageError.includes('box already has an active robot'));
 
+  try { reducedMotion = localStorage.getItem('arena-reduced-motion') === 'true'; } catch { /* storage unavailable */ }
   function savePreferences() {
-    localStorage.setItem('arena-reduced-motion', String(reducedMotion));
-    localStorage.setItem('arena-muted', String(muted));
-    localStorage.setItem('arena-notifications', String(notifications));
+    try { localStorage.setItem('arena-reduced-motion', String(reducedMotion)); } catch { /* preference stays for this page only */ }
   }
   function requireUser(action: () => void) { if (user) action(); else onSignIn(); }
   let title = $derived(route.name === 'profile' ? `${route.parameter ?? 'Player'} profile` : route.name === 'sdk' || route.name === 'api-docs' ? 'documentation' : route.name.replace('-', ' '));
@@ -174,7 +173,26 @@
 {:else if route.name === 'create'}
   <section class="portal"><div class="eyebrow">WORKSHOP</div><h1>Create arena.</h1>{#if user}<div class="workshop-grid"><article class="console-card"><label>Map name<input bind:value={mapName} maxlength="48" /></label><div class="form-grid"><label>Width<input type="number" min="400" max="1600" bind:value={customWidth} /></label><label>Height<input type="number" min="300" max="1000" bind:value={customHeight} /></label></div><button class="secondary-action" disabled>EXPORT JSON · COMING LATER</button></article><article class="map-preview" style={`aspect-ratio: ${customWidth}/${customHeight}`}><span>{mapName}</span><i>CUSTOM {customWidth} × {customHeight}</i></article></div>{:else}<div class="auth-gate"><h2>Sign in to use Workshop</h2><button class="deploy" onclick={onSignIn}>SIGN IN</button></div>{/if}</section>
 {:else if route.name === 'settings'}
-  <section class="portal narrow-page"><div class="eyebrow">ACCOUNT</div><h1>Settings.</h1>{#if user}<div class="settings-list"><label><span>Reduced motion<small>Disable arena interpolation and motion effects.</small></span><input type="checkbox" bind:checked={reducedMotion} /></label><label><span>Master mute<small>Mute match sounds when audio effects land.</small></span><input type="checkbox" bind:checked={muted} /></label><label><span>Notifications<small>Allow queue and match-ready notices.</small></span><input type="checkbox" bind:checked={notifications} /></label></div><button class="deploy" onclick={savePreferences}>SAVE PREFERENCES</button><a class="secondary-action" href="#/box">MANAGE SSH KEY IN MY BOX</a>{:else}<div class="auth-gate"><h2>Sign in to edit settings</h2><button class="deploy" onclick={onSignIn}>SIGN IN</button></div>{/if}</section>
+  <section class="mx-auto grid max-w-2xl gap-5 px-4 py-8 sm:px-8">
+    <header><p class="m-0 font-mono text-[11px] tracking-widest text-muted-foreground">ACCOUNT</p><h1 class="m-0 text-3xl font-semibold tracking-tight">Settings</h1></header>
+    {#if user}
+      <Card><CardContent class="flex flex-wrap items-center justify-between gap-3 p-5">
+        <div class="min-w-0"><p class="m-0 font-semibold">{[user.firstName, user.lastName].filter(Boolean).join(' ') || 'Signed in'}</p><p class="m-0 truncate text-sm text-muted-foreground">{user.email}</p></div>
+        <Badge variant="live">Signed in with WorkOS</Badge>
+      </CardContent></Card>
+      <Card><CardContent class="grid gap-2 p-5 sm:grid-cols-3">
+        {#each [['#/box', 'Robot box', 'SSH key, resources, output'], ['#/workspace/build', 'Loadout', 'Your 60-point build'], ['#/workspace', 'Code', 'Edit main.lua']] as [href, name, detail]}
+          <a class="grid gap-0.5 rounded-lg border border-border bg-background p-3 text-foreground no-underline hover:border-primary/60" {href}><strong class="text-sm">{name}</strong><span class="text-xs text-muted-foreground">{detail}</span></a>
+        {/each}
+      </CardContent></Card>
+      <Card><CardContent class="flex items-center justify-between gap-4 p-5">
+        <div><p class="m-0 font-medium">Reduced motion</p><p class="m-0 text-sm text-muted-foreground">Snap the arena camera instead of easing, and skip robot interpolation. Saved in this browser.</p></div>
+        <input type="checkbox" class="size-5 shrink-0 accent-primary" aria-label="Reduced motion" bind:checked={reducedMotion} onchange={savePreferences}/>
+      </CardContent></Card>
+    {:else}
+      <Card><CardContent class="grid justify-items-start gap-3 p-6"><strong>Sign in to manage your account</strong><Button onclick={onSignIn}>Sign in</Button></CardContent></Card>
+    {/if}
+  </section>
 {:else if route.name === 'tournaments'}
   <section class="portal"><div class="eyebrow">EVENTS</div><h1>Tournaments.</h1><div class="bracket"><article><span>SEMIFINAL A</span><strong>Registration pending</strong></article><article><span>SEMIFINAL B</span><strong>Registration pending</strong></article><article><span>FINAL</span><strong>Winner advances here</strong></article></div><p class="page-lede">Event signup and bracket persistence are planned. This page is public.</p></section>
 {:else if route.name === 'admin'}

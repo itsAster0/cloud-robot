@@ -13,6 +13,9 @@
   let press = { x: 0, y: 0, moved: false };
   // Selecting a robot (map, roster, or inspector) resumes camera follow.
   $effect(() => { if (selected) follow = true; });
+  // Settings → Reduced motion (or the OS preference) snaps the camera and
+  // skips robot interpolation.
+  const reduceMotion = (() => { try { return localStorage.getItem('arena-reduced-motion') === 'true' || matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
   let regionAt = 0;
   let canvas: HTMLCanvasElement;
   let zoom = $state(1), follow = $state(true), fps = $state(0), frameP95 = $state(0), age = $state(0);
@@ -112,7 +115,7 @@
       const dpr = Math.min(2, devicePixelRatio || 1);
       if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) { canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr); canvas.style.height = `${height}px`; }
       const c = canvas.getContext('2d')!; c.setTransform(dpr, 0, 0, dpr, 0, 0); c.fillStyle = '#030b08'; c.fillRect(0, 0, width, height);
-      const sample = buffer.sample(now), s = sample?.after ?? snapshot;
+      const sample = reduceMotion ? null : buffer.sample(now), s = sample?.after ?? snapshot;
       if (s) {
         const old = new Map(sample?.before.robots.map(r => [r.robotId, r]) ?? []);
         const positions = s.robots.map(r => { const p = old.get(r.robotId) ?? r; const t = s.events?.some(e => e.type === 'teleport' && e.robotId === r.robotId) ? 1 : sample?.amount ?? 1; return { ...r, x: p.x + (r.x - p.x) * t, y: p.y + (r.y - p.y) * t, heading: angleBetween(p.heading, r.heading, t), turretHeading: angleBetween(p.turretHeading ?? p.heading, r.turretHeading ?? r.heading, t) }; });
@@ -135,8 +138,9 @@
           if (keys.has('arrowup') || keys.has('w')) target.y -= pan * 0.05;
           if (keys.has('arrowdown') || keys.has('s')) target.y += pan * 0.05;
         }
-        camera.x += (target.x - camera.x) * 0.14;
-        camera.y += (target.y - camera.y) * 0.14;
+        const ease = reduceMotion ? 1 : 0.14;
+        camera.x += (target.x - camera.x) * ease;
+        camera.y += (target.y - camera.y) * ease;
         if (Math.abs(target.x - camera.x) < 0.5) camera.x = target.x;
         if (Math.abs(target.y - camera.y) < 0.5) camera.y = target.y;
         const visible = (x: number, y: number, pad = 50) => Math.abs(x - camera.x) < width / scale / 2 + pad && Math.abs(y - camera.y) < height / scale / 2 + pad;
