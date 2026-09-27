@@ -1438,7 +1438,7 @@ impl Arena {
             .containers
             .iter()
             .filter(|c| !c.contents.is_empty())
-            .map(|c| json!({"itemId":c.item_id,"x":c.x,"y":c.y,"type":"container","active":true}))
+            .map(|c| json!({"itemId":c.item_id,"x":c.x,"y":c.y,"type":"container","active":true,"contents":c.contents}))
             .collect();
         json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"events":self.events})
     }

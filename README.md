@@ -120,7 +120,9 @@ Players see their own box output on **More → SSH & runtime**.
   shipped strategy builds on. See [SDK 0.4](docs/lua-sdk-v4.md).
 - **Browser:** textured renderer with regional streaming, interpolation,
   follow, zoom, minimap, robot inspector, guided match setup, replays, and
-  owner decision traces.
+  owner decision traces. Clicking a loot crate shows what it holds (crates are
+  coloured by contents); clicking a site, hazard, obstacle, or open ground
+  explains it and its biome.
 
 ## Architecture
 

@@ -275,6 +275,8 @@ export interface ArenaItem {
   respawnTick?: number;
   source?: string;
   rarity?: string;
+  // Engine v4 loot containers list what they hold.
+  contents?: { kind: string; count: number; charges?: number }[];
 }
 
 export interface Projectile {

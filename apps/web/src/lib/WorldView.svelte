@@ -2,12 +2,13 @@
   import { onMount } from 'svelte';
   import { SnapshotBuffer, angleBetween } from './interpolation';
   import { hpFraction, siteColor, teamColor, weaponGlyph } from './matchStats';
-  import { pickRobot, screenToWorld } from './picking';
+  import { pickRobot, pickThing, pickedCentre, screenToWorld, type Picked } from './picking';
+  import { lootColor, lootGroupOf } from './mapInfo';
   import { drawRobot, loadRobotSprites } from './robotSprites';
   import { hash2, loadTerrain, paintChunk, roadsFor, type Road } from './terrain';
   import type { Snapshot, RobotState, WorldHazard, WorldSite } from './types';
   export type SiteMark = WorldSite;
-  let { snapshot, selected = '', leaderId = '', overview = [], sites = [], onregion, onselect }: { snapshot: Snapshot | null; selected?: string; leaderId?: string; overview?: RobotState[]; sites?: SiteMark[]; onregion?: (region: {x:number;y:number;width:number;height:number}) => void; onselect?: (robotId: string) => void } = $props();
+  let { snapshot, selected = '', leaderId = '', overview = [], sites = [], picked = null, onregion, onselect, onpick }: { snapshot: Snapshot | null; selected?: string; leaderId?: string; overview?: RobotState[]; sites?: SiteMark[]; picked?: Picked | null; onregion?: (region: {x:number;y:number;width:number;height:number}) => void; onselect?: (robotId: string) => void; onpick?: (thing: Picked) => void } = $props();
   // Robot positions as drawn in the last frame, for click and hover hit-tests.
   let drawn: { robotId: string; x: number; y: number }[] = [];
   let press = { x: 0, y: 0, moved: false };
@@ -167,8 +168,24 @@
             c.textAlign = 'left';
           }
         }
-        for (const item of s.items ?? []) if (item.active && visible(item.x, item.y)) { c.fillStyle = '#efc86b'; c.fillRect(item.x - 8, item.y - 8, 16, 16); }
+        // Loot crates are coloured by what they hold: weapons red, healing
+        // green, modules blue, utilities purple, other supplies gold.
+        for (const item of s.items ?? []) {
+          if (!item.active || !visible(item.x, item.y)) continue;
+          const color = lootColor[lootGroupOf(item.contents)];
+          c.globalAlpha = 0.28; c.fillStyle = color; c.beginPath(); c.arc(item.x, item.y, 16, 0, Math.PI * 2); c.fill(); c.globalAlpha = 1;
+          c.fillStyle = '#2a2116'; c.fillRect(item.x - 9, item.y - 9, 18, 18);
+          c.fillStyle = color; c.fillRect(item.x - 7, item.y - 7, 14, 14);
+          c.fillStyle = 'rgba(0,0,0,.35)'; c.fillRect(item.x - 7, item.y - 1, 14, 2); c.fillRect(item.x - 1, item.y - 7, 2, 14);
+        }
         for (const link of s.transit ?? []) if (visible(link.x, link.y)) { c.strokeStyle = '#b58dff'; c.lineWidth = 3; c.beginPath(); c.arc(link.x, link.y, 24, 0, Math.PI * 2); c.stroke(); }
+        if (picked) {
+          // Pulsing ring on the inspected thing.
+          const { x, y, r } = pickedCentre(picked);
+          const pulse = reduceMotion ? 0 : Math.sin(now / 220) * 0.5 + 0.5;
+          c.strokeStyle = '#f5f0a0'; c.lineWidth = (2 + pulse * 2) / scale; c.setLineDash([10 / scale, 6 / scale]);
+          c.beginPath(); c.arc(x, y, r + 6 / scale + pulse * 6 / scale, 0, Math.PI * 2); c.stroke(); c.setLineDash([]);
+        }
         if(now-regionAt>=100) { regionAt=now; onregion?.({x:Math.max(0,Math.min(48000,camera.x)),y:Math.max(0,Math.min(30000,camera.y)),width:Math.max(100,Math.min(48000,width/scale)),height:Math.max(100,Math.min(30000,height/scale))}); }
         const previous = new Map(sample?.before.projectiles.map(p => [p.projectileId, p]) ?? []);
         for (const p of s.projectiles) { const old = previous.get(p.projectileId) ?? p, t = sample?.amount ?? 1, x = old.x + (p.x - old.x) * t, y = old.y + (p.y - old.y) * t; if (!visible(x, y)) continue; c.fillStyle = '#eaf69f'; c.fillRect(x - 2, y - 2, 4, 4); }
@@ -273,7 +290,12 @@
       return;
     }
     const hit = robotAt(px, py);
-    if (hit) { onselect?.(hit); follow = true; }
+    if (hit) { onselect?.(hit); follow = true; return; }
+    if (!onpick) return;
+    const world = screenToWorld({ x: camera.x, y: camera.y, zoom, width, height }, px, py);
+    const s = snapshot;
+    onpick(pickThing({ items: s.items, transit: s.transit, obstacles: s.obstacles, hazards: s.hazards, sites: worldSites }, world.x, world.y, zoom));
+    follow = false;
   }
   function pointerMove(e: PointerEvent) {
     if (dragged) {
@@ -288,9 +310,9 @@
 </script>
 <div class="world">
   <div class="toolbar"><button onclick={() => follow = !follow}>{follow ? 'Following robot' : 'Free camera'}</button><button onclick={() => zoom = Math.min(4, zoom * 1.3)}>Zoom +</button><button onclick={() => zoom = Math.max(.1, zoom / 1.3)}>Zoom −</button><button onclick={() => { if (snapshot) { target = { x: (snapshot.width ?? 42000) / 2, y: (snapshot.height ?? 26250) / 2 }; follow = false; } }}>Center map</button><span>{snapshot ? `${fps} fps · frame p95 ${frameP95.toFixed(1)} ms · update ${age} ms ago` : "Waiting for match state"}</span></div>
-  <canvas bind:this={canvas} aria-label="Robot arena. Click a robot to inspect it. Drag to pan, scroll to zoom, use WASD or arrow keys to stroll. Click the minimap to jump." onwheel={wheel} onclick={click} onpointerdown={(e) => { dragged = true; press = { x: e.clientX, y: e.clientY, moved: false }; last = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); }} onpointermove={pointerMove} onpointerup={() => dragged = false} onpointercancel={() => dragged = false}></canvas>
-  <div class="legend" aria-label="Map legend">Click a robot to inspect · ♛ kill leader · ◉ plasma ⋮ machine-gun ∴ shotgun ● cannon ┃ railgun ✸ grenade ♨ incendiary ❄ cryo ⚡ emp · cyan bar shield · team colors on hulls and minimap</div>
+  <canvas bind:this={canvas} aria-label="Robot arena. Click a robot, loot crate, site, or terrain to inspect it. Drag to pan, scroll to zoom, use WASD or arrow keys to stroll. Click the minimap to jump." onwheel={wheel} onclick={click} onpointerdown={(e) => { dragged = true; press = { x: e.clientX, y: e.clientY, moved: false }; last = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); }} onpointermove={pointerMove} onpointerup={() => dragged = false} onpointercancel={() => dragged = false}></canvas>
+  <div class="legend" aria-label="Map legend">Click a robot, loot crate, site, or terrain to inspect it · loot: <b style="color:#ff7a5c">weapon</b> <b style="color:#5fd68a">heal</b> <b style="color:#6aa8ff">module</b> <b style="color:#c08cff">utility</b> <b style="color:#efc86b">supply</b> · ♛ kill leader · ◉ plasma ⋮ machine-gun ∴ shotgun ● cannon ┃ railgun ✸ grenade ♨ incendiary ❄ cryo ⚡ emp · cyan bar shield · team colors on hulls and minimap</div>
 </div>
 <style>
-  .world{border:1px solid var(--color-border);border-radius:12px;overflow:hidden;background:var(--color-background);min-width:0}.toolbar{display:flex;gap:6px;padding:8px 10px;align-items:center;flex-wrap:wrap;background:var(--color-card);border-bottom:1px solid var(--color-border)}.toolbar button{height:32px;padding:0 12px;border-radius:6px;background:var(--color-secondary);color:var(--color-foreground);border:1px solid var(--color-input);font-size:12px}.toolbar button:hover{border-color:var(--color-primary);color:var(--color-primary)}.toolbar span{margin-left:auto;color:var(--color-muted-foreground);font:11px var(--font-mono)}canvas{width:100%;display:block;touch-action:none;cursor:grab}.legend{padding:8px 12px;color:var(--color-muted-foreground);font:10px var(--font-mono);border-top:1px solid var(--color-border);background:var(--color-card)}
+  .world{border:1px solid var(--color-border);border-radius:12px;overflow:hidden;background:var(--color-background);min-width:0}.toolbar{display:flex;gap:6px;padding:8px 10px;align-items:center;flex-wrap:wrap;background:var(--color-card);border-bottom:1px solid var(--color-border)}.toolbar button{height:32px;padding:0 12px;border-radius:6px;background:var(--color-secondary);color:var(--color-foreground);border:1px solid var(--color-input);font-size:12px}.toolbar button:hover{border-color:var(--color-primary);color:var(--color-primary)}.toolbar span{margin-left:auto;color:var(--color-muted-foreground);font:11px var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 0;text-align:right}.toolbar button{flex:none;min-width:118px}.toolbar button+button{min-width:0}canvas{width:100%;display:block;touch-action:none;cursor:grab}.legend{padding:8px 12px;color:var(--color-muted-foreground);font:10px var(--font-mono);border-top:1px solid var(--color-border);background:var(--color-card)}
 </style>
