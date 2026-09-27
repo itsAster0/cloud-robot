@@ -22,17 +22,17 @@
       <span>Your robot was destroyed. It respawns at a safe spot in {Math.ceil(you.respawnIn / tickRate)}s and keeps its score.</span>
     </div>
   {/if}
-  <ol class="m-0 grid max-h-80 gap-1 overflow-auto p-0">
-    <li class="grid grid-cols-[2rem_minmax(0,1fr)_3rem_3rem_4rem] items-center gap-2 px-2 text-[11px] tracking-wide text-muted-foreground uppercase"><span>#</span><span>Robot</span><span class="text-right">K</span><span class="text-right">D</span><span class="text-right">Dmg</span></li>
+  <ol class="m-0 grid max-h-[55vh] gap-1 overflow-auto p-0">
+    <li class="grid grid-cols-[1.5rem_minmax(0,1fr)_2.25rem_2.25rem_3rem] items-center gap-2 px-2 text-[11px] tracking-wide text-muted-foreground uppercase"><span>#</span><span>Robot</span><span class="text-right">K</span><span class="text-right">D</span><span class="text-right">Dmg</span></li>
     {#each ranked as robot, i (robot.robotId)}
       <li class="list-none">
         <button type="button" onclick={() => onselect?.(robot.robotId)}
-          class="m-0 grid w-full cursor-pointer grid-cols-[2rem_minmax(0,1fr)_3rem_3rem_4rem] items-center gap-2 rounded-lg border-0 px-2 py-1.5 text-left text-sm text-foreground {robot.robotId === youId ? 'bg-accent ring-1 ring-primary' : 'bg-transparent hover:bg-muted'}">
+          class="m-0 grid w-full cursor-pointer grid-cols-[1.5rem_minmax(0,1fr)_2.25rem_2.25rem_3rem] items-center gap-2 rounded-lg border-0 px-2 py-1.5 text-left text-sm text-foreground {robot.robotId === youId ? 'bg-accent ring-1 ring-primary' : 'bg-transparent hover:bg-muted'}">
           <span class="font-mono text-xs text-muted-foreground">{i + 1}</span>
           <span class="flex min-w-0 items-center gap-2">
             <i class="size-2.5 shrink-0 rounded-full" style:background={teamColor(robot.team)}></i>
-            <span class="truncate" class:opacity-50={!robot.alive}>{robot.name}</span>
-            {#if robot.robotId === youId}<span class="rounded bg-primary px-1 text-[10px] font-semibold text-primary-foreground">YOU</span>{:else if robot.bot}<span class="text-[10px] text-muted-foreground">bot</span>{/if}
+            <span class="truncate" class:opacity-50={!robot.alive} title={robot.bot ? `${robot.name} (server bot)` : robot.name}>{robot.name}</span>
+            {#if robot.robotId === youId}<span class="rounded bg-primary px-1 text-[10px] font-semibold text-primary-foreground">YOU</span>{/if}
             {#if !robot.alive && robot.respawnIn != null}<span class="font-mono text-[10px] text-muted-foreground">↻ {Math.ceil(robot.respawnIn / tickRate)}s</span>{/if}
           </span>
           <span class="text-right font-mono font-semibold">{robot.kills ?? 0}</span>

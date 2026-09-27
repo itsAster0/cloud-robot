@@ -107,6 +107,9 @@
     return () => clearInterval(timer);
   });
   let welcome = $state('');
+  // Theater layout: while a match is on screen the map gets the page width
+  // and robot details move to a sidebar, like a video page.
+  let watching = $derived(!!match && panel !== 'code' && panel !== 'build' && (!!snapshot || match.status === 'running' || match.status === 'finished'));
   // Map thing the viewer clicked (loot, terrain, hazard, site); robots win.
   let picked = $state<Picked | null>(null);
   let confirmLeave = $state(false);
@@ -268,7 +271,7 @@
 </script>
 <svelte:window onbeforeunload={beforeUnload}/>
 <section class="v2">
-  <header class="workspace-header">
+  <header class="workspace-header" hidden={watching}>
     <div><p class="eyebrow">ROBOT WORKSPACE <span>/ ARENA V2</span></p><h1>Your code. In the arena.</h1><p class="lede">Write Lua, test a strategy, and follow every decision.</p></div>
     <div class="workspace-meta"><span class="runtime-badge"><i class:ready={box?.status === 'running'}></i>{!signedIn ? 'Guest workspace' : boxLoading ? 'Checking runtime' : box?.status === 'running' ? 'Runtime online' : 'Runtime setup needed'}</span><a href="#/docs/sdk">SDK reference ↗</a></div>
   </header>
@@ -286,7 +289,7 @@
   {#if signedIn && !boxLoading && (!box || box.status !== 'running')}
     <div class="setup-note"><div><strong>Your robot box is starting</strong><p>It is created automatically when you sign in and usually takes a few seconds. You can also play straight away from the Play page.</p></div><a class="button-link" href="#/box">Set up runtime →</a><button class="quiet" onclick={refreshBox} disabled={boxLoading}>Refresh</button></div>
   {/if}
-  <div class="workspace-v2" class:editing={panel === 'code'}>
+  <div class="workspace-v2" class:editing={panel === 'code'} class:watching>
     <aside aria-label={panel === 'code' ? 'Code editor' : 'Workspace controls'}>
       <div hidden={panel !== 'code'}>
         {#if confirmReload}<div class="notice caution"><div><strong>Replace your unsaved draft?</strong><p>Reload reads the file from your runtime. Your browser changes will be discarded.</p><div class="actions"><button onclick={readSource} disabled={busy}>Discard draft and reload</button><button class="quiet" onclick={() => confirmReload = false}>Keep editing</button></div></div></div>{/if}
@@ -390,12 +393,19 @@
           {#if match.status === 'finished'}<div class="result-heading"><div><p class="eyebrow">MATCH COMPLETE</p><h2>{match.winnerTeam ? `${match.winnerTeam} wins` : 'Final results'}</h2></div><button onclick={() => showPanel('code')}>Revise your script →</button></div>{/if}
           {#if replayEnd > 0}<div class="replay"><label>Replay <strong>{(replayTick / (snapshot?.tickRate ?? 20)).toFixed(1)}s / {(replayEnd / (snapshot?.tickRate ?? 20)).toFixed(1)}s</strong><input aria-label="Replay tick" type="range" min="0" max={replayEnd} step="10" bind:value={replayTick} onchange={seekReplay}/></label><button onclick={inspectTrace} disabled={busy || !signedIn}>Inspect my decision at this tick</button>{#if trace}<pre>{trace}</pre>{/if}</div>{/if}
           {#if snapshot || match.status === 'running' || match.status === 'finished'}
-            <div class="world-split"><div class="world-main">{#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} {picked} onselect={id => { selected = id; picked = null; }} onpick={thing => { picked = thing; selected = ''; }}/>{/key}</div><aside class="world-side" aria-label="Robot inspector">{#if picked && !selected}<ThingInspector {picked} sites={snapshot?.sites ?? matchPreview?.sites ?? []} onclose={() => picked = null}/>{:else}<RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/>{/if}</aside></div>
-            {#if match.status !== 'finished'}<div class="view-controls"><label class="check"><input type="checkbox" bind:checked={privateView} disabled={!signedIn || !registered} onchange={() => snapshot = null}/>My robot's live view</label><span>{connectionStatus} · {privateView ? 'Robot observations' : 'Public view delayed 5s'}</span></div>{/if}
-            {#if match.status === 'running' && !snapshot}<p class="hint loading-snapshot">Waiting for a snapshot. Public spectating starts after five seconds of simulation.</p>{/if}
-            {#if match.mode === 'arena'}<ArenaScoreboard robots={overview.length ? overview : snapshot?.robots ?? []} youId={myRobotId} endTick={snapshot?.endTick ?? 0} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} onselect={id => selected = id}/>{/if}
-            <MatchOverview {snapshot} roster={privateView || replayEnd > 0 ? [] : overview} youId={privateView ? selected : ''}/>
-            <VirtualRoster robots={privateView || replayEnd > 0 ? snapshot?.robots ?? [] : overview} {selected} youId={privateView ? selected : ''} onselect={id => selected = id}/>
+            <div class="world-split">
+              <div class="world-main">
+                {#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} {picked} onselect={id => { selected = id; picked = null; }} onpick={thing => { picked = thing; selected = ''; }}/>{/key}
+                {#if match.status !== 'finished'}<div class="view-controls"><label class="check"><input type="checkbox" bind:checked={privateView} disabled={!signedIn || !registered} onchange={() => snapshot = null}/>My robot's live view</label><span>{connectionStatus} · {privateView ? 'Robot observations' : 'Public view delayed 5s'}</span></div>{/if}
+                {#if match.status === 'running' && !snapshot}<p class="hint loading-snapshot">Waiting for a snapshot. Public spectating starts after five seconds of simulation.</p>{/if}
+                <MatchOverview {snapshot} roster={privateView || replayEnd > 0 ? [] : overview} youId={privateView ? selected : ''}/>
+              </div>
+              <aside class="world-side" aria-label="Robot details">
+                {#if picked && !selected}<ThingInspector {picked} sites={snapshot?.sites ?? matchPreview?.sites ?? []} onclose={() => picked = null}/>{:else}<RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/>{/if}
+                {#if match.mode === 'arena'}<ArenaScoreboard robots={overview.length ? overview : snapshot?.robots ?? []} youId={myRobotId} endTick={snapshot?.endTick ?? 0} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} onselect={id => selected = id}/>{/if}
+                <VirtualRoster robots={privateView || replayEnd > 0 ? snapshot?.robots ?? [] : overview} {selected} youId={privateView ? selected : ''} onselect={id => selected = id}/>
+              </aside>
+            </div>
           {/if}
         {/if}
       </section>
@@ -420,7 +430,15 @@
   @keyframes welcome-in { from { opacity:0; transform:translateY(-6px); } }
   @media (max-width:560px) { .v2 .setup-wrap { padding:12px 0; } .v2 .world-split { padding:0 0 12px; } }
   .v2 .world-split { display:grid; gap:16px; padding:0 22px 16px; grid-template-columns:minmax(0,1fr); }
-  @media (min-width:1280px) { .v2 .world-split { grid-template-columns:minmax(0,1fr) 320px; align-items:start; } }
+  .v2 .world-main, .v2 .world-side { display:grid; gap:14px; align-content:start; min-width:0; }
+  .v2 .workspace-v2.watching { grid-template-columns:minmax(0,1fr); }
+  .v2 .workspace-v2.watching > aside { display:none; }
+  .v2 .workspace-v2.watching .matchbar { padding:10px 20px; }
+  .v2 .workspace-v2.watching .matchbar .eyebrow { display:none; }
+  .v2 .workspace-v2.watching .matchbar > div { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .v2 .workspace-v2.watching .match-id { margin:0; border:0; padding:0; background:none; }
+  .v2 .workspace-v2.watching .arena-join { padding:10px 20px; align-items:center; }
+  @media (min-width:1024px) { .v2 .world-split { grid-template-columns:minmax(0,1fr) 380px; align-items:start; } .v2 .world-side { position:sticky; top:12px; max-height:calc(100vh - 24px); overflow:auto; overscroll-behavior:contain; } }
   .v2 { --v2-bg:#0d141d; --v2-panel:#111c27; --v2-border:#263544; --v2-text:#e0e8ef; --v2-muted:#91a2b3; --v2-accent:#73dfc7; color:var(--v2-text); max-width:1640px; padding:32px clamp(18px,3vw,44px) 52px; margin:auto; }
   .v2 .workspace-header { display:flex; justify-content:space-between; align-items:center; gap:24px; margin-bottom:27px; }
   .v2 .eyebrow { font:500 10px/1.5 'DM Mono',monospace; letter-spacing:.13em; color:var(--v2-muted); margin:0 0 8px; }
