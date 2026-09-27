@@ -108,7 +108,7 @@
     window.addEventListener('keyup', up);
     let frame = 0, frames = 0, measured = performance.now(), active = true;
     let lastFrame=0; const intervals:number[]=[];
-    const resize = new ResizeObserver(([e]) => { width = Math.max(300, e.contentRect.width); height = Math.min(680, Math.max(420, width * .6)); });
+    const resize = new ResizeObserver(([e]) => { width = Math.max(300, e.contentRect.width); height = Math.round(Math.max(320, Math.min(width * 0.5625, innerHeight - 170))); });
     resize.observe(canvas.parentElement!);
     const draw = (now: number) => {
       if (!active) return;
