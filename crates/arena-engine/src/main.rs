@@ -71,10 +71,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         body.get("withdrawals").cloned().unwrap_or(json!([])),
                     )
                     .map_err(|e| e.to_string())?;
-                    arena
-                        .as_mut()
-                        .ok_or("match not started")?
-                        .step(actions, &withdrawals)?;
+                    // Arena joins ride inside the step input so replays and
+                    // traces reproduce them exactly.
+                    let joins: Vec<Registration> =
+                        serde_json::from_value(body.get("joins").cloned().unwrap_or(json!([])))
+                            .map_err(|e| e.to_string())?;
+                    arena.as_mut().ok_or("match not started")?.step_joining(
+                        actions,
+                        &withdrawals,
+                        joins,
+                    )?;
                 }
                 "previewEdit" => {
                     return arena
@@ -87,6 +93,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .as_mut()
                         .ok_or("match not started")?
                         .apply_edit(&serde_json::from_value(body).map_err(|e| e.to_string())?)?;
+                }
+                "join" => {
+                    arena
+                        .as_mut()
+                        .ok_or("match not started")?
+                        .join(serde_json::from_value(body).map_err(|e| e.to_string())?)?;
                 }
                 "checkpoint" => {
                     return Ok(

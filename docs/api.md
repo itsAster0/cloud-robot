@@ -231,3 +231,18 @@ Send the token as `X-Admin-Session` to:
   containers and their recent output through the provisioner.
 
 `GET /api/me/box/logs` (player sign-in) returns the caller's own box output.
+
+## Persistent arena
+
+`GET /api/v4/arena` (public) returns `{ "match": Match, "players": n }` for the
+running or queued system arena (`mode: "arena"`, `ownerId: "system:arena"`), or
+404 while a new session is being created.
+
+Join with the normal `POST /api/matches/{id}/robots` while the arena is
+`running`; the robot enters at the next tick. `POST /api/me/box/release`
+withdraws it and frees the box immediately. Arena snapshots add `mode`,
+`endTick`, and per-robot `deaths` and `respawnIn` (ticks, or null).
+
+Limits: the arena holds one match worker slot for its whole session. The
+join queue is in memory; a server restart fails the running session and a
+new one starts within about 10 seconds.

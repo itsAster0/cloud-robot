@@ -79,7 +79,8 @@ impl Config {
             .map_or(self.capacity, |b| (humans + b).min(self.capacity))
     }
     pub fn validate(&self) -> Result<(), String> {
-        if !["br-solo", "br-squad", "sandbox", "quick-duel"].contains(&self.mode.as_str()) {
+        if !["br-solo", "br-squad", "sandbox", "quick-duel", "arena"].contains(&self.mode.as_str())
+        {
             return Err("unknown v4 mode".into());
         }
         if self.match_id.is_empty() || self.match_id.len() > 128 {
@@ -95,8 +96,10 @@ impl Config {
         if self.capacity == 0 || self.capacity > MAX_ROBOTS || self.robots.len() > self.capacity {
             return Err("capacity must be 1..256".into());
         }
-        if !(10..=2700).contains(&self.duration_seconds) {
-            return Err("duration must be 10..2700 seconds".into());
+        // Arena sessions run for hours and roll over; other modes are bounded.
+        let max_duration = if self.mode == "arena" { 21600 } else { 2700 };
+        if !(10..=max_duration).contains(&self.duration_seconds) {
+            return Err("duration out of range for this mode".into());
         }
         if self.site_count > 256 {
             return Err("site count must be 0..256".into());
@@ -307,6 +310,14 @@ pub struct Robot {
     pub last_action: String,
     pub last_damage_tick: Option<u32>,
     pub transit_channel: Option<(String, u32)>,
+    /// Arena mode: times destroyed, tick of the next respawn, and whether
+    /// the player left (no respawn; removed from the roster).
+    #[serde(default)]
+    pub deaths: u32,
+    #[serde(default)]
+    pub respawn_at: Option<u32>,
+    #[serde(default)]
+    pub left: bool,
 }
 impl Robot {
     pub fn has(&self, m: &str) -> bool {

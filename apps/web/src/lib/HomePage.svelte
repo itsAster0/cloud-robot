@@ -2,10 +2,18 @@
   import { onMount } from 'svelte';
   import { loadTerrain, paintChunk, roadsFor } from './terrain';
   import { drawRobot, loadRobotSprites } from './robotSprites';
+  import { api } from './api';
   import type { ArenaObstacle, WorldSite } from './types';
 
   let { signedIn, onSignIn }: { signedIn: boolean; onSignIn?: () => void } = $props();
   let canvas: HTMLCanvasElement | undefined = $state();
+  let arena = $state<{ id: string; players: number } | null>(null);
+  $effect(() => {
+    const load = () => api.getArena().then(a => arena = a.match.status === 'running' ? { id: a.match.matchId, players: a.players } : null).catch(() => arena = null);
+    void load();
+    const timer = setInterval(load, 15000);
+    return () => clearInterval(timer);
+  });
 
   // A small decorative scene built from the real map textures and tank
   // sprites. It is not a simulation; tanks follow fixed loops.
@@ -114,6 +122,12 @@
         {/if}
         <a class="inline-flex h-12 items-center rounded-xl border border-border px-5 text-sm text-foreground no-underline hover:border-primary/60" href="#/matches">Watch matches</a>
       </div>
+      {#if arena}
+        <a class="arena-live flex w-fit items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-sm text-foreground no-underline hover:border-primary/60" href={`#/v2/${arena.id}`}>
+          <span class="live-dot size-2.5 rounded-full bg-primary" aria-hidden="true"></span>
+          <span><strong>The Arena is live</strong> · {arena.players} {arena.players === 1 ? 'player' : 'players'} and bots fighting now. Watch or drop in →</span>
+        </a>
+      {/if}
     </div>
     <div class="arena-frame rounded-2xl border border-border bg-card p-2">
       <canvas bind:this={canvas} class="block aspect-[16/9] w-full rounded-xl" aria-label="Animated preview of tanks battling in a textured arena"></canvas>
@@ -137,6 +151,8 @@
   .cta { transition: transform .15s ease, filter .15s ease; box-shadow: 0 10px 40px -12px var(--color-primary); }
   .cta:hover { transform: translateY(-1px) scale(1.02); filter: brightness(1.08); }
   .step { animation: rise .6s ease both; }
+  .live-dot { box-shadow: 0 0 0 0 var(--color-primary); animation: ping 1.6s ease-out infinite; }
+  @keyframes ping { to { box-shadow: 0 0 0 8px transparent; } }
   @keyframes rise { from { opacity: 0; transform: translateY(12px); } }
-  @media (prefers-reduced-motion: reduce) { .step { animation: none; } .cta:hover { transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .step, .live-dot { animation: none; } .cta:hover { transform: none; } }
 </style>

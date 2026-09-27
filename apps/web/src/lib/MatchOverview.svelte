@@ -30,8 +30,11 @@
       {/if}
     </div>
     <div class="card">
-      <span>Zone · {elapsedLabel(snapshot.tick, snapshot.tickRate ?? 20)}</span>
-      {#if zone}
+      <span>{snapshot.mode === 'arena' ? 'Session' : 'Zone'} · {elapsedLabel(snapshot.tick, snapshot.tickRate ?? 20)}</span>
+      {#if snapshot.mode === 'arena'}
+        <strong>Open arena</strong>
+        <small>No zone · robots respawn</small>
+      {:else if zone}
         <strong>{zone.active ? `Stage ${zone.stage || 1}` : 'Stable'}</strong>
         <small>{zone.active ? `◉ ${Math.round(zone.radius)}u · ${zone.damage}/s` : 'Collapse pending'}</small>
       {:else}
@@ -42,7 +45,7 @@
       <span>{you ? 'Your robot' : 'Tracked'}</span>
       {#if you}
         <strong>{you.name}</strong>
-        <small>{you.alive ? `${Math.round(you.hp)}/${you.maxHp ?? 100} HP · 🛡 ${Math.round(you.shield ?? 0)} · ⚡${Math.round(you.energy ?? 0)} · ${weaponGlyph(you.weapon)}` : 'Destroyed · spectating'}</small>
+        <small>{you.alive ? `${Math.round(you.hp)}/${you.maxHp ?? 100} HP · 🛡 ${Math.round(you.shield ?? 0)} · ⚡${Math.round(you.energy ?? 0)} · ${weaponGlyph(you.weapon)}` : snapshot.mode === 'arena' && you.respawnIn != null ? `Respawning in ${Math.ceil(you.respawnIn / (snapshot.tickRate ?? 20))}s` : 'Destroyed · spectating'}</small>
       {:else}
         <strong>—</strong><small>Select a robot below</small>
       {/if}

@@ -277,6 +277,11 @@ impl World {
             world.reindex();
             build_districts(&mut world, c, cols, cover_per_site);
         }
+        // Arena mode never closes: no zone phases at all.
+        if c.mode == "arena" {
+            world.reindex();
+            return world;
+        }
         let r0 = c.width.hypot(c.height) / 2.;
         for (i, (start, end, factor)) in [
             (180., 360., 0.62),

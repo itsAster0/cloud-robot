@@ -7,6 +7,7 @@
   import VirtualRoster from './VirtualRoster.svelte';
   import MapPreview, { type MapPreviewData } from './MapPreview.svelte';
   import MatchOverview from './MatchOverview.svelte';
+  import ArenaScoreboard from './ArenaScoreboard.svelte';
   import MatchSetup from './MatchSetup.svelte';
   import LoadoutBuilder from './LoadoutBuilder.svelte';
   import RobotInspector from './RobotInspector.svelte';
@@ -157,7 +158,7 @@
     if (!match) return;
     try { await navigator.clipboard.writeText(`${location.origin}/#/v2/${match.matchId}`); copiedLink = true; setTimeout(() => copiedLink = false, 2000); } catch { message = `Share this link: ${location.origin}/#/v2/${match.matchId}`; }
   }
-  const title = (id: string) => ({ 'br-solo': 'Solo battle royale', 'br-squad': 'Squad battle royale', 'quick-duel': 'Quick duel', sandbox: 'Sandbox' }[id] ?? id.replace(/_/g, ' '));
+  const title = (id: string) => ({ 'br-solo': 'Solo battle royale', 'br-squad': 'Squad battle royale', 'quick-duel': 'Quick duel', sandbox: 'Sandbox', arena: 'The Arena' }[id] ?? id.replace(/_/g, ' '));
   async function task(fn: () => Promise<void>) { busy = true; error = ''; message = ''; try { await fn(); } catch (e) { error = e instanceof Error ? e.message : String(e); } finally { busy = false; } }
   function loadout(): Loadout { return { chassis, weapon, modules: [...modules], utilities: [...utilities] }; }
   function modeDefaults() {
@@ -212,7 +213,7 @@
   async function loadFinal() { if (match) {snapshot = await request<Snapshot>(`/api/v4/matches/${match.matchId}/final`);replayEnd=snapshot.tick;replayTick=snapshot.tick;} }
  async function seekReplay(){if(!match)return;const sequence=++seekSequence;const page=Math.floor(replayTick/100);try{const result=await request<{frames:Snapshot[]}>(`/api/v4/matches/${match.matchId}/replay?page=${page}`);if(sequence!==seekSequence)return;if(!result.frames.length)throw new Error('No replay frames are available for this tick.');const nearest=result.frames.reduce((best,frame)=>Math.abs(frame.tick-replayTick)<Math.abs(best.tick-replayTick)?frame:best,result.frames[0]);const withLayout=result.frames.filter(frame=>frame.obstacles&&frame.tick<=nearest.tick);const layout=withLayout[withLayout.length-1]??result.frames[0];snapshot={obstacles:layout.obstacles,hazards:layout.hazards,transit:layout.transit,sites:layout.sites,...nearest};}catch(e){error=e instanceof Error?e.message:String(e);}}
  async function inspectTrace(){await task(async()=>{if(!match)return;trace=JSON.stringify(await request(`/api/v4/matches/${match.matchId}/trace?tick=${replayTick}`),null,2);});}
-  async function register() { await task(async () => { if (!match) return; if (dirty) throw new Error('Save your browser changes before registering. Matches run the saved workspace file.'); const before = new Set(match.robots.map(r => r.robotId)); const response = await request<{ match: Match }>(`/api/matches/${match.matchId}/robots`, { method: 'POST', body: JSON.stringify({ displayName: name, team: squad, runtime: 'lua5.4', startCommand: 'lua main.lua', sdkVersion: '0.4.0', loadout: loadout() }) }); match = response.match; registeredId = match.robots.find(r => !before.has(r.robotId))?.robotId ?? ''; await refreshBox(); message = 'Script and build registered. Start once all human agents are connected.'; }); }
+  async function register() { await task(async () => { if (!match) return; if (dirty) throw new Error('Save your browser changes before registering. Matches run the saved workspace file.'); const before = new Set(match.robots.map(r => r.robotId)); const response = await request<{ match: Match }>(`/api/matches/${match.matchId}/robots`, { method: 'POST', body: JSON.stringify({ displayName: name, team: squad, runtime: 'lua5.4', startCommand: 'lua main.lua', sdkVersion: '0.4.0', loadout: loadout() }) }); match = response.match; registeredId = match.robots.find(r => !before.has(r.robotId))?.robotId ?? ''; await refreshBox(); message = match.mode === 'arena' ? 'You are in. Your robot drops into the arena as soon as its program connects.' : 'Script and build registered. Start once all human agents are connected.'; }); }
   async function start() { await task(async () => { if (match) match = await api.startMatch(match.matchId); }); }
   async function control(command: string) { await task(async () => { if (!match) return; const result = await request<{ paused: boolean }>(`/api/v4/matches/${match.matchId}/control`, { method: 'POST', body: JSON.stringify({ command }) }); paused = result.paused; }); }
   async function readSource() { if (dirty && !confirmReload) { confirmReload = true; return; } confirmReload = false; await task(async () => { const result = await request<{ source: string; revision: string }>('/api/v4/me/script'); source = result.source; savedSource = result.source; revision = result.revision; editorLoaded = true; syntaxResult = null; }); }
@@ -360,6 +361,16 @@
             </div>
             {#if matchPreview}<MapPreview preview={matchPreview}/>{/if}
           {:else if match.status === 'queued'}<p class="notice" role="status">Your match is queued. The simulation will appear when the worker starts it.</p>{/if}
+          {#if match.mode === 'arena' && match.status === 'running' && !registered}
+            <div class="arena-join">
+              <div><strong>The Arena is live.</strong> <span class="hint">Drop in any time, respawn when destroyed, leave whenever you like. Your robot runs your saved main.lua with your saved build.</span></div>
+              {#if signedIn}
+                <label class="arena-name">Robot name<input bind:value={name} maxlength="32"/></label>
+                <button class="primary" onclick={register} disabled={busy || !canRegister}>{busy ? 'Joining…' : 'Join the Arena ▶'}</button>
+                {#if box?.status !== 'running'}<span class="hint">Your robot box is starting…</span>{/if}
+              {:else}<span class="hint">Sign in to play. Anyone can watch.</span>{/if}
+            </div>
+          {/if}
           {#if myRobotId && (match.status === 'lobby' || match.status === 'queued' || match.status === 'running')}
             <div class="leave-bar">
               <span><i class="status-dot live"></i>You are playing as <strong>{match.robots.find(r => r.robotId === myRobotId)?.displayName ?? 'your robot'}</strong></span>
@@ -378,6 +389,7 @@
             <div class="world-split"><div class="world-main">{#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} onselect={id => selected = id}/>{/key}</div><aside class="world-side" aria-label="Robot inspector"><RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/></aside></div>
             {#if match.status !== 'finished'}<div class="view-controls"><label class="check"><input type="checkbox" bind:checked={privateView} disabled={!signedIn || !registered} onchange={() => snapshot = null}/>My robot's live view</label><span>{connectionStatus} · {privateView ? 'Robot observations' : 'Public view delayed 5s'}</span></div>{/if}
             {#if match.status === 'running' && !snapshot}<p class="hint loading-snapshot">Waiting for a snapshot. Public spectating starts after five seconds of simulation.</p>{/if}
+            {#if match.mode === 'arena'}<ArenaScoreboard robots={overview.length ? overview : snapshot?.robots ?? []} youId={myRobotId} endTick={snapshot?.endTick ?? 0} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} onselect={id => selected = id}/>{/if}
             <MatchOverview {snapshot} roster={privateView || replayEnd > 0 ? [] : overview} youId={privateView ? selected : ''}/>
             <VirtualRoster robots={privateView || replayEnd > 0 ? snapshot?.robots ?? [] : overview} {selected} youId={privateView ? selected : ''} onselect={id => selected = id}/>
           {/if}
@@ -390,6 +402,9 @@
 </section>
 <style>
   .v2 .setup-wrap { padding:20px 22px; }
+  .v2 .arena-join { display:flex; flex-wrap:wrap; align-items:end; gap:12px; padding:14px 20px; border-bottom:1px solid var(--v2-border); background:color-mix(in srgb, var(--color-primary) 8%, transparent); }
+  .v2 .arena-join > div { flex:1 1 280px; }
+  .v2 .arena-name { display:grid; gap:4px; font-size:12px; }
   .v2 .leave-bar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:12px 20px; border-bottom:1px solid var(--v2-border); font-size:13px; }
   .v2 .leave-bar > span:first-child { display:flex; align-items:center; gap:8px; margin-right:auto; }
   .v2 .leave-confirm { color:#f2a49b; font-size:12px; }
