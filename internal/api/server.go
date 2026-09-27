@@ -376,12 +376,11 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 	userID := robotauth.UserID(r.Context())
 	boxID := boxes.IDForUser(userID)
 	box, err := s.boxes.Status(r.Context(), boxID)
+	// An SSH key only grants shell access; the agent runs from the box
+	// supervisor, and code can be edited in the browser, so registration
+	// needs a running box but no key.
 	if err != nil || box.Status != "running" {
-		writeError(w, http.StatusConflict, "provision a running SSH box before registering a robot")
-		return
-	}
-	if box.KeyFingerprint == "" {
-		writeError(w, http.StatusConflict, "add an SSH public key before registering a robot")
+		writeError(w, http.StatusConflict, "your robot box is still starting; try again in a few seconds")
 		return
 	}
 	// The supervisor copy of the markers (agent.json) never clears on its

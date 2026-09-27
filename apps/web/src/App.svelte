@@ -6,6 +6,8 @@
   import BoxConsole from './lib/BoxConsole.svelte';
   import PortalPage from './lib/PortalPage.svelte';
   import AdminPage from './lib/AdminPage.svelte';
+  import HomePage from './lib/HomePage.svelte';
+  import QuickPlay from './lib/QuickPlay.svelte';
   import { parseRoute, type Route } from './lib/router';
   import { api, setTokenProvider } from './lib/api';
   import { accessToken, authConfigured, clearRedirectCallback, initializeAuth, redirectCallbackPending, signIn, signOut } from './lib/auth';
@@ -16,11 +18,11 @@
 
   let view = $state<Route>(routeFromLocation());
   let menuOpen = $state(false);
-  let workspaceRoute = $derived(view.name === 'home' || view.name === 'workspace' || view.name === 'v2');
+  let workspaceRoute = $derived(view.name === 'workspace' || view.name === 'v2');
   let workspacePanel = $derived(view.panel ?? (view.name === 'v2' && view.parameter ? 'match' : 'code'));
   let matchesActive = $derived((workspaceRoute && (workspacePanel === 'match' || workspacePanel === 'results')) || ['matches', 'spectate', 'match', 'match-detail'].includes(view.name));
   let docsActive = $derived(view.name === 'sdk' || view.name === 'api-docs');
-  let pageTitle = $derived(matchesActive ? 'Matches' : docsActive ? 'Documentation' : view.name === 'box' ? 'SSH & runtime' : view.name === 'admin' ? 'Admin console' : workspaceRoute ? 'Workspace' : 'Robot Arena');
+  let pageTitle = $derived(matchesActive ? 'Matches' : docsActive ? 'Documentation' : view.name === 'box' ? 'SSH & runtime' : view.name === 'admin' ? 'Admin console' : view.name === 'play' ? 'Play' : view.name === 'home' ? 'Program a robot, watch it fight' : workspaceRoute ? 'My robot' : 'Robot Arena');
   let team = $state<Team>('red');
   let displayName = $state('Ada');
   let startCommand = $state('lua main.lua');
@@ -546,9 +548,10 @@
 <div class="shell">
   <a class="skip-link" href="#main-content" onclick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>Skip to content</a>
   <header class="topbar">
-    <a class="brand" href="#/workspace" aria-label="Robot Arena workspace"><span class="brand-mark" aria-hidden="true">&gt;_</span><span><strong>Robot Arena</strong><small>Code. Run. Compete.</small></span></a>
+    <a class="brand" href="#/" aria-label="Robot Arena home"><span class="brand-mark" aria-hidden="true">&gt;_</span><span><strong>Robot Arena</strong><small>Code. Run. Compete.</small></span></a>
     <nav class="main-nav" aria-label="Primary">
-      <a class:active={workspaceRoute && !matchesActive} aria-current={workspaceRoute && !matchesActive ? 'page' : undefined} href="#/workspace">Workspace</a>
+      <a class:active={view.name === 'play'} aria-current={view.name === 'play' ? 'page' : undefined} href="#/play">Play</a>
+      <a class:active={workspaceRoute && !matchesActive} aria-current={workspaceRoute && !matchesActive ? 'page' : undefined} href="#/workspace">My robot</a>
       <a class:active={matchesActive} aria-current={matchesActive ? 'page' : undefined} href="#/workspace/matches">Matches</a>
       <a class:active={docsActive} aria-current={docsActive ? 'page' : undefined} href="#/docs/sdk">Docs</a>
     </nav>
@@ -577,6 +580,10 @@
   <main id="main-content" tabindex="-1">
   {#if !authReady && (workspaceRoute || view.name === 'box' || view.name === 'settings')}
     <div class="grid min-h-[50vh] place-items-center text-sm text-muted-foreground" role="status"><span class="flex items-center gap-2"><span class="size-2 animate-pulse rounded-full bg-primary"></span>Restoring your session…</span></div>
+  {:else if view.name === 'home'}
+    <HomePage signedIn={!!user} onSignIn={handleSignIn}/>
+  {:else if view.name === 'play'}
+    {#if !authReady}<div class="grid min-h-[50vh] place-items-center text-sm text-muted-foreground" role="status">Restoring your session…</div>{:else}<QuickPlay signedIn={!!user} onSignIn={handleSignIn}/>{/if}
   {:else if workspaceRoute}
  <ArenaV2 signedIn={!!user} matchId={view.parameter ?? ''} initialPanel={workspacePanel} onSignIn={handleSignIn}/>
  {:else if view.name === 'box'}

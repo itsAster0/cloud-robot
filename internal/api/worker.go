@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kryxen/cloud-robot/internal/engine"
@@ -39,26 +42,47 @@ func (s *Server) RecoverMatches(ctx context.Context) {
 	}
 }
 
+// RunWorker pulls match jobs and runs up to MATCH_WORKERS matches at once
+// (default 4), each v4 match in its own Rust worker process. A redelivered
+// job for a match that is already running finds it no longer queued and is
+// acknowledged without running twice.
 func (s *Server) RunWorker(ctx context.Context) {
+	limit := 4
+	if value, err := strconv.Atoi(os.Getenv("MATCH_WORKERS")); err == nil && value > 0 && value <= 64 {
+		limit = value
+	}
+	slots := make(chan struct{}, limit)
+	var running sync.WaitGroup
+	defer running.Wait()
 	for ctx.Err() == nil {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 		job, ok, err := s.store.ReceiveJob(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
+		if err != nil || !ok {
+			<-slots
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				slog.Error("receive match job", "error", err)
+				time.Sleep(time.Second)
 			}
-			slog.Error("receive match job", "error", err)
-			time.Sleep(time.Second)
 			continue
 		}
-		if !ok {
-			continue
-		}
-		if err := s.runMatch(ctx, job.MatchID); err != nil {
-			slog.Error("run match", "matchId", job.MatchID, "error", err)
-		}
-		if err := s.store.DeleteJob(ctx, job.ReceiptHandle); err != nil {
-			slog.Error("delete match job", "error", err)
-		}
+		running.Add(1)
+		go func() {
+			defer running.Done()
+			defer func() { <-slots }()
+			if err := s.runMatch(ctx, job.MatchID); err != nil {
+				slog.Error("run match", "matchId", job.MatchID, "error", err)
+			}
+			if err := s.store.DeleteJob(ctx, job.ReceiptHandle); err != nil {
+				slog.Error("delete match job", "error", err)
+			}
+		}()
 	}
 }
 
