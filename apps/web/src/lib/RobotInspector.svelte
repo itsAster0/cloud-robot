@@ -62,7 +62,7 @@
           <div class="rounded-lg bg-muted/60 p-2"><dt class="text-[10px] text-muted-foreground uppercase">Deaths</dt><dd class="m-0 font-mono text-lg">{robot.deaths ?? 0}</dd></div>
         </dl>
         {#if robot.bounty}<p class="m-0 rounded-lg border border-[#ffc85780] bg-[#2a1f06] p-2 text-xs">Bounty <strong>${robot.bounty}</strong>: whoever destroys this robot earns it.</p>{/if}
-        {#if robot.protected}<p class="m-0 text-xs text-muted-foreground">Spawn protection active: ignores damage until it fires or 2 s pass.</p>{/if}
+        {#if robot.protected}<p class="m-0 text-xs text-muted-foreground">Spawn protection active: ignores damage until it fires or 3 s pass.</p>{/if}
       {/if}
       <dl class="m-0 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
         <dt class="text-muted-foreground">Weapon</dt><dd class="m-0 text-right capitalize">{weaponGlyph(robot.weapon)} {label(robot.weapon ?? 'unknown')}</dd>

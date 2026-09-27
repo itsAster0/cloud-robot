@@ -312,3 +312,13 @@ travelling 1,500-2,800 units and firing.
   capacity; joins displace bots only while at the target.
 - Tests: drift overlap, bounds, movement, never finishing, growth past the
   bot target, capacity limit. Live: 128 robots at 20.2 ticks/s.
+
+## Reinforcement waves and safe spawns (2026-09-27)
+
+- Missing arena bots return in a wave every 1800 ticks (`reinforcements`
+  event with the count), not the moment a slot opens.
+- Spawn protection is 60 ticks (3 s) for starting robots, joiners,
+  respawns, and reinforcements; firing ends it early.
+- Arrivals go to the zone site farthest from living robots and to a point
+  at least 400 units from any living robot, falling back to any clear point
+  when crowded.
