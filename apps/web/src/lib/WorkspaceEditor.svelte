@@ -223,13 +223,6 @@
   .code-layer textarea { position: relative; background: transparent; color: transparent; -webkit-text-fill-color: transparent; }
   .code-layer textarea::selection { background: rgba(115, 223, 199, .28); -webkit-text-fill-color: transparent; }
   .code-layer textarea[readonly] { color: transparent; }
-  .highlight :global(.tok-keyword) { color: #c792ea; }
-  .highlight :global(.tok-string) { color: #c3e88d; }
-  .highlight :global(.tok-number) { color: #f78c6c; }
-  .highlight :global(.tok-comment) { color: #5f7389; font-style: italic; }
-  .highlight :global(.tok-arena) { color: #73dfc7; }
-  .highlight :global(.tok-call) { color: #82aaff; }
-  .highlight :global(.tok-builtin) { color: #ffcb6b; }
   .line-numbers pre, .highlight, textarea { font-family: var(--font-mono, 'SFMono-Regular', Consolas, monospace); font-size: 12px; line-height: 22px; font-variant-ligatures: none; tab-size: 2; }
   textarea { display: block; flex: 1; min-width: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 20px 18px; margin: 0; background: #0a121f; border: none; border-radius: 0; resize: none; color: #cbd9e9; outline-offset: -3px; caret-color: #83e0ce; }
   textarea::placeholder { color: #667b93; }

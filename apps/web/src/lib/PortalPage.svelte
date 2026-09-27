@@ -33,7 +33,7 @@
     localStorage.setItem('arena-notifications', String(notifications));
   }
   function requireUser(action: () => void) { if (user) action(); else onSignIn(); }
-  let title = $derived(route.name === 'profile' ? `${route.parameter ?? 'Player'} profile` : route.name.replace('-', ' '));
+  let title = $derived(route.name === 'profile' ? `${route.parameter ?? 'Player'} profile` : route.name === 'sdk' || route.name === 'api-docs' ? 'documentation' : route.name.replace('-', ' '));
   let visibleMatches = $derived(matches.filter((entry) =>
     (filter === 'all' || entry.status === filter) &&
     `${entry.matchId} ${matchModeLabel(entry.mode)} ${(entry.robots ?? []).map(robot => robot.displayName).join(' ')}`.toLowerCase().includes(search.trim().toLowerCase())
