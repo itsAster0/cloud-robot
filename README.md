@@ -101,10 +101,15 @@ Players see their own box output on **More → SSH & runtime**.
   bot count), quick duel, and sandbox with pause and single-tick stepping.
   Lobbies have invite links. Players can leave any match to free their box.
   All matches are unranked.
-- **World:** deterministic from the seed. Sites with four district themes
-  (urban, industrial, forest, desert) fill with rooms, container yards, groves,
-  rock formations, and sandbag outposts, joined by roads. Hazards, transit
-  links, loot, and a four-phase closing zone round it out.
+- **World:** deterministic from the seed. Seeded climate noise (temperature,
+  moisture, development, elevation) picks each site's biome, so biomes form
+  regions: urban rooms, industrial container yards, forest groves, desert
+  rock and sandbag outposts with burning heat vents, snowfields with pine
+  stands, ice boulders, and slowing drifts, and swamps with ponds, dead trees,
+  reeds, and bogs. Between sites, high ground raises mountain ridges with a
+  pass and wet ground forms lakes; water blocks movement but not shots or
+  sight. Roads, hazards, transit links, loot, and a four-phase closing zone
+  (none in the Arena) round it out.
 - **Robots:** three chassis, nine weapons with heat and cooldown, modules,
   utilities, consumables, equipment swaps, and a 60-point build budget.
 - **Server bots** patrol, loot, investigate gunfire, hunt scan contacts, and

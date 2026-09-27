@@ -103,7 +103,7 @@ impl World {
                 kind: kinds[i % 6].into(),
                 x,
                 y,
-                biome: biome_for(c.seed, i % cols, i / cols, count).into(),
+                biome: biome_at(c.seed, x, y, c.width.max(c.height) / cols as f64).into(),
             });
             // Two slotted rings: 4 inner slots at 90 deg, 8 outer slots at
             // 45 deg offset by half a step. Fixed slots with capped segment
@@ -199,6 +199,7 @@ impl World {
                 });
             }
         }
+        ensure_variety(&mut world.sites, c.seed);
         // Wild scatter fills the open ground between sites so the map reads
         // dense everywhere, not just at anchors. Small open pieces only:
         // pillars, short walls, and blocks with gaps bots stroll through.
@@ -216,6 +217,38 @@ impl World {
                 let cy = (ay + by) / 2. + jy;
                 let rot = (rng.next_u64() % 360) as f64 * std::f64::consts::PI / 180.;
                 let (rsin, rcos) = rot.sin_cos();
+                // Landforms follow the climate: high ground grows a mountain
+                // ridge, wet low ground a lake. Both stay well clear of sites
+                // so spawns, loot, and transit pads remain open.
+                let spacing = c.width.max(c.height) / cols as f64;
+                let clear_of_sites = world
+                    .sites
+                    .iter()
+                    .all(|s| distance(s.x, s.y, cx, cy) > 650.);
+                let high = climate(c.seed, 4, cx, cy, spacing) > 0.6;
+                let wet = climate(c.seed, 2, cx, cy, spacing) > 0.56;
+                if clear_of_sites && (high || wet) {
+                    let pieces = if high {
+                        ridge(cx, cy, rot, rng.next_u64())
+                    } else {
+                        lake(cx, cy, &mut rng)
+                    };
+                    for (j, (x, y, w, h, mat)) in pieces.into_iter().enumerate() {
+                        if x < 40. || y < 40. || x + w > c.width - 40. || y + h > c.height - 40. {
+                            continue;
+                        }
+                        world.obstacles.push(Obstacle {
+                            id: format!("land-{i}-{j}"),
+                            shape: "aabb".into(),
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                            material: mat.into(),
+                        });
+                    }
+                    continue;
+                }
                 // Five spread pieces per gap: rock pillar, glass pane,
                 // hedgerow, block, and rubble — 200+ units apart.
                 let pieces = [
@@ -271,6 +304,39 @@ impl World {
                 width: w,
                 height: h,
                 damage_per_second: if slow { 0. } else { 4. },
+            });
+        }
+        // Biome ground effects: swamps bog down, snowdrifts slow, and desert
+        // heat vents burn. One patch per site, off its core and streets.
+        for i in 0..count {
+            let (sx, sy, biome) = {
+                let s = &world.sites[i];
+                (s.x, s.y, s.biome.clone())
+            };
+            let kind = match biome.as_str() {
+                "swamp" | "snow" => "slow",
+                "desert" => "slag",
+                _ => continue,
+            };
+            let (cw, ch) = (c.width / cols as f64, c.height / cols as f64);
+            let q = rng.next_u64() % 4;
+            let px = sx + if q.is_multiple_of(2) { -1. } else { 1. } * cw * 0.3;
+            let py = sy + if q < 2 { -1. } else { 1. } * ch * 0.3;
+            let (w, h) = (
+                240. + (rng.next_u64() % 120) as f64,
+                180. + (rng.next_u64() % 80) as f64,
+            );
+            if distance(px, py, sx, sy) < 420. {
+                continue;
+            }
+            world.hazards.push(Hazard {
+                id: format!("biome-{i}"),
+                kind: kind.into(),
+                x: (px - w / 2.).clamp(20., (c.width - 20. - w).max(20.)),
+                y: (py - h / 2.).clamp(20., (c.height - 20. - h).max(20.)),
+                width: w,
+                height: h,
+                damage_per_second: if kind == "slag" { 3. } else { 0. },
             });
         }
         if cover_per_site > 0 {
@@ -381,22 +447,141 @@ impl World {
         }
         Some((x, y))
     }
+    /// Like `wall_hit`, for shots and sight: water blocks movement only.
+    pub fn shot_hit(&self, x: f64, y: f64, nx: f64, ny: f64, r: f64) -> Option<f64> {
+        self.grid
+            .query(
+                x.min(nx) - r,
+                y.min(ny) - r,
+                (nx - x).abs() + r * 2.,
+                (ny - y).abs() + r * 2.,
+            )
+            .into_iter()
+            .filter(|&i| self.obstacles[i].material != "water")
+            .filter_map(|i| segment_box(x, y, nx, ny, &self.obstacles[i], r))
+            .min_by(f64::total_cmp)
+    }
     pub fn los(&self, x: f64, y: f64, nx: f64, ny: f64) -> bool {
-        self.wall_hit(x, y, nx, ny, 0.).is_none()
+        self.shot_hit(x, y, nx, ny, 0.).is_none()
     }
 }
-pub const BIOMES: [&str; 4] = ["urban", "industrial", "forest", "desert"];
-/// Small maps give each site its own theme. Large maps share one theme per
-/// 2x2 block of sites so districts read as regions, not a patchwork.
-fn biome_for(seed: u64, col: usize, row: usize, count: usize) -> &'static str {
-    if count <= 16 {
-        return BIOMES[(col + row * 2 + (seed % 4) as usize) % 4];
+pub const BIOMES: [&str; 6] = ["urban", "industrial", "forest", "desert", "snow", "swamp"];
+/// Seeded value noise in [0, 1]: hashed lattice corners blended with
+/// smoothstep, so nearby points get similar values.
+fn value_noise(seed: u64, x: f64, y: f64) -> f64 {
+    let (x0, y0) = (x.floor(), y.floor());
+    let (fx, fy) = (x - x0, y - y0);
+    let corner = |dx: f64, dy: f64| {
+        let (ix, iy) = ((x0 + dx) as i64 as u64, (y0 + dy) as i64 as u64);
+        (mix(seed ^ mix(ix.wrapping_mul(0x1F1F_1F1F) ^ iy.rotate_left(32))) >> 11) as f64
+            / (1u64 << 53) as f64
+    };
+    let smooth = |t: f64| t * t * (3. - 2. * t);
+    let (sx, sy) = (smooth(fx), smooth(fy));
+    let top = corner(0., 0.) + (corner(1., 0.) - corner(0., 0.)) * sx;
+    let bottom = corner(0., 1.) + (corner(1., 1.) - corner(0., 1.)) * sx;
+    top + (bottom - top) * sy
+}
+/// One climate channel (1 temperature, 2 moisture, 3 development,
+/// 4 elevation) at a world point: two octaves over a lattice about two site
+/// spacings wide, so biomes form regions spanning several sites.
+pub fn climate(seed: u64, channel: u64, x: f64, y: f64, spacing: f64) -> f64 {
+    let s = mix(seed ^ channel.wrapping_mul(0xA24B_AED4_963E_E407));
+    let scale = spacing.max(600.) * 2.2;
+    let (u, v) = (x / scale, y / scale);
+    0.68 * value_noise(s, u, v) + 0.32 * value_noise(s ^ 1, u * 2.3 + 17., v * 2.3 + 5.)
+}
+/// Minecraft-style biome choice from temperature and moisture; development
+/// splits the temperate dry band into city and industry.
+pub fn biome_at(seed: u64, x: f64, y: f64, spacing: f64) -> &'static str {
+    let t = climate(seed, 1, x, y, spacing);
+    let m = climate(seed, 2, x, y, spacing);
+    if t < 0.36 {
+        "snow"
+    } else if t > 0.6 && m < 0.5 {
+        "desert"
+    } else if m > 0.62 {
+        "swamp"
+    } else if m > 0.52 {
+        "forest"
+    } else if climate(seed, 3, x, y, spacing) > 0.5 {
+        "urban"
+    } else {
+        "industrial"
     }
-    // Diagonal pattern keeps neighbouring blocks distinct and every theme
-    // present; a seeded nudge on some blocks breaks the regularity.
-    let (bx, by) = (col / 2, row / 2);
-    let nudge = usize::from(mix(seed ^ mix((bx * 31 + by) as u64)).is_multiple_of(5));
-    BIOMES[(bx + by * 2 + nudge + (mix(seed) % 4) as usize) % 4]
+}
+/// Small maps can land inside one climate region; recolour the latest sites
+/// of the commonest biome so at least min(sites, 4) themes appear.
+fn ensure_variety(sites: &mut [Site], seed: u64) {
+    let want = sites.len().min(4);
+    let mut order = BIOMES;
+    let mut rng = Rng(mix(seed ^ 0xB10E) | 1);
+    for n in (1..order.len()).rev() {
+        order.swap(n, (rng.next_u64() % (n as u64 + 1)) as usize);
+    }
+    loop {
+        let mut counts: Vec<(&str, usize)> = vec![];
+        for s in sites.iter() {
+            match counts.iter_mut().find(|(b, _)| *b == s.biome) {
+                Some(entry) => entry.1 += 1,
+                None => counts.push((BIOMES.iter().find(|b| **b == s.biome).unwrap(), 1)),
+            }
+        }
+        if counts.len() >= want {
+            return;
+        }
+        let common = counts.iter().max_by_key(|(_, n)| *n).unwrap().0;
+        let missing = order
+            .iter()
+            .find(|b| !counts.iter().any(|(c, _)| c == *b))
+            .unwrap();
+        let last = sites.iter().rposition(|s| s.biome == common).unwrap();
+        sites[last].biome = (*missing).into();
+    }
+}
+/// Mountain ridge: a rotated line of cliff blocks with one seeded pass.
+fn ridge(cx: f64, cy: f64, rot: f64, roll: u64) -> Vec<Piece> {
+    let (sin, cos) = rot.sin_cos();
+    let pass = (roll % 5) as i32 - 2;
+    (-3..=3)
+        .filter(|n| *n != pass)
+        .map(|n| {
+            let along = n as f64 * 270.;
+            let size = 170. + ((roll >> (n + 8)) % 60) as f64;
+            let (x, y) = (cx + cos * along, cy + sin * along);
+            (
+                (x - size / 2.).round(),
+                (y - size * 0.4).round(),
+                size.round(),
+                (size * 0.8).round(),
+                "cliff",
+            )
+        })
+        .collect()
+}
+/// Lake: overlapping water rectangles that read as one rounded body.
+fn lake(cx: f64, cy: f64, rng: &mut Rng) -> Vec<Piece> {
+    let r = 170. + (rng.next_u64() % 130) as f64;
+    let (a, b) = (
+        0.55 + (rng.next_u64() % 30) as f64 / 100.,
+        0.55 + (rng.next_u64() % 30) as f64 / 100.,
+    );
+    [
+        (0., 0., 2. * r, 2. * r * a),
+        (0., 0., 2. * r * b, 2. * r),
+        (r * 0.7, r * 0.5, r * 1.1, r * 1.1),
+    ]
+    .iter()
+    .map(|(dx, dy, w, h)| {
+        (
+            (cx + dx - w / 2.).round(),
+            (cy + dy - h / 2.).round(),
+            w.round(),
+            h.round(),
+            "water",
+        )
+    })
+    .collect()
 }
 /// SplitMix64 finalizer: decorrelates nearby inputs.
 fn mix(mut z: u64) -> u64 {
@@ -667,6 +852,73 @@ fn structure(biome: &str, cx: f64, cy: f64, k: f64, rng: &mut Rng) -> Vec<Piece>
                     80. * k,
                     "tree",
                 ),
+            ]
+        }
+        "snow" if roll < 60 => {
+            // Pine stand on a loose lattice, like a forest grove.
+            let step = 180. * k.max(0.8);
+            let mut out = vec![];
+            for n in 0..9 {
+                if rng.next_u64() % 9 < 3 {
+                    continue;
+                }
+                let s = r(rng, 60., 26);
+                let (gx, gy) = ((n % 3) as f64 - 1., (n / 3) as f64 - 1.);
+                out.push((
+                    cx + gx * step - s / 2.,
+                    cy + gy * step - s / 2.,
+                    s,
+                    s,
+                    "pine",
+                ));
+            }
+            out
+        }
+        "snow" => {
+            let mut out = vec![];
+            for (dx, dy) in [(-0.8, -0.5), (0.9, 0.2), (-0.1, 1.)] {
+                let s = r(rng, 70., 50);
+                out.push((
+                    cx + dx * 150. * k - s / 2.,
+                    cy + dy * 150. * k - s / 2.,
+                    s,
+                    s * 0.75,
+                    "ice",
+                ));
+            }
+            out
+        }
+        "swamp" if roll < 40 => {
+            // Pond: two crossed water slabs that read as one pool.
+            let (a, b) = (r(rng, 200., 80), r(rng, 120., 40));
+            vec![
+                (cx - a / 2., cy - b / 2., a, b, "water"),
+                (cx - b / 2., cy - a / 2., b, a, "water"),
+            ]
+        }
+        "swamp" if roll < 75 => {
+            let step = 200. * k.max(0.8);
+            [(-1., -1.), (1., -0.6), (-0.4, 1.), (0.9, 0.9)]
+                .iter()
+                .take(3 + (rng.next_u64() % 2) as usize)
+                .map(|(dx, dy)| {
+                    let s = r(rng, 56., 24);
+                    (
+                        cx + dx * step / 2. - s / 2.,
+                        cy + dy * step / 2. - s / 2.,
+                        s,
+                        s,
+                        "deadtree",
+                    )
+                })
+                .collect()
+        }
+        "swamp" => {
+            let len = r(rng, 180., 80);
+            let t = 34. * k.max(0.7);
+            vec![
+                (cx - len / 2., cy - 80. * k, len, t, "reeds"),
+                (cx - len / 2. + 60. * k, cy + 60. * k, len * 0.8, t, "reeds"),
             ]
         }
         "desert" if roll < 50 => {

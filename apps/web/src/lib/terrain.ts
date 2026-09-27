@@ -17,6 +17,13 @@ const GROUND: Record<string, TileName[]> = {
   industrial: ['asphalt', 'stone_c', 'dirt_b'],
   forest: ['grass_a', 'grass_b', 'dirt_a'],
   desert: ['sand_a', 'sand_b', 'dirt_b'],
+  snow: ['stone_a', 'stone_b', 'sand_a'],
+  swamp: ['grass_c', 'dirt_a', 'grass_b'],
+};
+// Biomes without their own atlas tiles are washed over a base tile.
+const GROUND_TINT: Record<string, string> = {
+  snow: 'rgba(236,244,252,.78)',
+  swamp: 'rgba(52,62,26,.5)',
 };
 const VARIANT_RATE = 0.12;
 // World units per ground texture cell.
@@ -98,13 +105,18 @@ export function paintChunk(
     p.setTransform(new DOMMatrix().translateSelf(-ox, -oy).scaleSelf(scale * GROUND_CELL / 64));
     return p;
   };
+  const snowCells: [number, number][] = [];
   for (let gx = 0; gx < size; gx += GROUND_CELL) {
     for (let gy = 0; gy < size; gy += GROUND_CELL) {
       const wx = ox + gx, wy = oy + gy;
-      const options = GROUND[biomeAt(sites, wx + GROUND_CELL / 2, wy + GROUND_CELL / 2)];
+      const biome = biomeAt(sites, wx + GROUND_CELL / 2, wy + GROUND_CELL / 2);
+      const options = GROUND[biome];
       const roll = hash2(wx / GROUND_CELL, wy / GROUND_CELL, 11);
       const name = roll < VARIANT_RATE ? options[1 + Math.floor((roll / VARIANT_RATE) * (options.length - 1))] : options[0];
       c.drawImage(sprite(name)!, gx, gy, GROUND_CELL + 0.5, GROUND_CELL + 0.5);
+      const tint = GROUND_TINT[biome];
+      if (tint) { c.fillStyle = tint; c.fillRect(gx, gy, GROUND_CELL + 0.5, GROUND_CELL + 0.5); }
+      if (biome === 'snow') snowCells.push([gx, gy]);
     }
   }
   const inChunk = (x: number, y: number, w: number, h: number, pad = 0) =>
@@ -128,16 +140,35 @@ export function paintChunk(
   }
   for (const site of sites) {
     if (!inChunk(site.x - 280, site.y - 280, 560, 560)) continue;
-    c.fillStyle = pattern(site.biome === 'forest' ? 'dirt_a' : site.biome === 'desert' ? 'dirt_b' : 'plaza');
+    c.fillStyle = pattern(site.biome === 'forest' || site.biome === 'swamp' ? 'dirt_a' : site.biome === 'desert' ? 'dirt_b' : 'plaza');
     c.beginPath(); c.arc(site.x - ox, site.y - oy, 260, 0, Math.PI * 2); c.fill();
+    if (site.biome === 'snow') { c.fillStyle = 'rgba(230,240,250,.45)'; c.fill(); }
     c.strokeStyle = 'rgba(20,30,26,.55)'; c.lineWidth = 10; c.stroke();
   }
   // Tone the bright tile palette down so robots, shots, and HUD stay legible.
   c.fillStyle = 'rgba(6,14,12,.38)'; c.fillRect(0, 0, size, size);
+  // Snowfields stay bright after the tone-down so the biome reads as snow.
+  c.fillStyle = 'rgba(214,228,240,.42)';
+  for (const [gx, gy] of snowCells) c.fillRect(gx, gy, GROUND_CELL + 0.5, GROUND_CELL + 0.5);
   for (const h of hazards) {
     if (!inChunk(h.x, h.y, h.width, h.height)) continue;
     const x = h.x - ox, y = h.y - oy;
-    if (h.kind === 'slow') {
+    const ground = biomeAt(sites, h.x + h.width / 2, h.y + h.height / 2);
+    if (h.kind === 'slow' && ground === 'snow') {
+      // Snowdrift: soft white mound with wind streaks.
+      const drift = c.createRadialGradient(x + h.width / 2, y + h.height / 2, 8, x + h.width / 2, y + h.height / 2, Math.max(h.width, h.height) / 1.7);
+      drift.addColorStop(0, '#ffffff'); drift.addColorStop(0.7, '#dfe9f3'); drift.addColorStop(1, 'rgba(210,225,240,.2)');
+      c.fillStyle = drift; c.beginPath(); c.roundRect(x, y, h.width, h.height, Math.min(h.width, h.height) / 2); c.fill();
+      c.strokeStyle = 'rgba(150,175,200,.6)'; c.lineWidth = 3;
+      for (let n = 1; n < 4; n++) { c.beginPath(); c.moveTo(x + h.width * 0.15, y + h.height * n / 4); c.quadraticCurveTo(x + h.width / 2, y + h.height * n / 4 - 14, x + h.width * 0.85, y + h.height * n / 4); c.stroke(); }
+    } else if (h.kind === 'slow' && ground === 'swamp') {
+      // Bog: murky water with lily pads.
+      c.fillStyle = '#34401c'; c.beginPath(); c.roundRect(x, y, h.width, h.height, 40); c.fill();
+      c.globalAlpha = 0.45; c.fillStyle = pattern('water'); c.fill(); c.globalAlpha = 1;
+      c.fillStyle = '#5f8a2e';
+      for (let n = 0; n < 7; n++) { c.beginPath(); c.arc(x + hash2(n, h.x, 51) * h.width, y + hash2(h.y, n, 53) * h.height, 9 + n % 3 * 3, 0.4, Math.PI * 2); c.fill(); }
+      c.strokeStyle = '#6b7a35'; c.lineWidth = 4; c.setLineDash([14, 10]); c.strokeRect(x, y, h.width, h.height); c.setLineDash([]);
+    } else if (h.kind === 'slow') {
       c.globalAlpha = 0.75; c.fillStyle = pattern('water'); c.fillRect(x, y, h.width, h.height); c.globalAlpha = 1;
       c.strokeStyle = '#7fc4ec'; c.lineWidth = 4; c.setLineDash([18, 12]); c.strokeRect(x, y, h.width, h.height); c.setLineDash([]);
     } else {
@@ -147,12 +178,25 @@ export function paintChunk(
       c.strokeStyle = '#ffb25a'; c.lineWidth = 4; c.setLineDash([10, 10]); c.strokeRect(x, y, h.width, h.height); c.setLineDash([]);
     }
   }
+  // Lakes and ponds are overlapping slabs: shore first, then water, so the
+  // slabs merge into one rounded body without seams.
+  const water = obstacles.filter(o => o.material === 'water');
+  if (water.length) {
+    c.fillStyle = '#8c7a4e';
+    for (const o of water) { const w = o.width ?? 0, h = o.height ?? 0; c.beginPath(); c.roundRect(o.x - ox - 12, o.y - oy - 12, w + 24, h + 24, Math.min(w, h) / 2 + 12); c.fill(); }
+    c.fillStyle = '#1d5a7a';
+    for (const o of water) { const w = o.width ?? 0, h = o.height ?? 0; c.beginPath(); c.roundRect(o.x - ox, o.y - oy, w, h, Math.min(w, h) / 2); c.fill(); }
+    c.globalAlpha = 0.55; c.fillStyle = pattern('water');
+    for (const o of water) { const w = o.width ?? 0, h = o.height ?? 0; c.beginPath(); c.roundRect(o.x - ox, o.y - oy, w, h, Math.min(w, h) / 2); c.fill(); }
+    c.globalAlpha = 1;
+  }
   c.fillStyle = 'rgba(0,0,0,.38)';
   for (const o of obstacles) {
     const w = o.width ?? 0, h = o.height ?? 0;
+    if (o.material === 'water') continue;
     // Sprites get round shadows; a rectangle would show around their edges.
-    if (o.material === 'tree' || o.material === 'rock' || o.material === 'barrel') {
-      const r = o.material === 'tree' ? 0.62 : 0.5;
+    if (['tree', 'rock', 'barrel', 'pine', 'deadtree', 'ice', 'cliff'].includes(o.material ?? '')) {
+      const r = o.material === 'tree' || o.material === 'pine' ? 0.62 : 0.5;
       c.beginPath(); c.ellipse(o.x - ox + w / 2 + 8, o.y - oy + h / 2 + 10, w * r, h * r, 0, 0, Math.PI * 2); c.fill();
     } else if (o.material !== 'glass') c.fillRect(o.x - ox + 8, o.y - oy + 10, w, h);
   }
@@ -160,6 +204,46 @@ export function paintChunk(
     const w = o.width ?? 0, h = o.height ?? 0, x = o.x - ox, y = o.y - oy;
     const pick = hash2(Math.round(o.x), Math.round(o.y), 17);
     switch (o.material) {
+      case 'water': break;
+      case 'pine': {
+        // Tree sprite, darkened to conifer green, with a snow cap.
+        const s = w * 1.25;
+        c.drawImage(sprite('tree')!, x + w / 2 - s / 2, y + h / 2 - s / 2, s, s);
+        c.fillStyle = 'rgba(10,40,30,.35)'; c.beginPath(); c.arc(x + w / 2, y + h / 2, s * 0.42, 0, Math.PI * 2); c.fill();
+        c.fillStyle = 'rgba(245,250,255,.85)';
+        for (let n = 0; n < 5; n++) { c.beginPath(); c.arc(x + w / 2 + (hash2(n, o.x, 61) - 0.5) * s * 0.5, y + h / 2 + (hash2(o.y, n, 63) - 0.5) * s * 0.5, s * 0.07, 0, Math.PI * 2); c.fill(); }
+        break;
+      }
+      case 'deadtree': {
+        const cx = x + w / 2, cy = y + h / 2;
+        c.strokeStyle = '#4a3a26'; c.lineCap = 'round';
+        for (let n = 0; n < 5; n++) {
+          const a = pick * 6 + n * 1.3;
+          c.lineWidth = 7 - n; c.beginPath(); c.moveTo(cx, cy); c.lineTo(cx + Math.cos(a) * w * 0.6, cy + Math.sin(a) * h * 0.6); c.stroke();
+        }
+        c.fillStyle = '#3a2d1c'; c.beginPath(); c.arc(cx, cy, w * 0.18, 0, Math.PI * 2); c.fill();
+        c.lineCap = 'butt';
+        break;
+      }
+      case 'ice': {
+        c.fillStyle = '#bfe3f2'; c.beginPath(); c.roundRect(x, y, w, h, 10); c.fill();
+        c.fillStyle = 'rgba(255,255,255,.7)'; c.beginPath(); c.moveTo(x + 8, y + 8); c.lineTo(x + w * 0.6, y + 8); c.lineTo(x + 8, y + h * 0.6); c.fill();
+        c.strokeStyle = '#7fb6cf'; c.lineWidth = 3; c.stroke(); c.beginPath(); c.roundRect(x, y, w, h, 10); c.stroke();
+        break;
+      }
+      case 'cliff': {
+        c.fillStyle = pattern('stone_c', 0.5); c.beginPath(); c.roundRect(x, y, w, h, Math.min(w, h) * 0.3); c.fill();
+        c.fillStyle = 'rgba(40,34,28,.45)'; c.fill();
+        c.fillStyle = 'rgba(255,255,255,.12)'; c.beginPath(); c.roundRect(x + 6, y + 6, w * 0.55, h * 0.4, 12); c.fill();
+        c.strokeStyle = '#2a241c'; c.lineWidth = 4; c.beginPath(); c.roundRect(x, y, w, h, Math.min(w, h) * 0.3); c.stroke();
+        break;
+      }
+      case 'reeds': {
+        c.fillStyle = 'rgba(70,90,30,.55)'; c.fillRect(x, y, w, h);
+        c.strokeStyle = '#9aa84a'; c.lineWidth = 2;
+        for (let d = 4; d < w; d += 9) { c.beginPath(); c.moveTo(x + d, y + h); c.lineTo(x + d + 4, y); c.stroke(); }
+        break;
+      }
       case 'tree': {
         const s = w * 1.3;
         c.drawImage(sprite(pick < 0.2 ? 'tree_autumn' : 'tree')!, x + w / 2 - s / 2, y + h / 2 - s / 2, s, s);

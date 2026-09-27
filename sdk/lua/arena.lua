@@ -169,6 +169,22 @@ function arena.line_of_sight(x1, y1, x2, y2, obstacles)
   return true
 end
 
+-- Like line_of_sight, for shots and vision: water blocks movement but
+-- bullets and sight pass over it. Use line_of_sight for paths.
+function arena.line_of_fire(x1, y1, x2, y2, obstacles)
+  obstacles = obstacles or (latest_observation and latest_observation.obstacles) or {}
+  local length = math.sqrt((x2 - x1) ^ 2 + (y2 - y1) ^ 2)
+  local pieces = math.max(1, math.ceil(length / INDEX_CELL))
+  for n = 0, pieces - 1 do
+    local ax, ay = x1 + (x2 - x1) * n / pieces, y1 + (y2 - y1) * n / pieces
+    local bx, by = x1 + (x2 - x1) * (n + 1) / pieces, y1 + (y2 - y1) * (n + 1) / pieces
+    if each_candidate(obstacles, ax, ay, bx, by, function(o) return o.material ~= "water" and segment_blocked_by(x1, y1, x2, y2, o) end) then
+      return false
+    end
+  end
+  return true
+end
+
 -- Distance along `heading` (degrees) to the first obstacle, capped at
 -- max_distance. Returns the distance and the obstacle hit, if any.
 function arena.raycast(x, y, heading, max_distance, obstacles)
@@ -405,7 +421,7 @@ end
 function arena.can_see(observation, robot)
   if not robot or not observation.self or observation.self.x == nil then return false end
   return arena.in_vision(observation, robot.x, robot.y)
-    and arena.line_of_sight(observation.self.x, observation.self.y, robot.x, robot.y, observation.obstacles)
+    and arena.line_of_fire(observation.self.x, observation.self.y, robot.x, robot.y, observation.obstacles)
 end
 
 function arena.visible_enemies(observation)
@@ -878,7 +894,7 @@ function arena.find_cover(obs, threat, opts)
       local inside = (not obs.arenaWidth or (spot.x > 20 and spot.x < obs.arenaWidth - 20))
         and (not obs.arenaHeight or (spot.y > 20 and spot.y < obs.arenaHeight - 20))
       if inside and not point_blocked(spot.x, spot.y, obstacles, 18)
-        and not arena.line_of_sight(threat.x, threat.y, spot.x, spot.y, obstacles) then
+        and not arena.line_of_fire(threat.x, threat.y, spot.x, spot.y, obstacles) then
         local d = arena.distance(self, spot)
         if not best_distance or d < best_distance then best, best_distance, best_obstacle = spot, d, o end
       end
@@ -934,7 +950,7 @@ function arena.best_target(obs, opts)
   for _, robot in ipairs(obs.robots or {}) do
     if robot.alive ~= false and robot.team ~= self.team then
       local d = arena.distance(self, robot)
-      if d <= range and arena.line_of_sight(self.x, self.y, robot.x, robot.y, obs.obstacles) then
+      if d <= range and arena.line_of_fire(self.x, self.y, robot.x, robot.y, obs.obstacles) then
         local score = d + (robot.hp or 100) * hp_weight
         if not best_score or score < best_score or (score == best_score and robot.robotId < best.robotId) then
           best, best_score = robot, score
@@ -999,7 +1015,7 @@ function arena.engage(obs, enemy, memory, options)
   -- weapon's projectile speed; railguns are hitscan.
   local lead = arena.aim_predict(self, enemy, arena.PROJECTILE_SPEED[weapon and weapon.kind or "plasma"] or 0, enemy.vx, enemy.vy)
   local aim = arena.bearing(self, lead)
-  local fire = arena.weapon_ready(obs) ~= false and arena.line_of_sight(self.x, self.y, enemy.x, enemy.y, obs.obstacles)
+  local fire = arena.weapon_ready(obs) ~= false and arena.line_of_fire(self.x, self.y, enemy.x, enemy.y, obs.obstacles)
   memory.orbit = memory.orbit or 1
   memory.flip_at = memory.flip_at or (obs.tick + 60)
   if obs.tick >= memory.flip_at then memory.orbit, memory.flip_at = -memory.orbit, obs.tick + 60 + (obs.tick % 40) end

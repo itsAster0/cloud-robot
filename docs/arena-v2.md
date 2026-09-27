@@ -249,3 +249,19 @@ travelling 1,500-2,800 units and firing.
 - Known issue worked around: a job enqueued during the worker's first Floci
   receive after startup stayed invisible for 120 seconds, so the first arena
   is created 10 seconds after start.
+
+## Climate biomes (2026-09-27)
+
+- `world::climate` is two-octave seeded value noise per channel over a
+  lattice about two site spacings wide; `biome_at` maps temperature and
+  moisture to snow, desert, swamp, forest, and development to urban or
+  industrial. Maps with few sites are recoloured to show at least four themes.
+- Landforms replace the scatter between two sites when that point is high
+  (ridge of `cliff` blocks with one pass) or wet (lake of overlapping `water`
+  slabs), and only when 650+ units from every site.
+- Per-site ground effects: bog and snowdrift (`slow`) in swamps and snow,
+  heat vents (`slag`, 3 dps) in deserts.
+- `World::shot_hit` ignores water; projectiles, railgun, and vision use it.
+- The district byte-stability pin changed to `7ac4a5ee7e2f0b9a` with this
+  layout change. Tests cover landforms, ground effects, small-map variety,
+  and water collision.

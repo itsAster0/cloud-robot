@@ -142,3 +142,12 @@ seconds and actions are ignored; it then respawns at full health somewhere
 away from enemies and observations continue. `obs.self.deaths` counts lives
 lost and `obs.self.respawnAt` is the tick it returns (compare with `obs.tick`). Kills and
 damage carry over between lives.
+
+## Water and line of fire
+
+Obstacles with `material = "water"` (lakes, ponds) block movement but not
+shots or sight. `arena.line_of_sight` treats water as blocking, which is right
+for paths; `arena.line_of_fire(x1, y1, x2, y2, obstacles)` ignores water and is
+what `can_see`, `best_target`, `find_cover`, and `engage` use for shooting.
+Other materials added with biomes: `cliff`, `pine`, `ice`, `deadtree`, and
+`reeds`; all block movement and shots like walls.
