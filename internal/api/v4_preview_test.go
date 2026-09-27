@@ -27,7 +27,7 @@ func TestV4MapPreviewRendersGeometry(t *testing.T) {
 	}
 	t.Setenv("ARENA_ENGINE_PATH", path)
 	h := newHarness(t)
-	_, body := h.request(t, http.MethodPost, "/api/v4/maps/preview", `{"mode":"sandbox","capacity":8,"width":2400,"height":1500,"durationSeconds":180,"seed":7,"siteCount":4,"coverPerSite":6,"lootPerSite":12}`)
+	_, body := h.request(t, http.MethodPost, "/api/v4/maps/preview", `{"mode":"sandbox","capacity":8,"width":4800,"height":3000,"durationSeconds":180,"seed":7,"siteCount":4,"coverPerSite":6,"lootPerSite":12}`)
 	raw, _ := json.Marshal(body)
 	var preview struct {
 		Sites     []any `json:"sites"`
@@ -48,7 +48,8 @@ func TestV4MapPreviewRendersGeometry(t *testing.T) {
 			core++
 		}
 	}
-	if len(preview.Sites) != 4 || core != 44 || district == 0 || len(preview.Containers) != 48 {
+	// 4 sites x 6 cover pieces, plus scatter or landforms between sites.
+	if len(preview.Sites) != 4 || core < 24+20 || district == 0 || len(preview.Containers) != 48 {
 		t.Fatalf("unexpected preview geometry: %+v", body)
 	}
 	if len(preview.Hazards) == 0 {

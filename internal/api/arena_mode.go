@@ -17,10 +17,12 @@ import (
 const arenaOwner = "system:arena"
 
 // arenaConfig is the persistent arena: free-for-all, respawns, no zone, and
-// long sessions that rotate to a fresh seed when they end. Capacity and
-// session length come from ARENA_CAPACITY and ARENA_SESSION_SECONDS.
-func arenaConfig() enginev4.Config {
+// long sessions that rotate to a fresh seed when they end. ARENA_CAPACITY is
+// the smallest session; a busy previous session (peak players) grows the next
+// one to twice its peak plus room for bots, up to 128 slots.
+func arenaConfig(peak int) enginev4.Config {
 	capacity := envInt("ARENA_CAPACITY", 24, 2, 128)
+	capacity = min(128, max(capacity, (peak*2+8+7)/8*8))
 	// Map area grows with capacity so density stays similar.
 	width := 4000 + float64(capacity)*220
 	return enginev4.Config{
@@ -63,7 +65,8 @@ func (s *Server) ensureArena(ctx context.Context) {
 	if _, ok := s.currentArena(ctx); ok {
 		return
 	}
-	c := arenaConfig()
+	c := arenaConfig(s.arenaPeak)
+	s.arenaPeak = 0
 	if err := c.Validate(); err != nil {
 		slog.Error("arena config", "error", err)
 		return

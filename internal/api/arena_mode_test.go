@@ -11,7 +11,7 @@ import (
 
 func runningArena(t *testing.T, h *harness) *v4Control {
 	t.Helper()
-	c := arenaConfig()
+	c := arenaConfig(0)
 	c.MatchID = "arena"
 	h.store.matches["arena"] = model.Match{MatchID: "arena", OwnerID: arenaOwner, Mode: "arena", EngineVersion: 4, Status: model.MatchRunning, ArenaConfig: mustJSON(c),
 		Robots: []model.RobotSubmission{{RobotID: "bot-000", Bot: true, Team: "bot-000"}}}
@@ -20,8 +20,21 @@ func runningArena(t *testing.T, h *harness) *v4Control {
 	return control
 }
 
+func TestArenaGrowsWithLastSessionPeak(t *testing.T) {
+	small, busy := arenaConfig(0), arenaConfig(30)
+	if small.Capacity != 24 || busy.Capacity != 72 || busy.Width <= small.Width {
+		t.Fatalf("want 24 then 72 slots on a wider map, got %d (%.0f) and %d (%.0f)", small.Capacity, small.Width, busy.Capacity, busy.Width)
+	}
+	if arenaConfig(500).Capacity != 128 {
+		t.Fatal("arena capacity is capped at 128")
+	}
+	if err := busy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestArenaConfigValidates(t *testing.T) {
-	c := arenaConfig()
+	c := arenaConfig(0)
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
