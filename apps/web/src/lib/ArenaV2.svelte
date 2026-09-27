@@ -92,8 +92,32 @@
   const utilityCosts: Record<string, number> = { cloak_emitter: 15, mine_dispenser: 10, smoke_projector: 10, repair_field: 15 };
   let cost = $derived((chassisCosts[chassis] ?? 0) + (weapons[weapon] ?? 0) + modules.length * 10 + utilities.reduce((n, id) => n + utilityCosts[id], 0));
   let dirty = $derived(editorLoaded && source !== savedSource);
+  // Public match data hides owners, so "mine" comes from the box binding.
+  let myRobotId = $derived(box?.activeRobotId && match?.robots.some(r => r.robotId === box?.activeRobotId) ? box.activeRobotId : '');
+  let welcome = $state('');
+  let autoSelectedFor = '';
+  $effect(() => {
+    const id = match?.matchId ?? '';
+    if (!id || !myRobotId || autoSelectedFor === id) return;
+    autoSelectedFor = id;
+    // Follow the player's own robot first; they can click others later.
+    untrack(() => { if (!selected) selected = myRobotId; });
+  });
+  $effect(() => {
+    const id = match?.matchId ?? '';
+    if (!id) return;
+    untrack(() => {
+      try {
+        if (sessionStorage.getItem('robot-arena:welcome') === id) {
+          welcome = id;
+          sessionStorage.removeItem('robot-arena:welcome');
+          setTimeout(() => document.querySelector('.world')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 600);
+        }
+      } catch { /* no storage: skip the welcome */ }
+    });
+  });
   let registered = $derived(!!box && !!match?.robots.some(robot => robot.ownerBoxId === box?.boxId || robot.robotId === box?.activeRobotId));
-  let canRegister = $derived(signedIn && box?.status === 'running' && !!box.keyFingerprint && !dirty && cost <= 60);
+  let canRegister = $derived(signedIn && box?.status === 'running' && !dirty && cost <= 60);
   let inspected = $derived(selected ? snapshot?.robots.find(r => r.robotId === selected) ?? overview.find(r => r.robotId === selected) : undefined);
   function closeMatch() { clearTimeout(retryTimer); const current = socket; socket = null; current?.close(); match = null; snapshot = null; overview = []; replayEnd = 0; selected = ''; matchPreview = null; idInput = ''; if (window.location.hash.startsWith('#/v2/')) window.location.hash = '#/workspace/matches'; }
   const title = (id: string) => ({ 'br-solo': 'Solo battle royale', 'br-squad': 'Squad battle royale', 'quick-duel': 'Quick duel', sandbox: 'Sandbox' }[id] ?? id.replace(/_/g, ' '));
@@ -209,10 +233,16 @@
   <nav class="workflow" aria-label="Robot workflow">
     {#each stages as stage, index}<a href={stage.href} class:active={panel === stage.id} aria-current={panel === stage.id ? 'page' : undefined}><span>{String(index + 1).padStart(2, '0')}</span>{stage.label}{#if stage.id === 'code' && dirty}<i aria-label="Unsaved changes"></i>{/if}</a>{/each}
   </nav>
+  {#if welcome && match?.matchId === welcome}
+    <div class="welcome-banner" role="status">
+      <div><strong>Your robot is in the arena!</strong><p>The camera follows it and the panel on the right shows its health and weapon. Click any other robot to inspect it. When the match ends you can replay it from Results, and open <a href="#/workspace">My robot</a> to change how it thinks.</p></div>
+      <button aria-label="Dismiss" onclick={() => welcome = ''}>×</button>
+    </div>
+  {/if}
   {#if error}<div class="notice error" role="alert"><span>{error}</span><button aria-label="Dismiss error" onclick={() => error = ''}>×</button></div>{/if}
   {#if message}<div class="notice" role="status"><span>{message}</span><button aria-label="Dismiss message" onclick={() => message = ''}>×</button></div>{/if}
-  {#if signedIn && !boxLoading && (!box || box.status !== 'running' || !box.keyFingerprint)}
-    <div class="setup-note"><div><strong>Set up your robot runtime once</strong><p>The current local runtime needs a running box and an SSH public key. After setup, you can write and save code here.</p></div><a class="button-link" href="#/box">Set up runtime →</a><button class="quiet" onclick={refreshBox} disabled={boxLoading}>Refresh</button></div>
+  {#if signedIn && !boxLoading && (!box || box.status !== 'running')}
+    <div class="setup-note"><div><strong>Your robot box is starting</strong><p>It is created automatically when you sign in and usually takes a few seconds. You can also play straight away from the Play page.</p></div><a class="button-link" href="#/box">Set up runtime →</a><button class="quiet" onclick={refreshBox} disabled={boxLoading}>Refresh</button></div>
   {/if}
   <div class="workspace-v2" class:editing={panel === 'code'}>
     <aside aria-label={panel === 'code' ? 'Code editor' : 'Workspace controls'}>
@@ -302,6 +332,11 @@
 </section>
 <style>
   .v2 .setup-wrap { padding:20px 22px; }
+  .v2 .welcome-banner { display:flex; gap:16px; align-items:flex-start; padding:16px 18px; margin-bottom:20px; border:1px solid color-mix(in srgb, var(--v2-accent) 50%, transparent); border-radius:12px; background:color-mix(in srgb, var(--v2-accent) 10%, transparent); animation:welcome-in .5s ease both; }
+  .v2 .welcome-banner strong { font-size:15px; }
+  .v2 .welcome-banner p { margin:4px 0 0; font-size:13px; color:var(--v2-muted); line-height:1.6; }
+  .v2 .welcome-banner button { margin-left:auto; background:none; border:0; color:var(--v2-muted); font-size:20px; cursor:pointer; }
+  @keyframes welcome-in { from { opacity:0; transform:translateY(-6px); } }
   @media (max-width:560px) { .v2 .setup-wrap { padding:12px 0; } .v2 .world-split { padding:0 0 12px; } }
   .v2 .world-split { display:grid; gap:16px; padding:0 22px 16px; grid-template-columns:minmax(0,1fr); }
   @media (min-width:1280px) { .v2 .world-split { grid-template-columns:minmax(0,1fr) 320px; align-items:start; } }

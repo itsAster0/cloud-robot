@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -219,13 +220,48 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 func (s *server) ensure(ctx context.Context, boxID string) (model.BoxRecord, error) {
 	if err := run(ctx, "docker", "inspect", boxID); err == nil {
 		_ = run(ctx, "docker", "start", boxID)
+		record, statusErr := s.status(ctx, boxID)
+		if statusErr == nil && s.outdated(ctx, boxID) && record.AgentStatus != "running" {
+			// Boxes built from an older image keep an old SDK and supervisor.
+			// Recreate on the current image while no robot is playing; the
+			// workspace and control volumes (code, SSH key, agent config)
+			// and the SSH port are kept.
+			log.Printf("upgrading %s to the current box image", boxID)
+			if err := run(ctx, "docker", "rm", "-f", boxID); err != nil {
+				return record, err
+			}
+			if err := s.create(ctx, boxID, record.SSHPort); err != nil {
+				return model.BoxRecord{}, err
+			}
+		}
 		return s.status(ctx, boxID)
 	}
 	port, err := s.availablePort(ctx)
 	if err != nil {
 		return model.BoxRecord{}, err
 	}
-	err = run(ctx, "docker", "run", "-d", "--name", boxID,
+	if err = s.create(ctx, boxID, port); err != nil {
+		return model.BoxRecord{}, err
+	}
+	return s.status(ctx, boxID)
+}
+
+// outdated reports whether the box container runs an older image than the
+// one the provisioner would use now.
+func (s *server) outdated(ctx context.Context, boxID string) bool {
+	running, err := output(ctx, "docker", "inspect", "--format", "{{.Image}}", boxID)
+	if err != nil {
+		return false
+	}
+	current, err := output(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", s.image)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(running) != strings.TrimSpace(current)
+}
+
+func (s *server) create(ctx context.Context, boxID string, port int) error {
+	return run(ctx, "docker", "run", "-d", "--name", boxID,
 		"--label", "robot-arena.box=true", "--label", "robot-arena.box-id="+boxID,
 		"--cpus", strconv.FormatFloat(s.limits.CPUs, 'f', -1, 64),
 		"--memory", strconv.FormatInt(s.limits.MemoryMB, 10)+"m", "--pids-limit", strconv.FormatInt(s.limits.PIDs, 10),
@@ -233,10 +269,6 @@ func (s *server) ensure(ctx context.Context, boxID string) (model.BoxRecord, err
 		"-e", "BOX_STORAGE_BYTES="+strconv.FormatInt(s.storageBytes, 10),
 		"-p", "127.0.0.1:"+strconv.Itoa(port)+":22",
 		"-v", boxID+"-workspace:/workspace", "-v", boxID+"-control:/var/lib/robot-box", s.image)
-	if err != nil {
-		return model.BoxRecord{}, err
-	}
-	return s.status(ctx, boxID)
 }
 
 func (s *server) status(ctx context.Context, boxID string) (model.BoxRecord, error) {
