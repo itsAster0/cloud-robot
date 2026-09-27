@@ -225,7 +225,7 @@
         <section class="surface controls"><p class="eyebrow">ROBOT CONFIGURATION</p><h2>Starting loadout</h2><p class="hint">Pick a chassis, weapon, modules, and utilities within the 60-point budget. The build is saved to your account and used when you register.</p><button class="full" onclick={() => showPanel('code')}>Back to your code →</button></section>
       {:else if panel === 'match' || panel === 'debug'}
         <section class="surface controls"><p class="eyebrow">{panel === 'debug' ? 'TEST ENVIRONMENT' : 'NEW MATCH'}</p><h2>{match ? 'Current arena open' : panel === 'debug' ? 'Set up a sandbox' : 'Set up a match'}</h2>
-          <p class="hint">{match ? 'Close the current arena to configure a new one.' : 'Pick a mode, size, and map on the right, then create the lobby.'}</p>
+          <p class="hint">{match ? 'Close the current arena to configure a new one.' : 'Pick a mode, size, and map in the setup panel, then create the lobby.'}</p>
           {#if match}<button class="primary full" onclick={closeMatch}>New match setup</button>{/if}
         </section>
         {#if panel === 'debug'}
@@ -252,11 +252,11 @@
         {:else if !match && (panel === 'match' || panel === 'debug')}
           <div class="setup-wrap"><MatchSetup bind:mode bind:capacity bind:size bind:duration bind:siteCount bind:coverPerSite bind:lootPerSite bind:seed bind:liveEdit {signedIn} {busy} preview={mapPreview} {previewLoading} testing={panel === 'debug'} onmodechange={modeDefaults} oncreate={create} onrandomize={randomizeSeed} {onSignIn}/></div>
         {:else if !match && panel === 'results'}
-          <div class="setup-wrap grid gap-3">
+          <div class="setup-wrap grid gap-3 grid-cols-1">
             <p class="m-0 text-sm text-muted-foreground">Pick a finished match to scrub its replay, click robots to inspect them, and check your robot's recorded decisions.</p>
-            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 grid-cols-1">
               {#each recentMatches.filter(item => item.status === 'finished').slice(0, 12) as item (item.matchId)}
-                <a class="grid gap-1 rounded-xl border border-border bg-background p-4 text-foreground no-underline transition-colors hover:border-primary/60 hover:bg-muted/40" href={`#/v2/${item.matchId}`}>
+                <a class="grid gap-1 rounded-xl border border-border bg-background p-4 text-foreground no-underline transition-colors hover:border-primary/60 hover:bg-muted/40 grid-cols-1" href={`#/v2/${item.matchId}`}>
                   <span class="flex items-center justify-between gap-2"><strong class="text-sm">{title(item.mode)}</strong><span class="font-mono text-[11px] text-muted-foreground">{item.matchId.slice(0, 8)}</span></span>
                   <span class="text-xs text-muted-foreground">{new Date(item.createdAt).toLocaleString()}</span>
                   <span class="text-sm">{item.winnerTeam ? `Winner: ${item.winnerTeam}` : 'Finished'}</span>
@@ -302,6 +302,7 @@
 </section>
 <style>
   .v2 .setup-wrap { padding:20px 22px; }
+  @media (max-width:560px) { .v2 .setup-wrap { padding:12px 0; } .v2 .world-split { padding:0 0 12px; } }
   .v2 .world-split { display:grid; gap:16px; padding:0 22px 16px; grid-template-columns:minmax(0,1fr); }
   @media (min-width:1280px) { .v2 .world-split { grid-template-columns:minmax(0,1fr) 320px; align-items:start; } }
   .v2 { --v2-bg:#0d141d; --v2-panel:#111c27; --v2-border:#263544; --v2-text:#e0e8ef; --v2-muted:#91a2b3; --v2-accent:#73dfc7; color:var(--v2-text); max-width:1640px; padding:32px clamp(18px,3vw,44px) 52px; margin:auto; }
@@ -317,7 +318,7 @@
   .v2 .runtime-badge { display:flex; align-items:center; gap:8px; border:1px solid var(--v2-border); border-radius:20px; padding:7px 11px; color:var(--v2-muted); background:var(--v2-bg); font:10px 'DM Mono',monospace; }
   .v2 .runtime-badge i,.v2 .status-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#74879a; }
   .v2 .runtime-badge i.ready,.v2 .status-dot.live { background:var(--v2-accent); }
-  .v2 .workflow { display:flex; gap:4px; overflow-x:auto; border-bottom:1px solid var(--v2-border); margin-bottom:24px; }
+  .v2 .workflow { display:flex; gap:4px; overflow-x:auto; scrollbar-width:none; border-bottom:1px solid var(--v2-border); margin-bottom:24px; }
   .v2 .workflow a { display:flex; align-items:center; justify-content:center; gap:9px; padding:13px 20px 15px; border-bottom:2px solid transparent; color:var(--v2-muted); white-space:nowrap; font-size:13px; }
   .v2 .workflow a:hover { color:var(--v2-text); background:#12202b; text-decoration:none; }
   .v2 .workflow a.active { color:var(--v2-accent); border-bottom-color:var(--v2-accent); }
@@ -399,6 +400,9 @@
   .v2 pre { overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; max-height:280px; background:#090f17; border:1px solid var(--v2-border); padding:13px; color:#bdcdda; font:11px/1.65 'DM Mono',monospace; border-radius:5px; }
   .v2 .code { min-height:180px; resize:vertical; }
   @media (max-width:1100px) { .v2 .workspace-v2.editing { grid-template-columns:minmax(0,1fr); } .v2 .workspace-v2.editing .empty-arena { display:none; } .v2 .workflow a { padding-inline:14px; } }
-  @media (max-width:850px) { .v2 .workspace-v2 { grid-template-columns:minmax(0,1fr); } .v2 .workspace-header { align-items:start; } .v2 .workspace-meta { font-size:11px; } .v2 .workflow a { padding-inline:11px; } .v2 .setup-note { flex-wrap:wrap; } .v2 .setup-note > div { flex-basis:100%; } }
+  .v2 .workflow::-webkit-scrollbar { display:none; }
+  /* Single column: outside the Code tab the main panel is the primary
+     content, so it comes before the sidebar. */
+  @media (max-width:850px) { .v2 .workspace-v2 { grid-template-columns:minmax(0,1fr); } .v2 .workspace-v2:not(.editing) > main { order:-1; } .v2 .workspace-header { align-items:start; } .v2 .workspace-meta { font-size:11px; } .v2 .workflow a { padding-inline:11px; } .v2 .setup-note { flex-wrap:wrap; } .v2 .setup-note > div { flex-basis:100%; } }
   @media (max-width:560px) { .v2 { padding-top:22px; } .v2 .workspace-header { flex-direction:column; gap:16px; } .v2 .workspace-meta { flex-direction:row; align-items:center; justify-content:space-between; width:100%; } .v2 .workflow { gap:0; } .v2 .workflow a { padding-inline:10px; font-size:12px; } .v2 .workflow a span { display:none; } .v2 .join { flex-wrap:wrap; } .v2 .join label { flex-basis:100%; } .v2 .join button { width:100%; } .v2 .result-heading { flex-wrap:wrap; } .v2 .robot-fields { flex-direction:column; gap:0; } }
 </style>

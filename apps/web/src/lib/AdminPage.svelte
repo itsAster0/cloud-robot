@@ -109,14 +109,14 @@
   const tabs = [{ value: 'overview' as const, label: 'Overview' }, { value: 'logs' as const, label: 'Logs' }, { value: 'matches' as const, label: 'Matches' }, { value: 'boxes' as const, label: 'Boxes' }];
 </script>
 
-<section class="mx-auto grid max-w-[1400px] gap-5 px-4 py-8 sm:px-8">
+<section class="mx-auto grid max-w-[1400px] gap-5 px-4 py-8 sm:px-8 grid-cols-1">
   {#if !token}
     <Card class="mx-auto mt-10 w-full max-w-sm">
       <CardHeader><CardTitle>Operations console</CardTitle><CardDescription>Administrator login. This is separate from player sign-in.</CardDescription></CardHeader>
       <CardContent>
-        <form class="grid gap-3" onsubmit={login}>
-          <label class="m-0 font-sans normal-case tracking-normal grid gap-1.5 text-sm">Username<Input bind:value={username} ariaLabel="Username"/></label>
-          <label class="m-0 font-sans normal-case tracking-normal grid gap-1.5 text-sm">Password<Input type="password" bind:value={password} ariaLabel="Password"/></label>
+        <form class="grid gap-3 grid-cols-1" onsubmit={login}>
+          <label class="m-0 font-sans normal-case tracking-normal grid gap-1.5 text-sm grid-cols-1">Username<Input bind:value={username} ariaLabel="Username"/></label>
+          <label class="m-0 font-sans normal-case tracking-normal grid gap-1.5 text-sm grid-cols-1">Password<Input type="password" bind:value={password} ariaLabel="Password"/></label>
           {#if loginError}<p class="m-0 text-sm text-destructive" role="alert">{loginError}</p>{/if}
           <Button type="submit" disabled={loggingIn || !password}>{loggingIn ? 'Signing in…' : 'Sign in'}</Button>
         </form>
@@ -142,10 +142,10 @@
             ['Errors · 15 min', overview.logs.errors15m, `${overview.logs.warnings15m} warnings`],
             ['Memory', `${overview.server.heapMB} MB`, `${overview.server.goroutines} goroutines · ${overview.server.cpus} CPU`],
           ] as [label, value, detail]}
-            <Card><CardContent class="grid gap-1 p-4"><span class="text-xs text-muted-foreground">{label}</span><strong class="font-mono text-2xl" class:text-destructive={label === 'Errors · 15 min' && Number(value) > 0}>{value}</strong><span class="truncate text-xs text-muted-foreground">{detail}</span></CardContent></Card>
+            <Card><CardContent class="grid gap-1 p-4 grid-cols-1"><span class="text-xs text-muted-foreground">{label}</span><strong class="font-mono text-2xl" class:text-destructive={label === 'Errors · 15 min' && Number(value) > 0}>{value}</strong><span class="truncate text-xs text-muted-foreground">{detail}</span></CardContent></Card>
           {/each}
         </div>
-        <div class="grid gap-5 lg:grid-cols-2">
+        <div class="grid gap-5 lg:grid-cols-2 grid-cols-1">
           <Card>
             <CardHeader><CardTitle>Match workers</CardTitle><CardDescription>One Rust worker process per running Arena V2 match.</CardDescription></CardHeader>
             <CardContent>
@@ -157,7 +157,7 @@
           </Card>
           <Card>
             <CardHeader><CardTitle>Platform</CardTitle></CardHeader>
-            <CardContent class="grid gap-3 text-sm">
+            <CardContent class="grid gap-3 text-sm grid-cols-1">
               <div class="flex flex-wrap gap-1.5">{#each Object.entries(overview.matches) as [status, count]}<Badge variant={statusTone(status)}>{status} {count}</Badge>{/each}</div>
               <dl class="m-0 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
                 {#each Object.entries(overview.cloud) as [key, value]}<dt class="text-muted-foreground">cloud.{key}</dt><dd class="m-0 truncate font-mono text-xs">{value}</dd>{/each}
@@ -209,10 +209,10 @@
       </Card>
 
     {:else}
-      <div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+      <div class="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] grid-cols-1">
         <Card>
           <CardHeader class="flex-row items-center justify-between"><CardTitle>Robot boxes</CardTitle><Button size="sm" variant="secondary" onclick={refreshBoxes}>Refresh</Button></CardHeader>
-          <CardContent class="grid gap-2">
+          <CardContent class="grid gap-2 grid-cols-1">
             {#each boxes as box (box.boxId)}
               <button class="m-0 flex w-full cursor-pointer items-center justify-between gap-3 rounded-lg border p-3 text-left {selectedBox === box.boxId ? 'border-primary bg-accent' : 'border-border bg-background hover:bg-muted/50'}" onclick={() => openBoxLogs(box.boxId)}>
                 <span class="min-w-0"><span class="block truncate font-mono text-xs">{box.boxId}</span><span class="block text-xs text-muted-foreground">{box.status} · created {box.createdAt.split(' ').slice(0, 2).join(' ')}</span></span>

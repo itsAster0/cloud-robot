@@ -69,12 +69,12 @@
     `flex w-full cursor-pointer flex-col gap-1 rounded-lg border p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${active ? 'border-primary bg-accent' : 'border-border bg-background hover:border-input hover:bg-muted/60'}`;
 </script>
 
-<div class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
-  <div class="grid content-start gap-5">
+<div class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px] grid-cols-1">
+  <div class="grid content-start gap-5 grid-cols-1">
     {#if error}<p class="m-0 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">{error}</p>{/if}
     <Card>
       <CardHeader><CardTitle>Presets</CardTitle><CardDescription>Start from a role, then adjust any part.</CardDescription></CardHeader>
-      <CardContent class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+      <CardContent class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 grid-cols-1">
         {#each Object.entries(presets) as [name, p]}
           <button type="button" class={option(chassis === p.chassis && weapon === p.weapon && modules.join() === p.modules.join() && utilities.join() === p.utilities.join())} onclick={() => applyPreset(name)}>
             <span class="text-sm font-semibold capitalize">{name}</span><span class="text-xs text-muted-foreground">{p.note}</span>
@@ -85,7 +85,7 @@
 
     <Card>
       <CardHeader><CardTitle>Chassis</CardTitle><CardDescription>Health against speed. Heavier bodies are harder to kill and slower to reposition.</CardDescription></CardHeader>
-      <CardContent class="grid gap-2 sm:grid-cols-3">
+      <CardContent class="grid gap-2 sm:grid-cols-3 grid-cols-1">
         {#each catalogue?.chassis ?? [] as c (c.id)}
           <button type="button" class={option(chassis === c.id)} onclick={() => chassis = c.id} aria-pressed={chassis === c.id}>
             <span class="flex items-center justify-between"><span class="text-sm font-semibold capitalize">{c.id}</span><Badge variant="muted">{c.cost} pts</Badge></span>
@@ -97,7 +97,7 @@
 
     <Card>
       <CardHeader><CardTitle>Starter weapon</CardTitle><CardDescription>Damage per second, effective range, and heat per shot. Overheating locks the weapon until it cools.</CardDescription></CardHeader>
-      <CardContent class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+      <CardContent class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 grid-cols-1">
         {#each catalogue?.weapons ?? [] as w (w.id)}
           <button type="button" class={option(weapon === w.id)} onclick={() => weapon = w.id} aria-pressed={weapon === w.id}>
             <span class="flex items-center justify-between"><span class="text-sm font-semibold capitalize">{label(w.id)}</span><Badge variant="muted">{w.cost} pts</Badge></span>
@@ -107,10 +107,10 @@
       </CardContent>
     </Card>
 
-    <div class="grid gap-5 lg:grid-cols-2">
+    <div class="grid gap-5 lg:grid-cols-2 grid-cols-1">
       <Card>
         <CardHeader><CardTitle>Modules <span class="text-xs font-normal text-muted-foreground">up to 2 · 10 pts each</span></CardTitle></CardHeader>
-        <CardContent class="grid gap-2">
+        <CardContent class="grid gap-2 grid-cols-1">
           {#each catalogue?.modules ?? [] as id}
             <button type="button" class={option(modules.includes(id), !modules.includes(id) && modules.length >= 2)} disabled={!modules.includes(id) && modules.length >= 2} onclick={() => modules = toggle(modules, id)} aria-pressed={modules.includes(id)}>
               <span class="text-sm font-semibold capitalize">{label(id)}</span><span class="text-xs text-muted-foreground">{moduleInfo[id] ?? ''}</span>
@@ -120,7 +120,7 @@
       </Card>
       <Card>
         <CardHeader><CardTitle>Utilities <span class="text-xs font-normal text-muted-foreground">up to 2</span></CardTitle></CardHeader>
-        <CardContent class="grid gap-2">
+        <CardContent class="grid gap-2 grid-cols-1">
           {#each catalogue?.utilities ?? [] as [id, points]}
             <button type="button" class={option(utilities.includes(id), !utilities.includes(id) && utilities.length >= 2)} disabled={!utilities.includes(id) && utilities.length >= 2} onclick={() => utilities = toggle(utilities, id)} aria-pressed={utilities.includes(id)}>
               <span class="flex items-center justify-between"><span class="text-sm font-semibold capitalize">{label(id)}</span><Badge variant="muted">{points} pts</Badge></span><span class="text-xs text-muted-foreground">{utilityInfo[id] ?? ''}</span>
@@ -133,15 +133,15 @@
 
   <Card class="content-start xl:sticky xl:top-4">
     <CardHeader><CardTitle>Your robot</CardTitle><CardDescription class="capitalize">{chassis} · {label(weapon)}{modules.length ? ` · ${modules.map(label).join(', ')}` : ''}{utilities.length ? ` · ${utilities.map(label).join(', ')}` : ''}</CardDescription></CardHeader>
-    <CardContent class="grid gap-4">
-      <div class="grid gap-1.5">
+    <CardContent class="grid gap-4 grid-cols-1">
+      <div class="grid gap-1.5 grid-cols-1">
         <div class="flex items-baseline justify-between"><span class="text-sm font-medium">Budget</span><span class="font-mono text-lg" class:text-destructive={over} class:text-primary={!over}>{cost}<span class="text-xs text-muted-foreground"> / {budget}</span></span></div>
         <Progress label="Points used" value={cost} max={budget} barClass={over ? 'bg-destructive' : 'bg-primary'}/>
         {#if over}<p class="m-0 text-xs text-destructive">Remove {cost - budget} points to save or register this build.</p>{/if}
       </div>
-      <div class="grid gap-2.5">
+      <div class="grid gap-2.5 grid-cols-1">
         {#each [['Health', hp, maxHp, `${hp} HP`], ['Speed', speed, maxSpeed, `${Math.round(speed)} u/s`], ['Damage', dps, maxDps, `${Math.round(dps)} dps`], ['Range', weaponData?.range ?? 0, maxRange, `${weaponData?.range ?? 0} u`]] as [name, value, max, text]}
-          <div class="grid gap-1"><div class="flex justify-between text-xs"><span class="text-muted-foreground">{name}</span><span class="font-mono">{text}</span></div><Progress label={String(name)} value={Number(value)} max={Number(max)}/></div>
+          <div class="grid gap-1 grid-cols-1"><div class="flex justify-between text-xs"><span class="text-muted-foreground">{name}</span><span class="font-mono">{text}</span></div><Progress label={String(name)} value={Number(value)} max={Number(max)}/></div>
         {/each}
       </div>
       <dl class="m-0 grid grid-cols-3 gap-2 text-center text-xs">

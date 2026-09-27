@@ -37,8 +37,15 @@
   let checkingServices = $state(true);
   let servicesError = $state('');
   let user = $state<User | null>(null);
+  // False until WorkOS restores the session, so pages do not flash sign-in
+  // prompts for a signed-in user. A timeout keeps public pages usable if
+  // WorkOS is unreachable.
+  let authReady = $state(false);
   let signingIn = $state(redirectCallbackPending());
   let robotBox = $state<RobotBox | null>(null);
+  // True once the first box lookup finished, so the box page never flashes
+  // "Create your box" for a user who already has one.
+  let boxChecked = $state(false);
   let sshKey = $state('');
   let mainSource = $state<string | null>(null);
   let joinCode = $state('');
@@ -275,16 +282,21 @@
     // authkit-js swallows a failed code exchange internally (console only), so
     // detect the callback ourselves before initializeAuth cleans the URL.
     const pendingCallback = redirectCallbackPending();
+    const authTimeout = setTimeout(() => authReady = true, 4000);
     try {
       user = await initializeAuth();
+      authReady = true;
+      clearTimeout(authTimeout);
       setTokenProvider(accessToken);
       if (user?.firstName) displayName = user.firstName;
       if (user) {
-        robotBox = await api.ensureBox();
+        try { robotBox = await api.ensureBox(); } finally { boxChecked = true; }
         boxPoll = setInterval(() => void refreshBox(), 5000);
         void loadMain(true);
       }
     } catch (failure) {
+      authReady = true;
+      clearTimeout(authTimeout);
       setError(failure);
       // A consumed or abandoned ?code= retry-loop breaks every reload until removed.
       if (redirectCallbackPending()) clearRedirectCallback();
@@ -556,18 +568,21 @@
           {#if cloud?.status !== 'ready'}<button onclick={refreshServices} disabled={checkingServices}>{checkingServices ? 'Checking services…' : 'Retry service connection'}</button>{/if}
         </nav>
       </details>
-      {#if user}<button class="auth-button" onclick={signOut} title={`Sign out of ${user.email}`}>{user.firstName ?? 'Account'} <span>· Sign out</span></button>{:else}<button class="auth-button sign-in" disabled={signingIn} onclick={handleSignIn}>{signingIn ? 'Signing in…' : 'Sign in'}</button>{/if}
+      {#if !authReady}<span class="auth-button" aria-hidden="true" style="opacity:.45">…</span>{:else if user}<button class="auth-button" onclick={signOut} title={`Sign out of ${user.email}`}>{user.firstName ?? 'Account'} <span>· Sign out</span></button>{:else}<button class="auth-button sign-in" disabled={signingIn} onclick={handleSignIn}>{signingIn ? 'Signing in…' : 'Sign in'}</button>{/if}
     </div>
   </header>
 
   {#if error}<div class="error-banner" role="alert"><span>FAULT</span>{error}{#if error.includes('box already has an active robot')}<button onclick={exitActiveMatch} disabled={pending['exit-active']}>{pending['exit-active'] ? 'RELEASING…' : 'EXIT ACTIVE MATCH'}</button>{/if}<button onclick={() => (error = '')}>DISMISS</button></div>{/if}
 
   <main id="main-content" tabindex="-1">
-  {#if workspaceRoute}
+  {#if !authReady && (workspaceRoute || view.name === 'box' || view.name === 'settings')}
+    <div class="grid min-h-[50vh] place-items-center text-sm text-muted-foreground" role="status"><span class="flex items-center gap-2"><span class="size-2 animate-pulse rounded-full bg-primary"></span>Restoring your session…</span></div>
+  {:else if workspaceRoute}
  <ArenaV2 signedIn={!!user} matchId={view.parameter ?? ''} initialPanel={workspacePanel} onSignIn={handleSignIn}/>
  {:else if view.name === 'box'}
     <BoxConsole
       {user}
+      checking={!!user && !boxChecked}
       box={robotBox}
       bind:sshKey
       {pending}
