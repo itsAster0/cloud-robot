@@ -8,6 +8,8 @@
   import MapPreview, { type MapPreviewData } from './MapPreview.svelte';
   import MatchOverview from './MatchOverview.svelte';
   import ArenaScoreboard from './ArenaScoreboard.svelte';
+  import ThingInspector from './ThingInspector.svelte';
+  import type { Picked } from './picking';
   import MatchSetup from './MatchSetup.svelte';
   import LoadoutBuilder from './LoadoutBuilder.svelte';
   import RobotInspector from './RobotInspector.svelte';
@@ -105,6 +107,8 @@
     return () => clearInterval(timer);
   });
   let welcome = $state('');
+  // Map thing the viewer clicked (loot, terrain, hazard, site); robots win.
+  let picked = $state<Picked | null>(null);
   let confirmLeave = $state(false);
   // Frees the box: lobby registrations are dropped and a running robot
   // concedes; the player keeps watching as a spectator.
@@ -386,7 +390,7 @@
           {#if match.status === 'finished'}<div class="result-heading"><div><p class="eyebrow">MATCH COMPLETE</p><h2>{match.winnerTeam ? `${match.winnerTeam} wins` : 'Final results'}</h2></div><button onclick={() => showPanel('code')}>Revise your script →</button></div>{/if}
           {#if replayEnd > 0}<div class="replay"><label>Replay <strong>{(replayTick / (snapshot?.tickRate ?? 20)).toFixed(1)}s / {(replayEnd / (snapshot?.tickRate ?? 20)).toFixed(1)}s</strong><input aria-label="Replay tick" type="range" min="0" max={replayEnd} step="10" bind:value={replayTick} onchange={seekReplay}/></label><button onclick={inspectTrace} disabled={busy || !signedIn}>Inspect my decision at this tick</button>{#if trace}<pre>{trace}</pre>{/if}</div>{/if}
           {#if snapshot || match.status === 'running' || match.status === 'finished'}
-            <div class="world-split"><div class="world-main">{#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} onselect={id => selected = id}/>{/key}</div><aside class="world-side" aria-label="Robot inspector"><RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/></aside></div>
+            <div class="world-split"><div class="world-main">{#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} {picked} onselect={id => { selected = id; picked = null; }} onpick={thing => { picked = thing; selected = ''; }}/>{/key}</div><aside class="world-side" aria-label="Robot inspector">{#if picked && !selected}<ThingInspector {picked} sites={snapshot?.sites ?? matchPreview?.sites ?? []} onclose={() => picked = null}/>{:else}<RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/>{/if}</aside></div>
             {#if match.status !== 'finished'}<div class="view-controls"><label class="check"><input type="checkbox" bind:checked={privateView} disabled={!signedIn || !registered} onchange={() => snapshot = null}/>My robot's live view</label><span>{connectionStatus} · {privateView ? 'Robot observations' : 'Public view delayed 5s'}</span></div>{/if}
             {#if match.status === 'running' && !snapshot}<p class="hint loading-snapshot">Waiting for a snapshot. Public spectating starts after five seconds of simulation.</p>{/if}
             {#if match.mode === 'arena'}<ArenaScoreboard robots={overview.length ? overview : snapshot?.robots ?? []} youId={myRobotId} endTick={snapshot?.endTick ?? 0} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} onselect={id => selected = id}/>{/if}

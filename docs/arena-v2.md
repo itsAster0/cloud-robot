@@ -265,3 +265,11 @@ travelling 1,500-2,800 units and firing.
 - The district byte-stability pin changed to `7ac4a5ee7e2f0b9a` with this
   layout change. Tests cover landforms, ground effects, small-map variety,
   and water collision.
+
+## Map inspector (2026-09-27)
+
+- Public snapshot items carry `contents` so spectators see loot; crates are
+  drawn in the colour of their first item's group.
+- `pickThing` (tested) resolves a click to loot, transit pad, obstacle,
+  hazard, site, or ground; `ThingInspector` explains it with the biome.
+- Verified live in Chrome: site, loot crate, and lake clicks.
