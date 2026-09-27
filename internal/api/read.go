@@ -128,10 +128,12 @@ func parseLimit(r *http.Request, fallback int) int {
 // publicMatch never exposes a participant's private build or workspace metadata.
 // Copy the roster before redacting so persistence retains the registration.
 func publicMatch(m model.Match) model.Match {
+	// Always an array: bot-only matches have no registrations, and a JSON
+	// null here broke every client that lists matches.
+	m.Robots = append(make([]model.RobotSubmission, 0, len(m.Robots)), m.Robots...)
 	if m.EngineVersion != 4 {
 		return m
 	}
-	m.Robots = append([]model.RobotSubmission(nil), m.Robots...)
 	for i := range m.Robots {
 		m.Robots[i].Loadout = nil
 		m.Robots[i].ScriptObjectKey = ""

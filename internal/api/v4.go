@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -69,7 +72,7 @@ func (s *Server) createV4Match(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 502, err.Error())
 		return
 	}
-	writeJSON(w, 201, m)
+	writeJSON(w, 201, publicMatch(m))
 }
 func (s *Server) controlV4(w http.ResponseWriter, r *http.Request) {
 	m, err := s.store.GetMatch(r.Context(), r.PathValue("matchID"))
@@ -145,7 +148,15 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 		loadout.Defaults()
 		config.Robots = append(config.Robots, enginev4.Registration{RobotID: r.RobotID, Name: r.DisplayName, Team: r.Team, Bot: r.Bot, Loadout: loadout})
 	}
-	client, result, err := enginev4.Start(ctx, envOr("ARENA_ENGINE_PATH", "crates/arena-engine/target/release/arena-engine"), config)
+	var workerLog io.Writer = os.Stderr
+	if s.logs != nil {
+		lines := s.logs.LineWriter("worker", m.MatchID, os.Stderr)
+		defer lines.Close()
+		workerLog = lines
+	}
+	slog.Info("match starting", "source", "worker", "match", m.MatchID, "mode", config.Mode, "capacity", config.Capacity, "humans", humanRobots(m.Robots), "seed", config.Seed)
+	started := time.Now()
+	client, result, err := enginev4.StartLogged(ctx, envOr("ARENA_ENGINE_PATH", "crates/arena-engine/target/release/arena-engine"), config, workerLog)
 	if err != nil {
 		return s.failMatch(ctx, m, fmt.Errorf("start Rust engine: %w", err))
 	}
@@ -402,6 +413,7 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 	if err = s.store.PutMatch(ctx, m); err != nil {
 		return s.failMatch(ctx, m, err)
 	}
+	slog.Info("match finished", "source", "worker", "match", m.MatchID, "winner", m.WinnerTeam, "ticks", state.Tick, "seconds", int(time.Since(started).Seconds()))
 	s.releaseBoxes(ctx, m)
 	s.hub.Publish(m.MatchID, result.Snapshot)
 	s.hub.Publish(m.MatchID, map[string]any{"type": "match_finished", "version": 4, "match": publicMatch(m)})
@@ -540,4 +552,14 @@ func (s *Server) v4Edit(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(8 * time.Second):
 		writeError(w, 504, "edit response timed out; inspect match revision before retrying")
 	}
+}
+
+func humanRobots(robots []model.RobotSubmission) int {
+	n := 0
+	for _, r := range robots {
+		if !r.Bot {
+			n++
+		}
+	}
+	return n
 }

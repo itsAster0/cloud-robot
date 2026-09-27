@@ -5,6 +5,7 @@
   import ArenaV2 from './lib/ArenaV2.svelte';
   import BoxConsole from './lib/BoxConsole.svelte';
   import PortalPage from './lib/PortalPage.svelte';
+  import AdminPage from './lib/AdminPage.svelte';
   import { parseRoute, type Route } from './lib/router';
   import { api, setTokenProvider } from './lib/api';
   import { accessToken, authConfigured, clearRedirectCallback, initializeAuth, redirectCallbackPending, signIn, signOut } from './lib/auth';
@@ -19,7 +20,7 @@
   let workspacePanel = $derived(view.panel ?? (view.name === 'v2' && view.parameter ? 'match' : 'code'));
   let matchesActive = $derived((workspaceRoute && (workspacePanel === 'match' || workspacePanel === 'results')) || ['matches', 'spectate', 'match', 'match-detail'].includes(view.name));
   let docsActive = $derived(view.name === 'sdk' || view.name === 'api-docs');
-  let pageTitle = $derived(matchesActive ? 'Matches' : docsActive ? 'Documentation' : view.name === 'box' ? 'SSH & runtime' : workspaceRoute ? 'Workspace' : 'Robot Arena');
+  let pageTitle = $derived(matchesActive ? 'Matches' : docsActive ? 'Documentation' : view.name === 'box' ? 'SSH & runtime' : view.name === 'admin' ? 'Admin console' : workspaceRoute ? 'Workspace' : 'Robot Arena');
   let team = $state<Team>('red');
   let displayName = $state('Ada');
   let startCommand = $state('lua main.lua');
@@ -551,6 +552,7 @@
           <a href="#/box" aria-current={view.name === 'box' ? 'page' : undefined}>SSH &amp; runtime <i class="nav-dot" class:ok={robotBox?.status === 'running'} class:bad={robotBox?.status === 'failed' || !!robotBox?.error} aria-hidden="true"></i></a>
           <a href="#/settings" aria-current={view.name === 'settings' ? 'page' : undefined}>Account settings</a>
           <a href="#/docs/api">API reference</a>
+          <a href="#/admin" aria-current={view.name === 'admin' ? 'page' : undefined}>Admin console</a>
           {#if cloud?.status !== 'ready'}<button onclick={refreshServices} disabled={checkingServices}>{checkingServices ? 'Checking services…' : 'Retry service connection'}</button>{/if}
         </nav>
       </details>
@@ -673,6 +675,8 @@
         <div class="cloud-stack"><div class="eyebrow">CONTROL PLANE</div><div class="cloud-row"><span>WS</span><strong>Agent gateway</strong><i>{socketState === 'live' ? 'LIVE' : '--'}</i></div><div class="cloud-row"><span>SQS</span><strong>Match jobs</strong><i>{cloud?.status === 'ready' ? 'READY' : '--'}</i></div><div class="cloud-row"><span>DDB</span><strong>State + results</strong><i>{cloud?.status === 'ready' ? 'READY' : '--'}</i></div><p>{cloud?.provider ?? 'Connecting to Floci…'} · WorkOS AuthKit login.</p></div>
       </aside>
     </section>
+  {:else if view.name === 'admin'}
+    <AdminPage />
   {:else}
     <PortalPage route={view} {user} {match} {cloud} box={robotBox} onSignIn={handleSignIn} onCreateMatch={createMatch} onReleaseBox={exitActiveMatch} />
   {/if}

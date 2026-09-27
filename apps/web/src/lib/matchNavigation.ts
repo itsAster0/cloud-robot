@@ -15,8 +15,10 @@ export function matchModeLabel(mode: string): string {
 }
 
 export function matchRosterLabel(match: Pick<Match, 'robots'>): string {
-  const names = match.robots.slice(0, 3).map(robot => robot.displayName);
+  // Older API responses encoded bot-only rosters as null.
+  const robots = match.robots ?? [];
+  const names = robots.slice(0, 3).map(robot => robot.displayName);
   if (!names.length) return 'Open lobby · robots join before the match starts';
-  const remaining = match.robots.length - names.length;
+  const remaining = robots.length - names.length;
   return `${names.join(' · ')}${remaining > 0 ? ` · +${remaining} more` : ''}`;
 }

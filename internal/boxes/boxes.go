@@ -252,6 +252,36 @@ func (c *Client) WriteMain(ctx context.Context, boxID, source string) (string, e
 	return result.Source, err
 }
 
+// BoxSummary is one robot box container as the admin console lists it.
+type BoxSummary struct {
+	BoxID     string `json:"boxId"`
+	State     string `json:"state"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// List returns every robot box container known to Docker.
+func (c *Client) List(ctx context.Context) ([]BoxSummary, error) {
+	var result struct {
+		Boxes []BoxSummary `json:"boxes"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/boxes", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Boxes, nil
+}
+
+// Logs returns the last `tail` lines of a box's agent and supervisor output.
+func (c *Client) Logs(ctx context.Context, boxID string, tail int) (string, error) {
+	var result struct {
+		Logs string `json:"logs"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/boxes/"+boxID+"/logs?tail="+strconv.Itoa(tail), nil, &result); err != nil {
+		return "", err
+	}
+	return result.Logs, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader
 	if input != nil {

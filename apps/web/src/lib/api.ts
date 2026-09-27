@@ -35,6 +35,7 @@ export interface ListedMatch extends Match {
 }
 
 export const api = {
+  getBoxLogs: () => request<{ logs: string }>('/api/me/box/logs'),
   cloudStatus: () => request<CloudStatus>('/api/cloud/status'),
   createMatch: (input?: { mode?: string; mapId?: string; arenaWidth?: number; arenaHeight?: number; practice?: boolean; bots?: number; botDifficulty?: string; friendlyFire?: boolean; regenPerTick?: number; rammingDamage?: boolean; botPersonality?: string }) => request<Match>('/api/matches', { method: 'POST', body: input ? JSON.stringify(input) : undefined }),
   listMatches: (status?: string, limit = 50) => request<{ matches: ListedMatch[] }>(`/api/matches?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ''}`),

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kryxen/cloud-robot/internal/logbuf"
 	"io"
 	"log/slog"
 	"net/http"
@@ -63,14 +64,19 @@ type IdentityVerifier interface {
 }
 
 type Server struct {
-	v4     map[string]*v4Control
-	store  Store
-	hub    *Hub
-	agents *AgentManager
-	auth   IdentityVerifier
-	boxes  boxes.Provisioner
-	mu     sync.Mutex
-	queue  *matchQueue
+	// logs holds recent server and worker output for the admin console;
+	// nil disables capture (tests).
+	logs      *logbuf.Buffer
+	admin     *adminAuth
+	startedAt time.Time
+	v4        map[string]*v4Control
+	store     Store
+	hub       *Hub
+	agents    *AgentManager
+	auth      IdentityVerifier
+	boxes     boxes.Provisioner
+	mu        sync.Mutex
+	queue     *matchQueue
 	// arenas maps running matches to their engine so HTTP handlers can request
 	// mid-match actions (withdrawal) without owning tick state.
 	arenas map[string]*engine.Arena
@@ -78,8 +84,11 @@ type Server struct {
 	rates  map[string]time.Time
 }
 
+// SetLogs attaches the admin log buffer.
+func (s *Server) SetLogs(buffer *logbuf.Buffer) { s.logs = buffer }
+
 func NewServer(store Store, provisioner boxes.Provisioner) *Server {
-	return &Server{v4: map[string]*v4Control{}, store: store, boxes: provisioner, hub: NewHub(), agents: NewAgentManager(), auth: robotauth.NewVerifier(), queue: newMatchQueue(), arenas: map[string]*engine.Arena{}, rates: map[string]time.Time{}}
+	return &Server{admin: newAdminAuth(), startedAt: time.Now(), v4: map[string]*v4Control{}, store: store, boxes: provisioner, hub: NewHub(), agents: NewAgentManager(), auth: robotauth.NewVerifier(), queue: newMatchQueue(), arenas: map[string]*engine.Arena{}, rates: map[string]time.Time{}}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -100,9 +109,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/cloud/status", s.cloudStatus)
+	mux.HandleFunc("POST /api/admin/login", s.adminLogin)
+	mux.Handle("GET /api/admin/overview", s.requireAdminSession(http.HandlerFunc(s.adminOverview)))
+	mux.Handle("GET /api/admin/logs", s.requireAdminSession(http.HandlerFunc(s.adminLogs)))
+	mux.Handle("GET /api/admin/matches", s.requireAdminSession(http.HandlerFunc(s.adminMatches)))
+	mux.Handle("GET /api/admin/boxes", s.requireAdminSession(http.HandlerFunc(s.adminBoxes)))
+	mux.Handle("GET /api/admin/boxes/{boxID}/logs", s.requireAdminSession(http.HandlerFunc(s.adminBoxLogs)))
 	mux.Handle("GET /api/admin/status", s.requireUser(s.requireAdmin(http.HandlerFunc(s.adminStatus))))
 	mux.Handle("POST /api/me/box", s.requireUser(http.HandlerFunc(s.ensureBox)))
 	mux.Handle("GET /api/me/box", s.requireUser(http.HandlerFunc(s.getBox)))
+	mux.Handle("GET /api/me/box/logs", s.requireUser(http.HandlerFunc(s.getBoxLogs)))
 	mux.Handle("GET /api/me/box/main.lua", s.requireUser(http.HandlerFunc(s.getBoxMain)))
 	mux.Handle("PUT /api/me/box/main.lua", s.requireUser(http.HandlerFunc(s.deployBoxMain)))
 	mux.Handle("GET /api/me/box/scripts", s.requireUser(http.HandlerFunc(s.listScriptVersions)))
@@ -299,7 +315,7 @@ func (s *Server) createMatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, match)
+	writeJSON(w, http.StatusCreated, publicMatch(match))
 }
 
 func (s *Server) getMatch(w http.ResponseWriter, r *http.Request) {
@@ -790,6 +806,23 @@ func (s *Server) getBoxMain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"source": source})
 }
 
+// getBoxLogs returns the caller's own box output (supervisor and Lua agent)
+// so players can debug their scripts. Box IDs derive from the user ID, so a
+// player can only ever read their own box.
+func (s *Server) getBoxLogs(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.boxes.(boxAdmin)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "box logs are unavailable")
+		return
+	}
+	logs, err := admin.Logs(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), 200)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "read box output: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
+}
+
 func (s *Server) listScripts(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"scripts": scripts.List()})
 }
@@ -1212,6 +1245,11 @@ func withRequestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		next.ServeHTTP(w, r)
+		// Polling endpoints would otherwise drown the admin log view.
+		switch r.URL.Path {
+		case "/api/admin/logs", "/api/admin/overview", "/readyz", "/healthz":
+			return
+		}
 		slog.Info("http request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
 	})
 }

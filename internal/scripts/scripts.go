@@ -23,13 +23,13 @@ type Template struct {
 // not deployable even if a .lua file somehow lands in the directory.
 // Rust-only v4 strategies; legacy Go-engine scripts were removed.
 var descriptions = map[string]string{
-	"v4":       "Balanced SDK 0.4 strategy for Rust arenas: combat, recovery, loot, and bounded navigation.",
-	"scout":    "Fast recon: cruises transit sites, pulses scans, relays positions, breaks contact early.",
-	"assault":  "Balanced brawler: engages nearest, dashes out at low HP, channels heals, scavenges loot.",
-	"sniper":   "Railgun control: holds 600-900 range, brakes to aim, cloaks to re-range, seeks optics.",
-	"support":  "Squad medic: trails allies, drops repair fields, screens with smoke, relays state.",
-	"sentinel": "Area denial: holds the safe zone, prioritizes shields, lays mines, sweeps scans.",
-	"scavenger": "Loot runner: prioritizes upgrades, equips weapons explicitly, rides transit, fights close only.",
+	"v4":        "Balanced: fights at weapon range, takes cover when hurt, loots, hunts remembered enemies, and patrols the zone.",
+	"assault":   "Close-range brawler: engages early, dashes to close the gap, drops mines while backing off.",
+	"scavenger": "Loot first: long detours for weapons and supplies, rides transit, then fights with what it found.",
+	"scout":     "Fast recon: scans constantly, rides transit, reports contacts to its squad, breaks off early.",
+	"sentinel":  "Zone denial: walks a beat around the post nearest the zone centre and mines approaches.",
+	"sniper":    "Long range: holds 600-950 units for steady led shots, re-ranges when rushed, cloaks when hurt.",
+	"support":   "Team player: trails allies, drops repair fields, smokes retreats, relays squad reports.",
 }
 
 func List() []Template {

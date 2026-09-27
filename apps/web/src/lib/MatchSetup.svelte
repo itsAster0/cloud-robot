@@ -98,7 +98,7 @@
             {#if large}<div class="grid gap-2"><div class="flex justify-between text-sm"><span>Sites</span><span class="font-mono text-primary">{siteCount}</span></div><Slider ariaLabel="Sites" bind:value={siteCount} min={4} max={128} step={4}/></div>{/if}
             <div class="grid gap-2"><span class="text-sm">Map seed <span class="text-xs text-muted-foreground">(0 = random on create)</span></span><div class="flex gap-2"><Input type="number" min={0} max={999999} bind:value={seed} ariaLabel="Map seed"/><Button variant="secondary" onclick={onrandomize} disabled={busy}>Randomize</Button></div></div>
             <div class="grid gap-2"><span class="text-sm">Exact duration (seconds)</span><Input type="number" min={10} max={2700} bind:value={duration} ariaLabel="Duration in seconds"/></div>
-            <label class="m-0 flex items-center gap-2 text-sm"><input type="checkbox" class="size-4 accent-primary" bind:checked={liveEdit}/>Allow admin map edits during the match</label>
+            <label class="m-0 font-sans normal-case tracking-normal flex items-center gap-2 text-sm"><input type="checkbox" class="size-4 accent-primary" bind:checked={liveEdit}/>Allow admin map edits during the match</label>
           </div>
         </details>
       </CardContent>

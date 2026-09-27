@@ -103,6 +103,9 @@ func (s *supervisor) sync(ctx context.Context) {
 	}
 	configData, configErr := os.ReadFile(filepath.Join(controlDir, "agent.json"))
 	if boxes.QuotaBreached(usage, quota) {
+		if s.record.AgentStatus != "quota_exceeded" {
+			logf("workspace quota exceeded: %d of %d bytes; agent stopped", usage, quota)
+		}
 		s.stop()
 		s.record.AgentStatus = "quota_exceeded"
 		s.record.Error = fmt.Sprintf("workspace usage %d bytes exceeds %d byte quota; delete files over SSH to resume", usage, quota)
@@ -131,6 +134,7 @@ func (s *supervisor) sync(ctx context.Context) {
 			return
 		}
 		s.record.ActiveRobotID, s.record.ActiveMatchID = config.RobotID, config.MatchID
+		logf("starting agent robot=%s match=%s command=%q", config.RobotID, config.MatchID, config.StartCommand)
 		s.stop()
 		s.configHash = hash
 		command := exec.CommandContext(ctx, "su", "-s", "/bin/sh", "developer", "-c", "cd /workspace && exec "+config.StartCommand)
@@ -159,8 +163,10 @@ func (s *supervisor) wait(command *exec.Cmd) {
 		if err != nil {
 			s.record.AgentStatus = "failed"
 			s.record.Error = err.Error()
+			logf("agent exited: %v", err)
 		} else {
 			s.record.AgentStatus = "stopped"
+			logf("agent exited cleanly")
 		}
 	}
 	s.mu.Unlock()
@@ -507,4 +513,10 @@ func writeMainRevision(path, source, expected string) error {
 		return err
 	}
 	return os.Chown(path, 1000, 1000)
+}
+
+// logf writes a timestamp-free supervisor line to stdout; Docker timestamps
+// container output and the admin console reads it through the provisioner.
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stdout, "[supervisor] "+format+"\n", args...)
 }

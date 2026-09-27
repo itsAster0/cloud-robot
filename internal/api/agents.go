@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -183,7 +184,9 @@ func (m *AgentManager) Attach(robotID string, session *AgentSession) {
 	defer m.mu.Unlock()
 	if previous := m.sessions[robotID]; previous != nil {
 		_ = previous.connection.Close(websocket.StatusPolicyViolation, "new agent connection replaced this session")
+		slog.Warn("agent session replaced", "source", "agent", "match", session.matchID, "robot", robotID)
 	}
+	slog.Info("agent connected", "source", "agent", "match", session.matchID, "robot", robotID, "v4", session.v4)
 	m.sessions[robotID] = session
 	delete(m.disconnectedAt, robotID)
 }
@@ -197,6 +200,7 @@ func (m *AgentManager) Detach(robotID string, session *AgentSession) {
 		session.requestMu.Unlock()
 		m.disconnectedAt[robotID] = time.Now()
 		delete(m.sessions, robotID)
+		slog.Info("agent disconnected", "source", "agent", "match", session.matchID, "robot", robotID)
 	}
 }
 

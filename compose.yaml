@@ -33,6 +33,10 @@ services:
       WORKOS_ISSUER: "${WORKOS_ISSUER:-}"
       WORKOS_API_KEY: "${WORKOS_API_KEY}"
       AUTH_REQUIRED: "${AUTH_REQUIRED:-true}"
+      # Operations console login. Change ADMIN_PASSWORD before exposing the stack.
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-local-admin-change-me}"
+      ADMIN_SESSION_SECRET: "${ADMIN_SESSION_SECRET:-}"
       QUEUE_CONNECT_GRACE_SECONDS: "${QUEUE_CONNECT_GRACE_SECONDS:-30}"
       QUEUE_BOT_FILL_SECONDS: "${QUEUE_BOT_FILL_SECONDS:-45}"
       ADMIN_USER_IDS: "${ADMIN_USER_IDS:-}"

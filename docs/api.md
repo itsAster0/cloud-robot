@@ -213,3 +213,21 @@ and optional `color` as `#rrggbb`. Invalid marks reject the input with
 `OUT_OF_RANGE`. The API keeps the latest accepted marks per robot and returns
 them as `debug` from the owner-only `GET /api/v4/matches/{id}/view`. They are
 never sent to the Rust worker or recorded in replays.
+
+## Admin console API
+
+`POST /api/admin/login` with `{"username","password"}` returns
+`{"token","expiresAt"}` (8 hours). It returns 503 when `ADMIN_PASSWORD` is
+unset, 401 for wrong credentials, and 429 after five failures in a minute.
+Send the token as `X-Admin-Session` to:
+
+- `GET /api/admin/overview`: server, workers, agents, viewers, queue, match
+  counts, recent error and warning totals, and non-secret settings.
+- `GET /api/admin/logs?after=&source=&match=&level=&q=&limit=`: entries after
+  a sequence number, newest last, plus `latest` for polling. Sources: `api`,
+  `worker`, `agent`, `admin`.
+- `GET /api/admin/matches?status=`: the latest 100 full match records.
+- `GET /api/admin/boxes` and `GET /api/admin/boxes/{boxID}/logs?tail=`: box
+  containers and their recent output through the provisioner.
+
+`GET /api/me/box/logs` (player sign-in) returns the caller's own box output.

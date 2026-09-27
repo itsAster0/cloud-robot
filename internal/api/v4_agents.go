@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"github.com/coder/websocket/wsjson"
 	"io"
+	"log/slog"
 	"math"
 	"strings"
 	"sync"
@@ -80,6 +81,8 @@ type v4Mailbox struct {
 	geometryRevision uint32
 	geometry         json.RawMessage
 	debug            []v4DebugMark
+	// rejectLogged rate-limits rejection logs per code to one per 5 s.
+	rejectLogged map[string]time.Time
 }
 
 // debugMarks returns the marks from the latest accepted input.
@@ -286,6 +289,18 @@ func validDebugMark(m v4DebugMark) bool {
 	return true
 }
 func (s *AgentSession) rejectV4(sequence uint64, code string) {
+	s.mailbox.mu.Lock()
+	if s.mailbox.rejectLogged == nil {
+		s.mailbox.rejectLogged = map[string]time.Time{}
+	}
+	logIt := time.Since(s.mailbox.rejectLogged[code]) > 5*time.Second
+	if logIt {
+		s.mailbox.rejectLogged[code] = time.Now()
+	}
+	s.mailbox.mu.Unlock()
+	if logIt {
+		slog.Warn("agent input rejected", "source", "agent", "match", s.matchID, "robot", s.robotID, "code", code)
+	}
 	raw, _ := json.Marshal(map[string]any{"type": "action_rejected", "version": 4, "sequence": sequence, "code": code})
 	select {
 	case s.mailbox.rejections <- raw:
