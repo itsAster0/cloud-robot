@@ -67,6 +67,12 @@ type RobotSummary struct {
 	DamageTaken   int      `json:"damageTaken"`
 	Kills         int      `json:"kills"`
 	ItemsPickedUp int      `json:"itemsPickedUp"`
+	// Arena V2 fields. PlayerID links a human robot to its account for
+	// leaderboards; it is stripped from public responses.
+	PlayerID string `json:"playerId,omitempty"`
+	Bot      bool   `json:"bot,omitempty"`
+	Deaths   int    `json:"deaths,omitempty"`
+	Score    int    `json:"score,omitempty"`
 }
 
 type MatchEvent struct {

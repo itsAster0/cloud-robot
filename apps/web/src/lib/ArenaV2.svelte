@@ -109,6 +109,19 @@
     return () => clearInterval(timer);
   });
   let welcome = $state('');
+  // A finished arena session hands viewers to the next one.
+  let nextArenaWaiting = $state(false);
+  async function nextArena() {
+    nextArenaWaiting = true;
+    try {
+      for (let i = 0; i < 20; i++) {
+        const a = await api.getArena().catch(() => null);
+        if (a && a.match.matchId !== match?.matchId && a.match.status === 'running') { window.location.hash = `#/v2/${a.match.matchId}`; return; }
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      message = 'The next session is still starting. Try again in a few seconds.';
+    } finally { nextArenaWaiting = false; }
+  }
   // Theater layout: while a match is on screen the map gets the page width
   // and robot details move to a sidebar, like a video page.
   let watching = $derived(!!match && panel !== 'code' && panel !== 'build' && (!!snapshot || match.status === 'running' || match.status === 'finished'));
@@ -331,8 +344,8 @@
       {/if}
       {#if panel !== 'code'}
         <section class="surface controls recent"><div class="section-heading"><h2>{panel === 'results' ? 'Recent results' : 'Recent arenas'}</h2><button class="quiet" onclick={refreshMatches} disabled={matchesLoading}>{matchesLoading ? 'Loading…' : 'Refresh'}</button></div>
-          {#if matchesError}<p class="validation-error">{matchesError}</p>{:else if matchesLoading && !recentMatches.length}<p class="hint">Loading arenas…</p>{:else if !recentMatches.filter(item => panel !== 'results' || item.status === 'finished').length}<p class="hint">{panel === 'results' ? 'No finished Arena V2 matches yet. Complete a sandbox or match to start reviewing.' : 'No Arena V2 matches yet. Create the first lobby above.'}</p>{:else}
-            {#each recentMatches.filter(item => panel !== 'results' || item.status === 'finished').slice(0, 8) as item}<button class="match-row" class:selected={match?.matchId === item.matchId} onclick={() => openListed(item)} disabled={busy}><span><strong>{matchTitle(item)}</strong><small>{item.matchId.slice(0, 8)} · {new Date(item.createdAt).toLocaleDateString()}</small></span><span class="state-label">{item.status}</span></button>{/each}
+          {#if matchesError}<p class="validation-error">{matchesError}</p>{:else if matchesLoading && !recentMatches.length}<p class="hint">Loading arenas…</p>{:else if !recentMatches.filter(item => (panel !== 'results' || item.status === 'finished') && !(item.mode === 'arena' && item.status === 'failed')).length}<p class="hint">{panel === 'results' ? 'No finished Arena V2 matches yet. Complete a sandbox or match to start reviewing.' : 'No Arena V2 matches yet. Create the first lobby above.'}</p>{:else}
+            {#each recentMatches.filter(item => (panel !== 'results' || item.status === 'finished') && !(item.mode === 'arena' && item.status === 'failed')).slice(0, 8) as item}<button class="match-row" class:selected={match?.matchId === item.matchId} onclick={() => openListed(item)} disabled={busy}><span><strong>{matchTitle(item)}</strong><small>{item.matchId.slice(0, 8)} · {new Date(item.createdAt).toLocaleDateString()}</small></span><span class="state-label">{item.status}</span></button>{/each}
           {/if}
         </section>
       {/if}
@@ -410,7 +423,14 @@
             </div>
           {/if}
           {#if match.mode === 'sandbox' && match.status === 'running'}<div class="sandbox-toolbar"><span class="state-label">{paused ? 'Paused' : 'Running'}</span><button onclick={() => control(paused ? 'resume' : 'pause')} disabled={busy || !signedIn}>{paused ? 'Resume' : 'Pause'}</button><button onclick={() => control('step')} disabled={busy || !signedIn}>Step one tick</button><span class="hint">Owner controls</span></div>{/if}
-          {#if match.status === 'finished'}<div class="result-heading"><div><p class="eyebrow">MATCH COMPLETE</p><h2>{match.winnerTeam ? `${match.winnerTeam} wins` : 'Final results'}</h2></div><button onclick={() => showPanel('code')}>Revise your script →</button></div>{/if}
+          {#if match.status === 'finished' && match.mode === 'arena'}
+            {@const podium = [...(match.robotSummaries ?? [])].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 3)}
+            <div class="arena-over">
+              <div><p class="eyebrow">SESSION OVER</p><h2>Top of this Arena session</h2></div>
+              <ol>{#each podium as p, i}<li><span>{['🥇', '🥈', '🥉'][i]}</span><strong>{p.name}</strong><em>{p.score ?? 0} pts · {p.kills} K · {p.deaths ?? 0} D</em>{#if p.playerId}<a href={`#/profile/${p.playerId}`}>profile</a>{/if}</li>{/each}</ol>
+              <div class="actions"><button class="primary" onclick={nextArena} disabled={busy}>{nextArenaWaiting ? 'Finding the next session…' : 'Go to the next session →'}</button><a href="#/leaderboard">Leaderboard</a></div>
+            </div>
+          {:else if match.status === 'finished'}<div class="result-heading"><div><p class="eyebrow">MATCH COMPLETE</p><h2>{match.winnerTeam ? `${match.winnerTeam} wins` : 'Final results'}</h2></div><button onclick={() => showPanel('code')}>Revise your script →</button></div>{/if}
           {#if replayEnd > 0}<div class="replay"><label>Replay <strong>{(replayTick / (snapshot?.tickRate ?? 20)).toFixed(1)}s / {(replayEnd / (snapshot?.tickRate ?? 20)).toFixed(1)}s</strong><input aria-label="Replay tick" type="range" min="0" max={replayEnd} step="10" bind:value={replayTick} onchange={seekReplay}/></label><button onclick={inspectTrace} disabled={busy || !signedIn}>Inspect my decision at this tick</button>{#if trace}<pre>{trace}</pre>{/if}</div>{/if}
           {#if snapshot || match.status === 'running' || match.status === 'finished'}
             <div class="world-split">
@@ -453,6 +473,11 @@
   .v2 .world-main, .v2 .world-side { display:grid; gap:14px; align-content:start; min-width:0; }
   .v2 .workspace-v2.watching { grid-template-columns:minmax(0,1fr); }
   .v2 .map-stage { position:relative; min-width:0; }
+  .v2 .arena-over { display:grid; gap:12px; padding:18px 22px; border-bottom:1px solid var(--v2-border); background:color-mix(in srgb, var(--color-primary) 8%, transparent); }
+  .v2 .arena-over ol { margin:0; padding:0; display:grid; gap:6px; }
+  .v2 .arena-over li { list-style:none; display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .v2 .arena-over li em { font-style:normal; color:var(--v2-muted); font:12px 'DM Mono',monospace; }
+  .v2 .arena-over .actions { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
   .v2 .workspace-v2.watching > aside { display:none; }
   .v2 .workspace-v2.watching .matchbar { padding:10px 20px; }
   .v2 .workspace-v2.watching .matchbar .eyebrow { display:none; }

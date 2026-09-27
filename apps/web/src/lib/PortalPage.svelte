@@ -4,6 +4,8 @@
   import type { AdminStatus, CloudStatus, Match, PlayerStats, QueueStatus, Replay, RobotBox } from './types';
   import type { Route } from './router';
   import DocsPage from './DocsPage.svelte';
+  import LeaderboardPage from './LeaderboardPage.svelte';
+  import PlayerPage from './PlayerPage.svelte';
   import Button from './components/ui/button.svelte';
   import Card from './components/ui/card.svelte';
   import CardContent from './components/ui/card-content.svelte';
@@ -32,9 +34,15 @@
     try { localStorage.setItem('arena-reduced-motion', String(reducedMotion)); } catch { /* preference stays for this page only */ }
   }
   function requireUser(action: () => void) { if (user) action(); else onSignIn(); }
+  let myHandle = $state('');
+  $effect(() => { if (user) api.myPlayer().then(r => myHandle = r.handle).catch(() => myHandle = ''); else myHandle = ''; });
   let title = $derived(route.name === 'profile' ? `${route.parameter ?? 'Player'} profile` : route.name === 'sdk' || route.name === 'api-docs' ? 'documentation' : route.name.replace('-', ' '));
+  // Arena sessions cut short by a server restart are noise; the next
+  // session started right away. They still show under the Failed filter.
+  const restartedArena = (m: ListedMatch) => m.mode === 'arena' && m.status === 'failed';
+  let liveArena = $derived(matches.find(m => m.mode === 'arena' && m.status === 'running'));
   let visibleMatches = $derived(matches.filter((entry) =>
-    (filter === 'all' || entry.status === filter) &&
+    (filter === 'all' ? !restartedArena(entry) && entry !== liveArena : entry.status === filter) &&
     `${entry.matchId} ${matchModeLabel(entry.mode)} ${(entry.robots ?? []).map(robot => robot.displayName).join(' ')}`.toLowerCase().includes(search.trim().toLowerCase())
   ));
 
@@ -43,8 +51,6 @@
     try {
       if (route.name === 'matches') matches = (await api.listMatches(undefined, 50)).matches;
       if (route.name === 'spectate') matches = (await api.listMatches('running', 50)).matches;
-      if (route.name === 'profile' && route.parameter) ({ profile, recentMatches } = await api.getProfile(route.parameter));
-      if (route.name === 'leaderboard') leaderboard = (await api.getLeaderboard('duel', 50)).entries;
       if (route.name === 'match-detail' && route.parameter) replay = await api.getReplay(route.parameter);
       if (route.name === 'play' && user) { queue = await api.queueStatus(); queueing = queue.status !== 'idle'; openMatchedQueue(); }
       if (route.name === 'admin' && user) admin = await api.adminStatus();
@@ -141,6 +147,12 @@
       </CardContent>
     </Card>
     <p class="m-0 text-xs text-muted-foreground" aria-live="polite">{loading ? 'Loading matches…' : `${visibleMatches.length} ${visibleMatches.length === 1 ? 'match' : 'matches'} shown · latest 50 records`}</p>
+    {#if liveArena && filter === 'all' && !search}
+      <a class="arena-card flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-primary/50 bg-accent px-5 py-4 text-foreground no-underline" href={matchHref(liveArena)}>
+        <span class="flex items-center gap-3"><span class="live-dot size-3 rounded-full bg-primary" aria-hidden="true"></span><span><strong class="text-lg">The Arena is live</strong><span class="block text-sm text-muted-foreground">{(liveArena.robots ?? []).filter(r => !r.bot).length} players · always on · drop in any time</span></span></span>
+        <span class="inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground">Watch or join →</span>
+      </a>
+    {/if}
     <div class="grid gap-2 grid-cols-1">
       {#each visibleMatches as listed (listed.matchId)}
         <a class="group flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3 text-foreground no-underline transition-colors hover:border-primary/50 hover:bg-muted/40" href={matchHref(listed)}>
@@ -167,9 +179,9 @@
 {:else if route.name === 'match-detail'}
   <section class="portal narrow-page"><div class="eyebrow">MATCH RECAP</div><h1>{match?.winnerTeam ? `${match.winnerTeam.toUpperCase()} wins.` : 'Result unavailable.'}</h1><div class="recap-grid"><div><span>DURATION</span><strong>{match?.startedAt && match?.finishedAt ? `${Math.round((Date.parse(match.finishedAt) - Date.parse(match.startedAt)) / 1000)} s` : '--'}</strong></div><div><span>MAP</span><strong>{match?.mapId ?? 'open-field'}</strong></div><div><span>MODE</span><strong>{match?.mode ?? '--'}</strong></div><div><span>REPLAY</span><strong>{replay?.complete ? 'COMPLETE' : `${replay?.events.length ?? 0} SUMMARY EVENTS`}</strong></div></div>{#each match?.robotSummaries ?? [] as robot}<article class="stat-row"><b class={robot.team === 'red' || robot.team === 'blue' ? robot.team : 'solo'}>{robot.team === 'red' ? 'R' : robot.team === 'blue' ? 'B' : 'S'}</b><strong>{robot.name}</strong><span>{robot.kills ?? 0} kills</span><span>{robot.damageDealt ?? 0} dealt</span><span>{robot.itemsPickedUp ?? 0} items</span></article>{/each}{#if replay?.events.length}<div class="replay-feed">{#each replay.events as event}<div><time>T{event.tick}</time><strong>{event.type.replace(/_/g, ' ')}</strong><span>{event.message ?? (event.damage ? `${event.damage} damage` : event.robotId)}</span></div>{/each}</div>{/if}<a class="secondary-action" href={`#/match/${route.parameter}`}>OPEN ARENA VIEW</a></section>
 {:else if route.name === 'profile'}
-  <section class="portal narrow-page"><div class="eyebrow">PLAYER PROFILE</div><h1>{profile?.handle ?? route.parameter}</h1>{#if profile}<div class="profile-card"><div class="profile-mark">{profile.handle.slice(0, 2).toUpperCase()}</div><div><span>PLAYER ID</span><strong>{profile.playerId.slice(0, 12)}</strong><p>Stats updated {new Date(profile.updatedAt).toLocaleString()}.</p></div></div><div class="recap-grid"><div><span>DUEL RATING</span><strong>{profile.ratings.duel ?? 1000}</strong></div><div><span>WINS</span><strong>{profile.wins}</strong></div><div><span>LOSSES / DRAWS</span><strong>{profile.losses} / {profile.draws}</strong></div><div><span>DAMAGE DEALT</span><strong>{profile.damageDealt}</strong></div></div>{#each recentMatches as recent}<a class="match-card" href={matchHref(recent)}><div><strong>{recent.mode} · {recent.mapId}</strong><p>{new Date(recent.createdAt).toLocaleString()}</p></div><strong>{recent.winnerTeam?.toUpperCase() ?? recent.status.toUpperCase()} ›</strong></a>{/each}{:else if !loading}<div class="empty-state"><h2>Profile not found</h2><p>No recorded stats for this handle.</p></div>{/if}</section>
+  <PlayerPage handle={route.parameter ?? ''} {myHandle}/>
 {:else if route.name === 'leaderboard'}
-  <section class="portal"><div class="eyebrow">RANKED // DUEL</div><h1>Leaderboard.</h1><div class="ladder"><div class="ladder-head"><span>RANK</span><span>PLAYER</span><span>RATING</span><span>W/L</span></div>{#each leaderboard as entry}<a class="ladder-row" href={`#/profile/${encodeURIComponent(entry.player.handle)}`}><span>#{entry.rank}</span><strong>{entry.player.handle}</strong><span>{entry.rating}</span><span>{entry.player.wins}/{entry.player.losses}</span></a>{:else}<div class="empty-state"><h2>{loading ? 'Loading ladder…' : 'No ranked results'}</h2><p>Completed duel results will fill this ladder.</p></div>{/each}</div></section>
+  <LeaderboardPage {myHandle}/>
 {:else if route.name === 'create'}
   <section class="portal"><div class="eyebrow">WORKSHOP</div><h1>Create arena.</h1>{#if user}<div class="workshop-grid"><article class="console-card"><label>Map name<input bind:value={mapName} maxlength="48" /></label><div class="form-grid"><label>Width<input type="number" min="400" max="1600" bind:value={customWidth} /></label><label>Height<input type="number" min="300" max="1000" bind:value={customHeight} /></label></div><button class="secondary-action" disabled>EXPORT JSON · COMING LATER</button></article><article class="map-preview" style={`aspect-ratio: ${customWidth}/${customHeight}`}><span>{mapName}</span><i>CUSTOM {customWidth} × {customHeight}</i></article></div>{:else}<div class="auth-gate"><h2>Sign in to use Workshop</h2><button class="deploy" onclick={onSignIn}>SIGN IN</button></div>{/if}</section>
 {:else if route.name === 'settings'}
@@ -202,3 +214,9 @@
 {:else}
   <section class="portal narrow-page"><div class="eyebrow">404</div><h1>Route not found.</h1><a class="secondary-action" href="#/">RETURN HOME</a></section>
 {/if}
+
+<style>
+  .live-dot { box-shadow: 0 0 0 0 var(--color-primary); animation: ping 1.6s ease-out infinite; }
+  @keyframes ping { to { box-shadow: 0 0 0 8px transparent; } }
+  @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+</style>

@@ -129,6 +129,9 @@ Players see their own box output on **More → SSH & runtime**.
   owner decision traces. Clicking a loot crate shows what it holds (crates are
   coloured by contents); clicking a site, hazard, obstacle, or open ground
   explains it and its biome.
+- **Players:** an all-time leaderboard (Arena score or all-mode wins),
+  public player profiles with recent matches, and an end-of-session podium
+  that hands viewers to the next Arena session.
 
 ## Architecture
 

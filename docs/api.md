@@ -250,3 +250,17 @@ map does not resize during a session.
 Limits: the arena holds one match worker slot for its whole session. The
 join queue is in memory; a server restart fails the running session and a
 new one starts within about 10 seconds.
+
+## Leaderboard and players (Arena V2)
+
+- `GET /api/v4/leaderboard?mode=arena|all&limit=N` (public): players
+  aggregated from the latest 500 finished v4 matches. `arena` ranks by score;
+  `all` by wins, then kills. Bots are excluded.
+- `GET /api/v4/players/{handle}` (public): one player's totals and up to 20
+  recent matches.
+- `GET /api/v4/me/player` (auth): the caller's public handle.
+
+Handles are the first 12 hex digits of SHA-256 of the account ID, so account
+IDs never appear in these responses; v4 match `robotSummaries[].playerId` also
+carries the handle. Arena summaries include players who left before the
+session ended, with their last recorded stats.

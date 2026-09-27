@@ -1,4 +1,4 @@
-import type { AdminStatus, CloudStatus, Match, PlayerStats, QueueStatus, Replay, RobotBox, RobotEnrollmentResponse, ScriptTemplate, ScriptVersion, Team } from './types';
+import type { PlayerLine, AdminStatus, CloudStatus, Match, PlayerStats, QueueStatus, Replay, RobotBox, RobotEnrollmentResponse, ScriptTemplate, ScriptVersion, Team } from './types';
 
 let tokenProvider: (() => Promise<string>) | null = null;
 
@@ -12,10 +12,16 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const token = await tokenProvider();
     if (token) authorization = { Authorization: `Bearer ${token}` };
   }
-  const response = await fetch(path, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...authorization, ...init?.headers },
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', ...authorization, ...init?.headers },
+    });
+  } catch {
+    // The browser only says "Failed to fetch"; name the likely cause.
+    throw new Error('Cannot reach the arena server. It may be restarting; try again in a few seconds.');
+  }
   const text = await response.text();
   let body: T & { error?: string };
   try { body = JSON.parse(text); }
@@ -68,6 +74,9 @@ export const api = {
   restoreScriptVersion: (versionId: string) => request<{ versionId: string; source: string }>(`/api/me/box/scripts/${encodeURIComponent(versionId)}/restore`, { method: 'POST' }),
   setBoxKey: (publicKey: string) => request<RobotBox>('/api/me/box/ssh-key', { method: 'PUT', body: JSON.stringify({ publicKey }) }),
   restartBox: () => request<RobotBox>('/api/me/box/restart', { method: 'POST' }),
+  v4Leaderboard: (mode: 'arena' | 'all') => request<{ mode: string; players: PlayerLine[] }>(`/api/v4/leaderboard?mode=${mode}&limit=100`),
+  v4Player: (handle: string) => request<{ player: PlayerLine; recentMatches: Match[] }>(`/api/v4/players/${encodeURIComponent(handle)}`),
+  myPlayer: () => request<{ handle: string }>('/api/v4/me/player'),
   getArena: () => request<{ match: Match; players: number }>('/api/v4/arena'),
   releaseBox: () => request<{ status: string }>('/api/me/box/release', { method: 'POST' }),
 };

@@ -229,8 +229,20 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 			DamageDealt float64 `json:"damageDealt"`
 			DamageTaken float64 `json:"damageTaken"`
 			Kills       int     `json:"kills"`
+			Deaths      int     `json:"deaths"`
+			Score       int     `json:"score"`
+			Bot         bool    `json:"bot"`
 		} `json:"robots"`
 	}
+	// Every human who played, including arena players who left before the
+	// end, keyed by robot ID, with their last seen stats.
+	players := map[string]model.RobotSubmission{}
+	for _, r := range m.Robots {
+		if !r.Bot {
+			players[r.RobotID] = r
+		}
+	}
+	lastSeen := map[string]model.RobotSummary{}
 	type delayed struct {
 		tick uint32
 		raw  json.RawMessage
@@ -252,6 +264,13 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 		}
 		if err = json.Unmarshal(result.Snapshot, &state); err != nil {
 			return s.failMatch(ctx, m, err)
+		}
+		if config.Mode == "arena" && state.Tick%20 == 0 {
+			for _, r := range state.Robots {
+				if _, human := players[r.RobotID]; human {
+					lastSeen[r.RobotID] = model.RobotSummary{RobotID: r.RobotID, Name: r.Name, Team: r.Team, DamageDealt: int(r.DamageDealt), DamageTaken: int(r.DamageTaken), Kills: r.Kills, Deaths: r.Deaths, Score: r.Score}
+				}
+			}
 		}
 		if state.Tick%10 == 0 {
 			frame := append(json.RawMessage(nil), result.Snapshot...)
@@ -355,6 +374,7 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 		for _, join := range joining {
 			joins = append(joins, join.Registration)
 			m.Robots = append(m.Robots, join.Submission)
+			players[join.Submission.RobotID] = join.Submission
 		}
 		if config.Mode == "arena" && len(joining) > 0 {
 			s.mu.Lock()
@@ -447,8 +467,16 @@ func (s *Server) runV4Match(ctx context.Context, m model.Match) error {
 	m.Status = model.MatchFinished
 	m.FinishedAt = &finished
 	m.WinnerTeam = state.WinnerTeam
+	present := map[string]bool{}
 	for _, r := range state.Robots {
-		m.RobotSummaries = append(m.RobotSummaries, model.RobotSummary{RobotID: r.RobotID, Name: r.Name, Team: r.Team, HP: int(r.HP), Alive: r.Alive, DamageDealt: int(r.DamageDealt), DamageTaken: int(r.DamageTaken), Kills: r.Kills})
+		present[r.RobotID] = true
+		m.RobotSummaries = append(m.RobotSummaries, model.RobotSummary{RobotID: r.RobotID, Name: r.Name, Team: r.Team, HP: int(r.HP), Alive: r.Alive, DamageDealt: int(r.DamageDealt), DamageTaken: int(r.DamageTaken), Kills: r.Kills, Deaths: r.Deaths, Score: r.Score, Bot: r.Bot, PlayerID: players[r.RobotID].PlayerID})
+	}
+	for id, seen := range lastSeen {
+		if !present[id] {
+			seen.PlayerID = players[id].PlayerID
+			m.RobotSummaries = append(m.RobotSummaries, seen)
+		}
 	}
 	if err = s.store.PutReplayObject(ctx, fmt.Sprintf("replays/%s/v4/final.json", m.MatchID), string(result.Snapshot)); err != nil {
 		return s.failMatch(ctx, m, err)
