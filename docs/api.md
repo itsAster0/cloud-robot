@@ -203,3 +203,13 @@ the first snapshot and whenever `revision` changes. Clients retain that layout
 until replacement, and discard it on reconnect. All data comes from the existing
 5-second-delayed public stream. Camera subscriptions do not change participant
 observation permissions. Legacy WebSocket snapshots retain their existing format.
+
+## Agent debug marks (v4)
+
+An agent input may carry a top-level `debug` array beside `action`: at most 24
+marks of kind `point`, `line`, `circle`, or `text`, with finite coordinates
+(`x`, `y`, optional `x2`, `y2`, `r` 0..5000), optional `text` (40 bytes max),
+and optional `color` as `#rrggbb`. Invalid marks reject the input with
+`OUT_OF_RANGE`. The API keeps the latest accepted marks per robot and returns
+them as `debug` from the owner-only `GET /api/v4/matches/{id}/view`. They are
+never sent to the Rust worker or recorded in replays.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,8 +163,33 @@ return arena.control({throttle=0.8,turn=0.1,fire=true,label="SSH_SMOKE"}) end})
 		t.Fatal("Lua agents did not connect")
 	}
 	call("a", "POST", "/api/matches/"+id+"/start", nil)
+	// Poll the owner live view while the match runs: scripts built on
+	// arena.tactics draw debug marks, which must arrive there.
+	var sawMarks atomic.Bool
+	polling, stopPolling := context.WithCancel(ctx)
+	defer stopPolling()
+	if behaviour != "" {
+		go func() {
+			for polling.Err() == nil {
+				r, _ := http.NewRequestWithContext(polling, http.MethodGet, server.URL+"/api/v4/matches/"+id+"/view", nil)
+				r.Header.Set("Authorization", "Bearer "+identity.token+"a")
+				if response, err := http.DefaultClient.Do(r); err == nil {
+					body, _ := io.ReadAll(response.Body)
+					response.Body.Close()
+					if strings.Contains(string(body), `"debug":[`) {
+						sawMarks.Store(true)
+					}
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}()
+	}
 	if err = app.runMatch(ctx, id); err != nil {
 		t.Fatal(err)
+	}
+	stopPolling()
+	if behaviour != "" && strings.Contains(source, "arena.tactics(") && !sawMarks.Load() {
+		t.Error("owner live view never carried script debug marks")
 	}
 	completed, err := store.GetMatch(ctx, id)
 	if err != nil || completed.Status != model.MatchFinished {

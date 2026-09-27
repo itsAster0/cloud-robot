@@ -958,6 +958,27 @@ function arena.nearest_site(obs, filter)
   return best, best_distance
 end
 
+-- Debug drawing: marks collected during one decide call are sent with that
+-- decision and drawn only in the owner's live view. They never reach the
+-- simulation. At most 24 marks per decision; extras are dropped. Colours are
+-- "#rrggbb"; text is cut to 40 bytes.
+local debug_marks = {}
+local function add_mark(mark)
+  if #debug_marks < 24 then debug_marks[#debug_marks + 1] = mark end
+end
+arena.draw = {
+  point = function(x, y, color) add_mark({ kind = "point", x = x, y = y, color = color }) end,
+  line = function(x1, y1, x2, y2, color) add_mark({ kind = "line", x = x1, y = y1, x2 = x2, y2 = y2, color = color }) end,
+  circle = function(x, y, r, color) add_mark({ kind = "circle", x = x, y = y, r = r, color = color }) end,
+  text = function(x, y, text, color) add_mark({ kind = "text", x = x, y = y, text = tostring(text):sub(1, 40), color = color }) end,
+}
+-- Returns and clears this decision's marks; the runner calls it.
+function arena.take_debug()
+  local marks = debug_marks
+  debug_marks = {}
+  return marks
+end
+
 -- Effective ranges from the engine catalogue, used for engagement spacing.
 arena.WEAPON_RANGE = { plasma = 650, machine_gun = 450, shotgun = 250, cannon = 700, railgun = 1000,
   grenade = 500, incendiary = 450, cryo = 450, emp = 500 }
@@ -1048,6 +1069,7 @@ function arena.tactics(options)
   local ctx = { state = state }
 
   function ctx.travel(obs, goal, label)
+    if options.debug ~= false then arena.draw.circle(goal.x, goal.y, 30, "#73dfc7") end
     local moved = not state.goal or arena.distance(goal, state.goal) > 120
     if moved or not state.route or state.route.revision ~= obs.revision or arena.is_stuck(obs, state.stuck) then
       state.route, state.goal = arena.begin_path(obs, goal), goal
@@ -1060,6 +1082,14 @@ function arena.tactics(options)
     end
     local action
     if state.route.status == "ready" then
+      if options.debug ~= false then
+        local path, from = state.route.path, math.max(1, state.route.waypoint or 1)
+        local last = obs.self
+        for i = from, math.min(#path, from + 8) do
+          arena.draw.line(last.x, last.y, path[i].x, path[i].y, "#f0c274")
+          last = path[i]
+        end
+      end
       action = arena.follow_path(obs, state.route)
       if action.label == "ARRIVED" then state.route = nil end
     else
@@ -1075,6 +1105,10 @@ function arena.tactics(options)
     local contacts = arena.update_contacts(state.contacts, obs)
     local target = arena.best_target(obs, { range = options.range or 900 })
     if target then
+      if options.debug ~= false then
+        arena.draw.line(self.x, self.y, target.x, target.y, "#ff5b4d")
+        arena.draw.text(target.x, target.y - 40, "TARGET " .. math.floor(arena.distance(self, target)), "#ff5b4d")
+      end
       local override = options.on_enemy and options.on_enemy(obs, target, ctx)
       if override then return override end
       if self.hp < self.maxHp * (options.retreat_hp or 0.3) then
@@ -1185,8 +1219,10 @@ function arena.run(config)
               io.stderr:write("script error: " .. tostring(action_or_error) .. "\n")
               action = { label = "SCRIPT_ERROR", brake = true }
             end
+            local marks = arena.take_debug()
             action = { type = "action", version = 4, sdkVersion = arena.VERSION,
-              sequence = sequence, observedTick = observation.tick, geometryRevision = observation.revision, action = action }
+              sequence = sequence, observedTick = observation.tick, geometryRevision = observation.revision, action = action,
+              debug = #marks > 0 and marks or nil }
           else
             action.type = "action"
             action.requestId = observation.requestId

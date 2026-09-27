@@ -460,7 +460,32 @@ func (s *Server) v4View(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "robot has no live observation; use delayed spectating")
 		return
 	}
-	writeJSON(w, 200, observationWithGeometry(obs, geometry, 0))
+	s.agents.mu.RLock()
+	session := s.agents.sessions[id]
+	s.agents.mu.RUnlock()
+	var marks []v4DebugMark
+	if session != nil {
+		marks = session.debugMarks()
+	}
+	writeJSON(w, 200, withDebugMarks(observationWithGeometry(obs, geometry, 0), marks))
+}
+
+// withDebugMarks adds the owner's latest script drawings to a live view.
+func withDebugMarks(raw json.RawMessage, marks []v4DebugMark) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if len(marks) == 0 || json.Unmarshal(raw, &fields) != nil {
+		return raw
+	}
+	encoded, err := json.Marshal(marks)
+	if err != nil {
+		return raw
+	}
+	fields["debug"] = encoded
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 type editRequest struct {

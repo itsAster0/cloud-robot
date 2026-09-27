@@ -104,6 +104,14 @@ Tactical helpers:
 - `unstick(obs, memory)` plus `note_action(memory, action)`: after about
   0.8 s of commanded driving without progress, backs out while turning.
 
+Debug drawing: `arena.draw.point(x, y, color)`, `line(x1, y1, x2, y2, color)`,
+`circle(x, y, r, color)`, and `text(x, y, text, color)` attach up to 24 marks
+to the current decision (colour `"#rrggbb"`, text up to 40 bytes). They appear
+only in the owner's live view and never reach the simulation. The input
+envelope carries them as a top-level `debug` array next to `action`. The
+gateway rejects malformed marks with `OUT_OF_RANGE`. `arena.tactics` draws its
+goal, route, and target automatically; pass `debug = false` to turn that off.
+
 `drive_to` brakes inside `arrive` (default 25, inside the 35-unit pickup
 reach), slows on approach, crawls through sharp turns, and reverses toward
 nearby points behind the robot instead of pivoting on the spot. `follow_path`

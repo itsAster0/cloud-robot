@@ -202,6 +202,15 @@
           }
           c.textAlign = 'left';
         }
+        // Script debug marks (owner live view only), drawn above everything.
+        for (const m of s.debug ?? []) {
+          const color = m.color ?? '#dfff86';
+          c.strokeStyle = color; c.fillStyle = color; c.lineWidth = 2 / scale;
+          if (m.kind === 'line') { c.beginPath(); c.moveTo(m.x, m.y); c.lineTo(m.x2 ?? m.x, m.y2 ?? m.y); c.stroke(); }
+          else if (m.kind === 'circle') { c.beginPath(); c.arc(m.x, m.y, m.r ?? 20, 0, Math.PI * 2); c.stroke(); }
+          else if (m.kind === 'point') { c.beginPath(); c.arc(m.x, m.y, 5 / scale, 0, Math.PI * 2); c.fill(); }
+          else if (m.kind === 'text') { c.font = `${12 / scale}px monospace`; c.textAlign = 'center'; c.fillText(m.text ?? '', m.x, m.y); c.textAlign = 'left'; }
+        }
         if (s.zone) { c.strokeStyle = '#ed815a'; c.lineWidth = 3 / scale; c.beginPath(); c.arc(s.zone.x, s.zone.y, s.zone.radius, 0, Math.PI * 2); c.stroke(); }
         c.restore();
         const mw = 180, mh = mw * (s.height ?? 26250) / (s.width ?? 42000), mx = width - mw - 12, my = 12, mapScale = mw / (s.width ?? 42000);
