@@ -21,6 +21,8 @@
         <span class="icon">⬡</span> Uplink moved to {e.message?.replace('site-', 'site ')}
       {:else if e.type === 'zone_moved'}
         <span class="icon">◎</span> The safe zone is moving: follow the dashed ring
+      {:else if e.type === 'land_renewed'}
+        <span class="icon">⛰</span> New land formed in {e.message} distant regions
       {:else if e.type === 'reinforcements'}
         <span class="icon">✚</span> {e.message} bot reinforcements dropped in
       {:else if e.type === 'robot_joined'}

@@ -3,8 +3,8 @@ use arena_engine::{
     edit::Edit,
     model::*,
     simulation::{
-        Arena, BOT_WAVE_TICKS, DRIFT_LEG_TICKS, KILL_POINTS, RESTOCK_TICKS, SAFE_SPAWN_DISTANCE,
-        SPAWN_PROTECT_TICKS,
+        Arena, BOT_WAVE_TICKS, DRIFT_LEG_TICKS, KILL_POINTS, RENEW_LEGS, RENEW_MARGIN,
+        RESTOCK_TICKS, SAFE_SPAWN_DISTANCE, SPAWN_PROTECT_TICKS,
     },
     world::*,
 };
@@ -1431,4 +1431,58 @@ fn arena_spawns_are_protected_and_away_from_other_robots() {
         nearest >= SAFE_SPAWN_DISTANCE,
         "joined {nearest:.0} units from another robot"
     );
+}
+
+#[test]
+fn arena_land_renews_far_from_play_and_stays_deterministic() {
+    let config = || -> Config {
+        serde_json::from_value(json!({"matchId":"renew","mode":"arena","capacity":16,"bots":8,"width":42000,"height":26250,"durationSeconds":21600,"seed":21,"siteCount":64,"coverPerSite":8,"lootPerSite":16,"robots":[]})).unwrap()
+    };
+    let mut a = Arena::new(config()).unwrap();
+    let revision = a.world.revision;
+    let mut renewed = false;
+    for _ in 0..(DRIFT_LEG_TICKS * (RENEW_LEGS + 2)) {
+        a.step(BTreeMap::new(), &[]).unwrap();
+        if a.events.iter().any(|e| e.r#type == "land_renewed") {
+            renewed = true;
+            let z = a.zone();
+            // Nothing new appears inside or near the zone, or on a robot.
+            for o in a.world.obstacles.iter().filter(|o| o.id.contains(':')) {
+                let (x, y) = (o.x + o.width / 2., o.y + o.height / 2.);
+                assert!(
+                    distance(x, y, z.x, z.y) > z.radius + RENEW_MARGIN * 0.5,
+                    "{} renewed inside play",
+                    o.id
+                );
+            }
+            for r in a.robots.iter().filter(|r| r.alive) {
+                assert!(
+                    a.world.clear(r.x, r.y, 1.)
+                        || !a.world.obstacles.iter().any(|o| o.id.contains(':')
+                            && r.x >= o.x
+                            && r.x <= o.x + o.width
+                            && r.y >= o.y
+                            && r.y <= o.y + o.height),
+                    "{} buried by new land",
+                    r.robot_id
+                );
+            }
+        }
+    }
+    assert!(renewed, "far land renews as the zone moves");
+    assert!(
+        a.world.revision > revision,
+        "renewal bumps the layout revision"
+    );
+    assert!(
+        a.world.obstacles.iter().any(|o| o.id.contains(':')),
+        "renewed pieces are tagged by leg"
+    );
+    // Same seed, same renewals.
+    let mut b = Arena::new(config()).unwrap();
+    for _ in 0..(DRIFT_LEG_TICKS * (RENEW_LEGS + 2)) {
+        b.step(BTreeMap::new(), &[]).unwrap();
+    }
+    let ids = |w: &World| w.obstacles.iter().map(|o| o.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&a.world), ids(&b.world), "renewal is deterministic");
 }

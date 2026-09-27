@@ -27,6 +27,9 @@ pub struct Arena {
     /// Arena drifting safe zone; None outside arena mode.
     #[serde(default)]
     pub drift: Option<Drift>,
+    /// Arena: the zone leg at which each site's region was last rebuilt.
+    #[serde(default)]
+    pub land_epoch: Vec<u32>,
     #[serde(skip)]
     pub robot_grid: Grid,
 }
@@ -238,6 +241,11 @@ pub const SPAWN_PROTECT_TICKS: u32 = 60;
 pub const BOT_WAVE_TICKS: u32 = 1800;
 /// Arrivals prefer points at least this far from every living robot.
 pub const SAFE_SPAWN_DISTANCE: f64 = 400.;
+/// Endless land: regions this far beyond both the current and the next
+/// zone, with no robot in them, are rebuilt from a new seed, at most once
+/// every RENEW_LEGS legs. The zone keeps finding new ground.
+pub const RENEW_MARGIN: f64 = 2500.;
+pub const RENEW_LEGS: u32 = 3;
 pub const SALVAGE_TICKS: u32 = 600;
 pub const RESTOCK_TICKS: u32 = 600;
 /// Drifting zone: each leg lasts 90 seconds and moves 60% of the radius, so
@@ -346,6 +354,7 @@ impl Arena {
             bot_memory: BTreeMap::new(),
             restock: vec![],
             drift: None,
+            land_epoch: vec![],
             robot_grid: Grid::default(),
         };
         if a.config.mode == "arena" {
@@ -403,6 +412,7 @@ impl Arena {
         {
             self.plan_leg();
             self.event("zone_moved", None, None, None, None);
+            self.renew_far_land();
         }
         let before = self.robots.len();
         let gone: Vec<String> = self
@@ -527,6 +537,107 @@ impl Arena {
         let angle = (pick % 360) as f64;
         find_safe_spawn(&self.config, &self.world, &self.robots, origin, angle)
             .or_else(|| find_spawn(&self.config, &self.world, &self.robots, origin, angle))
+    }
+
+    /// Rebuilds far, empty regions with new terrain. A whole replacement
+    /// world is generated from a seed derived from the leg (about 4 ms at
+    /// the largest size) and each renewed site's region is copied from it:
+    /// biome, site kind, cover, buildings, loot, and hazards. Deterministic,
+    /// so replays and checkpoints reproduce it.
+    fn renew_far_land(&mut self) {
+        let Some(d) = self.drift.clone() else {
+            return;
+        };
+        let count = self.world.sites.len();
+        if count == 0 {
+            return;
+        }
+        if self.land_epoch.len() != count {
+            self.land_epoch = vec![0; count];
+        }
+        let cols = (count as f64).sqrt().ceil() as usize;
+        let (cw, ch) = (
+            self.config.width / cols as f64,
+            self.config.height / cols as f64,
+        );
+        let cell = |i: usize| {
+            let (c, r) = ((i % cols) as f64, (i / cols) as f64);
+            (c * cw, r * ch, (c + 1.) * cw, (r + 1.) * ch)
+        };
+        let inside = |(x0, y0, x1, y1): (f64, f64, f64, f64), x: f64, y: f64| {
+            x >= x0 && x < x1 && y >= y0 && y < y1
+        };
+        let renew: Vec<usize> = (0..count)
+            .filter(|&i| {
+                let rect = cell(i);
+                let (cx, cy) = ((rect.0 + rect.2) / 2., (rect.1 + rect.3) / 2.);
+                let reach = cw.hypot(ch) / 2.;
+                d.leg >= self.land_epoch[i] + RENEW_LEGS
+                    && distance(cx, cy, d.from_x, d.from_y) > d.from_r + RENEW_MARGIN + reach
+                    && distance(cx, cy, d.to_x, d.to_y) > d.to_r + RENEW_MARGIN + reach
+                    && !self
+                        .robots
+                        .iter()
+                        .any(|r| !r.left && inside(rect, r.x, r.y))
+            })
+            .collect();
+        if renew.is_empty() {
+            return;
+        }
+        let mut config = self.config.clone();
+        config.robots.clear();
+        config.seed = (self.config.seed ^ u64::from(d.leg).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            & ((1 << 53) - 1);
+        let fresh = World::generate(&config);
+        let tag = |id: &str| format!("l{}:{}", d.leg, id.rsplit(':').next().unwrap_or(id));
+        let centre = |o: &Obstacle| (o.x + o.width / 2., o.y + o.height / 2.);
+        for &i in &renew {
+            let rect = cell(i);
+            self.world.obstacles.retain(|o| {
+                let (x, y) = centre(o);
+                !inside(rect, x, y)
+            });
+            self.world.containers.retain(|c| !inside(rect, c.x, c.y));
+            self.restock.retain(|c| !inside(rect, c.x, c.y));
+            self.world
+                .hazards
+                .retain(|h| !inside(rect, h.x + h.width / 2., h.y + h.height / 2.));
+            for o in fresh.obstacles.iter().filter(|o| {
+                let (x, y) = centre(o);
+                inside(rect, x, y)
+            }) {
+                let mut o = o.clone();
+                o.id = tag(&o.id);
+                self.world.obstacles.push(o);
+            }
+            for c in fresh.containers.iter().filter(|c| inside(rect, c.x, c.y)) {
+                let mut c = c.clone();
+                c.item_id = tag(&c.item_id);
+                self.restock.push(c.clone());
+                self.world.containers.push(c);
+            }
+            for h in fresh
+                .hazards
+                .iter()
+                .filter(|h| inside(rect, h.x + h.width / 2., h.y + h.height / 2.))
+            {
+                let mut h = h.clone();
+                h.id = tag(&h.id);
+                self.world.hazards.push(h);
+            }
+            self.world.sites[i].biome = fresh.sites[i].biome.clone();
+            self.world.sites[i].kind = fresh.sites[i].kind.clone();
+            self.land_epoch[i] = d.leg;
+        }
+        self.world.revision += 1;
+        self.world.reindex();
+        self.event(
+            "land_renewed",
+            None,
+            None,
+            None,
+            Some(renew.len().to_string()),
+        );
     }
 
     /// Zone radius for the current population: more robots, more room.
@@ -1816,7 +1927,7 @@ impl Arena {
             .filter(|c| !c.contents.is_empty())
             .map(|c| json!({"itemId":c.item_id,"x":c.x,"y":c.y,"type":"container","active":true,"contents":c.contents}))
             .collect();
-        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"hill":self.hill(),"events":self.events,"feed":self.recent_events.iter().filter(|e|matches!(e.r#type.as_str(),"kill"|"bounty_claimed"|"hill_moved"|"robot_joined"|"zone_moved"|"reinforcements")).collect::<Vec<_>>()})
+        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"hill":self.hill(),"events":self.events,"feed":self.recent_events.iter().filter(|e|matches!(e.r#type.as_str(),"kill"|"bounty_claimed"|"hill_moved"|"robot_joined"|"zone_moved"|"reinforcements"|"land_renewed")).collect::<Vec<_>>()})
     }
     /// Status effects a spectator could see on the robot's body.
     fn visible_effects(&self, r: &Robot) -> Vec<&'static str> {
