@@ -26,9 +26,10 @@
     onCopySsh: () => void;
     onLoadMain: () => void;
     onWithdrawMatch: () => void;
+    checking?: boolean;
   }
 
-  let { user, box, sshKey = $bindable(''), pending, copiedSsh, authConfigured, mainSource, onProvision, onSaveKey, onRestart, onCopySsh, onLoadMain, onWithdrawMatch }: Props = $props();
+  let { user, box, checking = false, sshKey = $bindable(''), pending, copiedSsh, authConfigured, mainSource, onProvision, onSaveKey, onRestart, onCopySsh, onLoadMain, onWithdrawMatch }: Props = $props();
 
   let scripts = $state<ScriptTemplate[]>([]);
   let scriptsLoaded = $state(false);
@@ -147,13 +148,15 @@
   function bytes(value = 0) { return `${(value / (1024 * 1024)).toFixed(1)} MB`; }
 </script>
 
-<section class="mx-auto grid max-w-[1200px] gap-5 px-4 py-8 sm:px-8">
+<section class="mx-auto grid max-w-[1200px] gap-5 px-4 py-8 sm:px-8 grid-cols-1">
   {#if !user}
     <Card class="mx-auto mt-10 max-w-lg"><CardHeader><CardTitle>Sign in to manage your box</CardTitle><CardDescription>{authConfigured ? 'Each account owns one persistent container with an SSH development workspace.' : 'WorkOS client ID is not configured; set VITE_WORKOS_CLIENT_ID and rebuild the web app.'}</CardDescription></CardHeader></Card>
+  {:else if !box && checking}
+    <div class="grid min-h-[40vh] place-items-center text-sm text-muted-foreground" role="status"><span class="flex items-center gap-2"><span class="size-2 animate-pulse rounded-full bg-primary"></span>Loading your box…</span></div>
   {:else if !box}
     <Card class="mx-auto mt-10 max-w-lg">
       <CardHeader><CardTitle>Create your robot box</CardTitle><CardDescription>A persistent container bound to your account, with an SSH workspace where your robot's code lives.</CardDescription></CardHeader>
-      <CardContent class="grid gap-4">
+      <CardContent class="grid gap-4 grid-cols-1">
         <div class="grid grid-cols-4 gap-2 text-center text-xs">{#each [['1', 'CPU'], ['512 MB', 'memory'], ['128', 'processes'], ['1 GB', 'workspace']] as [value, label]}<div class="rounded-lg bg-muted/60 p-2"><strong class="block font-mono text-sm">{value}</strong><span class="text-muted-foreground">{label}</span></div>{/each}</div>
         <Button size="lg" onclick={onProvision} disabled={pending.provision}>{pending.provision ? 'Creating your box…' : 'Create my box'}</Button>
       </CardContent>
@@ -162,7 +165,7 @@
     <header class="flex flex-wrap items-end justify-between gap-4">
       <div class="min-w-0">
         <p class="m-0 font-mono text-[11px] tracking-widest text-muted-foreground">YOUR ROBOT BOX · {box.boxId.slice(10, 18)}</p>
-        <h1 class="m-0 truncate text-3xl font-semibold tracking-tight"><span class="text-primary">{box.sshUser}</span>@{box.sshHost}:{box.sshPort}</h1>
+        <h1 class="m-0 text-2xl font-semibold tracking-tight break-all sm:truncate sm:text-3xl sm:break-normal"><span class="text-primary">{box.sshUser}</span>@{box.sshHost}:{box.sshPort}</h1>
         <p class="m-0 mt-1 text-sm text-muted-foreground">Persistent container · checked {updated}</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
@@ -175,20 +178,20 @@
 
     {#if box.error}<div class="rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2.5 text-sm text-destructive" role="alert"><strong>Box fault:</strong> {box.error}</div>{/if}
 
-    <div class="grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
+    <div class="grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] grid-cols-1">
       <Card>
         <CardHeader><CardTitle>Connect over SSH</CardTitle><CardDescription>Edit <code>/workspace/main.lua</code> with any editor, or use the Workspace code editor in the browser.</CardDescription></CardHeader>
-        <CardContent class="grid gap-4">
+        <CardContent class="grid gap-4 grid-cols-1">
           <div class="flex items-center gap-2 rounded-lg border border-border bg-background p-2 pl-3">
             <code class="min-w-0 flex-1 truncate font-mono text-sm">ssh -p {box.sshPort} {box.sshUser}@{box.sshHost}</code>
             <Button size="sm" variant={copiedSsh ? 'secondary' : 'default'} onclick={onCopySsh} disabled={pending.ssh}>{copiedSsh ? 'Copied ✓' : 'Copy'}</Button>
           </div>
-          <ol class="m-0 grid gap-2 pl-0 text-sm">
+          <ol class="m-0 grid gap-2 pl-0 text-sm grid-cols-1">
             <li class="flex items-start gap-3"><Badge variant={box.keyFingerprint ? 'live' : 'warn'}>{box.keyFingerprint ? '✓' : '1'}</Badge><span>{box.keyFingerprint ? 'SSH key installed.' : 'Add your SSH public key below.'}</span></li>
             <li class="flex items-start gap-3"><Badge variant="muted">2</Badge><span>Connect with the command above and edit <code>main.lua</code>, or deploy a strategy below.</span></li>
             <li class="flex items-start gap-3"><Badge variant="muted">3</Badge><span>Register in a lobby: the server snapshots your file and starts it here.</span></li>
           </ol>
-          <div class="grid gap-2 border-t border-border pt-4">
+          <div class="grid gap-2 border-t border-border pt-4 grid-cols-1">
             <div class="flex items-center justify-between gap-3">
               <div class="min-w-0"><p class="m-0 text-sm font-medium">SSH key</p><p class="m-0 truncate font-mono text-xs text-muted-foreground">{box.keyFingerprint ?? 'No key installed; SSH rejects connections until you add one.'}</p></div>
               {#if box.keyFingerprint}<Button size="sm" variant="ghost" onclick={() => showKeyForm = !showKeyForm}>{showKeyForm ? 'Cancel' : 'Replace key'}</Button>{/if}
@@ -201,10 +204,10 @@
         </CardContent>
       </Card>
 
-      <div class="grid content-start gap-5">
+      <div class="grid content-start gap-5 grid-cols-1">
         <Card>
           <CardHeader><CardTitle>{agentLabel(box.agentStatus)}</CardTitle><CardDescription>{agentHelp(box.agentStatus)}</CardDescription></CardHeader>
-          <CardContent class="grid gap-3">
+          <CardContent class="grid gap-3 grid-cols-1">
             <dl class="m-0 grid grid-cols-2 gap-2 text-sm">
               <div class="rounded-lg bg-muted/60 p-2.5"><dt class="text-xs text-muted-foreground">Active robot</dt><dd class="m-0 font-mono">{box.activeRobotId ? box.activeRobotId.slice(0, 8) : '—'}</dd></div>
               <div class="rounded-lg bg-muted/60 p-2.5"><dt class="text-xs text-muted-foreground">Active match</dt><dd class="m-0 font-mono">{#if box.activeMatchId}<a href={`#/v2/${box.activeMatchId}`}>{box.activeMatchId.slice(0, 8)}</a>{:else}—{/if}</dd></div>
@@ -217,8 +220,8 @@
         </Card>
         <Card>
           <CardHeader><CardTitle>Resources</CardTitle></CardHeader>
-          <CardContent class="grid gap-3">
-            <div class="grid gap-1.5"><div class="flex justify-between text-xs"><span class="text-muted-foreground">Workspace</span><span class="font-mono">{bytes(box.usageBytes)} / {bytes(box.limits.storageBytes)} · {storagePercent}%</span></div><Progress label="Workspace usage" value={storagePercent} barClass={storageCritical ? 'bg-destructive' : 'bg-primary'}/></div>
+          <CardContent class="grid gap-3 grid-cols-1">
+            <div class="grid gap-1.5 grid-cols-1"><div class="flex justify-between text-xs"><span class="text-muted-foreground">Workspace</span><span class="font-mono">{bytes(box.usageBytes)} / {bytes(box.limits.storageBytes)} · {storagePercent}%</span></div><Progress label="Workspace usage" value={storagePercent} barClass={storageCritical ? 'bg-destructive' : 'bg-primary'}/></div>
             <div class="grid grid-cols-3 gap-2 text-center text-xs">
               <div class="rounded-lg bg-muted/60 p-2"><strong class="block font-mono text-sm">{box.limits.cpus}</strong><span class="text-muted-foreground">CPU</span></div>
               <div class="rounded-lg bg-muted/60 p-2"><strong class="block font-mono text-sm">{box.limits.memoryMb} MB</strong><span class="text-muted-foreground">memory</span></div>
@@ -243,9 +246,9 @@
 
     <Card>
       <CardHeader><CardTitle>Strategies</CardTitle><CardDescription>Deploying overwrites <code>main.lua</code>. Your previous file stays in the version history below.</CardDescription></CardHeader>
-      <CardContent class="grid gap-3">
+      <CardContent class="grid gap-3 grid-cols-1">
         {#if scriptError}<p class="m-0 text-sm text-destructive">{scriptError}</p>{/if}
-        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 grid-cols-1">
           {#each scripts as script (script.name)}
             <div class="flex flex-col justify-between gap-3 rounded-lg border border-border bg-background p-3">
               <div><p class="m-0 text-sm font-semibold capitalize">{script.name === 'v4' ? 'balanced' : script.name}</p><p class="m-0 mt-1 text-xs text-muted-foreground">{script.description}</p></div>
@@ -258,7 +261,7 @@
 
     <Card>
       <CardHeader class="flex-row items-center justify-between"><div><CardTitle>Version history</CardTitle><CardDescription>Every deploy and registration saves a version to S3.</CardDescription></div><Button size="sm" variant="ghost" onclick={loadVersions}>Refresh</Button></CardHeader>
-      <CardContent class="grid gap-2">
+      <CardContent class="grid gap-2 grid-cols-1">
         {#each versions.slice(0, 12) as version (version.versionId)}
           <div class="flex items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-2">
             <span class="text-sm">{new Date(version.createdAt).toLocaleString()} <span class="ml-2 font-mono text-xs text-muted-foreground">{version.versionId.slice(0, 12)}</span></span>

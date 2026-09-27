@@ -124,7 +124,7 @@
     <div class="roster-preview">{#if mode === 'squad'}<div><span>RED // 5</span><strong>{displayName || user?.firstName || 'You'} + 4 bots</strong></div><div><span>BLUE // 5</span><strong>5 bots</strong></div>{:else if mode === 'solo'}<div><span>FREE-FOR-ALL</span><strong>{displayName || user?.firstName || 'You'}</strong></div><div><span>OPPONENTS</span><strong>{soloBotCount === 0 ? 'Empty sandbox' : `${soloBotCount} bot${soloBotCount > 1 ? 's' : ''}`}</strong></div>{:else}<div><span>RED // R</span><strong>{displayName || user?.firstName || 'You'}</strong></div><div><span>BLUE // B</span><strong>{queue.status === 'waiting' ? 'Searching…' : 'Waiting'}</strong></div>{/if}</div>
   </section>
 {:else if route.name === 'matches' || route.name === 'spectate'}
-  <section class="mx-auto grid max-w-[1100px] gap-5 px-4 py-8 sm:px-8">
+  <section class="mx-auto grid max-w-[1100px] gap-5 px-4 py-8 sm:px-8 grid-cols-1">
     <header class="flex flex-wrap items-end justify-between gap-4">
       <div class="min-w-0">
         <p class="m-0 font-mono text-[11px] tracking-widest text-muted-foreground">{route.name === 'spectate' ? 'WATCH AND LEARN' : 'MATCH LIBRARY'}</p>
@@ -141,7 +141,7 @@
       </CardContent>
     </Card>
     <p class="m-0 text-xs text-muted-foreground" aria-live="polite">{loading ? 'Loading matches…' : `${visibleMatches.length} ${visibleMatches.length === 1 ? 'match' : 'matches'} shown · latest 50 records`}</p>
-    <div class="grid gap-2">
+    <div class="grid gap-2 grid-cols-1">
       {#each visibleMatches as listed (listed.matchId)}
         <a class="group flex items-center justify-between gap-4 rounded-xl border border-border bg-card px-4 py-3 text-foreground no-underline transition-colors hover:border-primary/50 hover:bg-muted/40" href={matchHref(listed)}>
           <div class="min-w-0">
@@ -156,7 +156,7 @@
           <span class="shrink-0 text-sm font-medium text-primary">{listed.status === 'finished' ? 'View results →' : listed.status === 'lobby' ? 'Open lobby →' : listed.status === 'failed' ? 'View match →' : 'Watch →'}</span>
         </a>
       {:else}
-        <Card><CardContent class="grid justify-items-start gap-2 p-6">
+        <Card><CardContent class="grid justify-items-start gap-2 p-6 grid-cols-1">
           <strong>{loading ? 'Loading matches…' : pageError ? 'Matches could not be loaded' : search || filter !== 'all' ? 'No matches found' : route.name === 'spectate' ? 'No matches are live' : 'Your next experiment starts here'}</strong>
           <p class="m-0 text-sm text-muted-foreground">{pageError ? 'Check the connection and refresh to try again.' : search || filter !== 'all' ? 'Try another search or status filter.' : 'Create a sandbox to test your robot, or start a match with game bots.'}</p>
           <a class="text-sm" href="#/workspace/matches">Open match setup →</a>
@@ -173,16 +173,16 @@
 {:else if route.name === 'create'}
   <section class="portal"><div class="eyebrow">WORKSHOP</div><h1>Create arena.</h1>{#if user}<div class="workshop-grid"><article class="console-card"><label>Map name<input bind:value={mapName} maxlength="48" /></label><div class="form-grid"><label>Width<input type="number" min="400" max="1600" bind:value={customWidth} /></label><label>Height<input type="number" min="300" max="1000" bind:value={customHeight} /></label></div><button class="secondary-action" disabled>EXPORT JSON · COMING LATER</button></article><article class="map-preview" style={`aspect-ratio: ${customWidth}/${customHeight}`}><span>{mapName}</span><i>CUSTOM {customWidth} × {customHeight}</i></article></div>{:else}<div class="auth-gate"><h2>Sign in to use Workshop</h2><button class="deploy" onclick={onSignIn}>SIGN IN</button></div>{/if}</section>
 {:else if route.name === 'settings'}
-  <section class="mx-auto grid max-w-2xl gap-5 px-4 py-8 sm:px-8">
+  <section class="mx-auto grid max-w-2xl gap-5 px-4 py-8 sm:px-8 grid-cols-1">
     <header><p class="m-0 font-mono text-[11px] tracking-widest text-muted-foreground">ACCOUNT</p><h1 class="m-0 text-3xl font-semibold tracking-tight">Settings</h1></header>
     {#if user}
       <Card><CardContent class="flex flex-wrap items-center justify-between gap-3 p-5">
         <div class="min-w-0"><p class="m-0 font-semibold">{[user.firstName, user.lastName].filter(Boolean).join(' ') || 'Signed in'}</p><p class="m-0 truncate text-sm text-muted-foreground">{user.email}</p></div>
         <Badge variant="live">Signed in with WorkOS</Badge>
       </CardContent></Card>
-      <Card><CardContent class="grid gap-2 p-5 sm:grid-cols-3">
+      <Card><CardContent class="grid gap-2 p-5 sm:grid-cols-3 grid-cols-1">
         {#each [['#/box', 'Robot box', 'SSH key, resources, output'], ['#/workspace/build', 'Loadout', 'Your 60-point build'], ['#/workspace', 'Code', 'Edit main.lua']] as [href, name, detail]}
-          <a class="grid gap-0.5 rounded-lg border border-border bg-background p-3 text-foreground no-underline hover:border-primary/60" {href}><strong class="text-sm">{name}</strong><span class="text-xs text-muted-foreground">{detail}</span></a>
+          <a class="grid gap-0.5 rounded-lg border border-border bg-background p-3 text-foreground no-underline hover:border-primary/60 grid-cols-1" {href}><strong class="text-sm">{name}</strong><span class="text-xs text-muted-foreground">{detail}</span></a>
         {/each}
       </CardContent></Card>
       <Card><CardContent class="flex items-center justify-between gap-4 p-5">
@@ -190,7 +190,7 @@
         <input type="checkbox" class="size-5 shrink-0 accent-primary" aria-label="Reduced motion" bind:checked={reducedMotion} onchange={savePreferences}/>
       </CardContent></Card>
     {:else}
-      <Card><CardContent class="grid justify-items-start gap-3 p-6"><strong>Sign in to manage your account</strong><Button onclick={onSignIn}>Sign in</Button></CardContent></Card>
+      <Card><CardContent class="grid justify-items-start gap-3 p-6 grid-cols-1"><strong>Sign in to manage your account</strong><Button onclick={onSignIn}>Sign in</Button></CardContent></Card>
     {/if}
   </section>
 {:else if route.name === 'tournaments'}

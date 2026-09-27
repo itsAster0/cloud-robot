@@ -29,7 +29,7 @@
   }
 </script>
 
-<div role="radiogroup" aria-label={ariaLabel} class={cn(layout === 'cards' ? 'grid gap-2' : 'inline-flex w-full rounded-lg border border-border bg-background p-1', klass)}>
+<div role="radiogroup" aria-label={ariaLabel} class={cn(layout === 'cards' ? 'grid grid-cols-1 gap-2' : 'inline-flex w-full rounded-lg border border-border bg-background p-1', klass)}>
   {#each choices as choice, index (choice.value)}
     {@const active = choice.value === value}
     <button
