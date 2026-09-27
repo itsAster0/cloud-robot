@@ -2,8 +2,10 @@
   import { aliveRobots, elapsedLabel, killsLeader, teamColor, teamStandings, weaponGlyph, weaponLabel } from './matchStats';
   import type { Snapshot, RobotState } from './types';
 
-  let { snapshot, youId = '' }: { snapshot: Snapshot | null; youId?: string } = $props();
-  const robots = $derived(snapshot?.robots ?? []);
+  // `roster` is the full-match robot list. Public snapshots carry only robots
+  // near the viewer's camera, so counting those undercounts the match.
+  let { snapshot, roster = [], youId = '' }: { snapshot: Snapshot | null; roster?: RobotState[]; youId?: string } = $props();
+  const robots = $derived(roster.length ? roster : snapshot?.robots ?? []);
   const alive = $derived(aliveRobots(robots));
   const leader = $derived(killsLeader(robots));
   const standings = $derived(teamStandings(robots).slice(0, 4));

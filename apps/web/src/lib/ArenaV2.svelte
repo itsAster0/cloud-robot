@@ -172,6 +172,18 @@
   async function mapEdit(apply: boolean) { await task(async () => { if (!match) return; const raw = JSON.parse(edit); const result = await request(`/api/v4/matches/${match.matchId}/edit?apply=${apply}`, { method: 'POST', body: JSON.stringify(raw) }); preview = JSON.stringify(result, null, 2); message = apply ? 'Edit scheduled. Its revision applies at the effective tick.' : 'Preview validated; inspect the operations before applying.'; }); }
   async function refreshPrivate() { if (!privateView || !match || match.status !== 'running') return; const viewing=match.matchId; try { const obs = await request<{ tick: number; self: RobotState; robots: RobotState[]; obstacles: Snapshot['obstacles']; projectiles: Snapshot['projectiles']; items: { itemId: string; x: number; y: number }[]; zone: Snapshot['zone']; transit: Snapshot['transit']; sites?: Snapshot['sites']; hazards?: Snapshot['hazards']; revision: number; arenaWidth: number; arenaHeight: number }>(`/api/v4/matches/${match.matchId}/view`); if (!privateView || match?.matchId !== viewing) return; const robot = { ...obs.self, name: obs.self.name ?? name }; selected = robot.robotId; snapshot = { type: 'snapshot', version: 4, matchId: match.matchId, tick: obs.tick, tickRate: 20, sequence: obs.tick, status: 'running', robots: [robot, ...obs.robots.map(r => ({ ...r, name: r.name ?? r.robotId.slice(0, 8) }))], projectiles: obs.projectiles, obstacles: obs.obstacles, items: obs.items.map(i => ({ ...i, type: 'container', active: true, spawnTick: 0, pickupRadius: 35 })), zone: obs.zone, transit: obs.transit, sites: obs.sites, hazards: obs.hazards, revision: obs.revision, width: obs.arenaWidth, height: obs.arenaHeight }; } catch (e) { privateView = false; error = e instanceof Error ? e.message : String(e); } }
   $effect(() => { panel = initialPanel; });
+  // Keep the open match's row current as its status changes over the socket;
+  // a periodic refresh catches other lobbies starting or finishing.
+  $effect(() => {
+    const current = match;
+    if (!current || current.engineVersion !== 4) return;
+    untrack(() => {
+      const index = recentMatches.findIndex(item => item.matchId === current.matchId);
+      if (index < 0) recentMatches = [current, ...recentMatches];
+      else if (recentMatches[index].status !== current.status) recentMatches = recentMatches.map((item, i) => i === index ? current : item);
+    });
+  });
+  $effect(() => { const timer = setInterval(() => { if (!matchesLoading && document.visibilityState === 'visible') void refreshMatches(); }, 15000); return () => clearInterval(timer); });
   $effect(() => { source; savedSource; revision; draftKey; editorLoaded; untrack(persistDraft); });
   $effect(() => { if (signedIn) untrack(() => void refreshBox()); else untrack(() => { persistDraft(); box = null; source = ''; savedSource = ''; revision = ''; editorLoaded = false; privateView = false; }); });
   $effect(() => { const requested = matchId; untrack(() => { if (requested && requested !== match?.matchId) { idInput=requested;void open(); } }); });
@@ -259,7 +271,7 @@
             <div class="world-split"><div class="world-main">{#key replayEnd > 0 ? snapshot?.tick : `${match.matchId}:${privateView}:${viewerEpoch}`}<WorldView {snapshot} {selected} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} sites={matchPreview?.sites ?? []} overview={privateView || replayEnd > 0 ? [] : overview} onregion={cameraRegion} onselect={id => selected = id}/>{/key}</div><aside class="world-side" aria-label="Robot inspector"><RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} leaderId={killsLeader(snapshot?.robots ?? [])?.robotId ?? ''} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/></aside></div>
             {#if match.status !== 'finished'}<div class="view-controls"><label class="check"><input type="checkbox" bind:checked={privateView} disabled={!signedIn || !registered} onchange={() => snapshot = null}/>My robot's live view</label><span>{connectionStatus} · {privateView ? 'Robot observations' : 'Public view delayed 5s'}</span></div>{/if}
             {#if match.status === 'running' && !snapshot}<p class="hint loading-snapshot">Waiting for a snapshot. Public spectating starts after five seconds of simulation.</p>{/if}
-            <MatchOverview {snapshot} youId={privateView ? selected : ''}/>
+            <MatchOverview {snapshot} roster={privateView || replayEnd > 0 ? [] : overview} youId={privateView ? selected : ''}/>
             <VirtualRoster robots={privateView || replayEnd > 0 ? snapshot?.robots ?? [] : overview} {selected} youId={privateView ? selected : ''} onselect={id => selected = id}/>
           {/if}
         {/if}
