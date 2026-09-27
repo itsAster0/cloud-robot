@@ -187,6 +187,25 @@
           c.fillStyle = 'rgba(0,0,0,.35)'; c.fillRect(item.x - 7, item.y - 1, 14, 2); c.fillRect(item.x - 1, item.y - 7, 2, 14);
         }
         for (const link of s.transit ?? []) if (visible(link.x, link.y)) { c.strokeStyle = '#b58dff'; c.lineWidth = 3; c.beginPath(); c.arc(link.x, link.y, 24, 0, Math.PI * 2); c.stroke(); }
+        if (s.zone?.active) {
+          // Storm outside the safe zone, the zone edge, and for the drifting
+          // arena zone its next position with a travel arrow.
+          const z = s.zone, W = s.width ?? 42000, H = s.height ?? 26250;
+          c.save(); c.beginPath(); c.rect(-2000, -2000, W + 4000, H + 4000); c.arc(z.x, z.y, z.radius, 0, Math.PI * 2, true);
+          c.fillStyle = 'rgba(120,30,60,.22)'; c.fill('evenodd'); c.restore();
+          c.strokeStyle = '#ed815a'; c.lineWidth = 4 / scale; c.beginPath(); c.arc(z.x, z.y, z.radius, 0, Math.PI * 2); c.stroke();
+          if (z.next) {
+            c.strokeStyle = '#f5f0a0'; c.lineWidth = 3 / scale; c.setLineDash([24 / scale, 14 / scale]);
+            c.beginPath(); c.arc(z.next.x, z.next.y, z.next.radius, 0, Math.PI * 2); c.stroke(); c.setLineDash([]);
+            const dx = z.next.x - z.x, dy = z.next.y - z.y, len = Math.hypot(dx, dy);
+            if (len > 40) {
+              const a = Math.atan2(dy, dx), tip = { x: z.x + dx * 0.85, y: z.y + dy * 0.85 }, head = 90 / Math.max(scale, 0.25);
+              c.strokeStyle = 'rgba(245,240,160,.7)'; c.lineWidth = 6 / scale; c.beginPath(); c.moveTo(z.x, z.y); c.lineTo(tip.x, tip.y);
+              c.moveTo(tip.x, tip.y); c.lineTo(tip.x - Math.cos(a - 0.5) * head, tip.y - Math.sin(a - 0.5) * head);
+              c.moveTo(tip.x, tip.y); c.lineTo(tip.x - Math.cos(a + 0.5) * head, tip.y - Math.sin(a + 0.5) * head); c.stroke();
+            }
+          }
+        }
         if (s.hill) {
           // Uplink objective: pulsing ring in the holder's colour, grey
           // when free, striped red when contested.
@@ -263,7 +282,6 @@
           else if (m.kind === 'point') { c.beginPath(); c.arc(m.x, m.y, 5 / scale, 0, Math.PI * 2); c.fill(); }
           else if (m.kind === 'text') { c.font = `${12 / scale}px monospace`; c.textAlign = 'center'; c.fillText(m.text ?? '', m.x, m.y); c.textAlign = 'left'; }
         }
-        if (s.zone) { c.strokeStyle = '#ed815a'; c.lineWidth = 3 / scale; c.beginPath(); c.arc(s.zone.x, s.zone.y, s.zone.radius, 0, Math.PI * 2); c.stroke(); }
         c.restore();
         const mw = 180, mh = mw * (s.height ?? 26250) / (s.width ?? 42000), mx = width - mw - 12, my = 12, mapScale = mw / (s.width ?? 42000);
         c.fillStyle = '#07110fee'; c.fillRect(mx, my, mw, mh); c.strokeStyle = '#648272'; c.strokeRect(mx, my, mw, mh);

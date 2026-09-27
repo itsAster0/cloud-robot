@@ -210,6 +210,8 @@ export interface ZoneState {
   radius: number;
   damage: number;
   stage?: number;
+  // Arena: where the drifting zone is heading and the tick it arrives.
+  next?: { x: number; y: number; radius: number; arrivesAt: number };
 }
 
 export interface ScannedItem {

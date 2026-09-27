@@ -19,7 +19,7 @@ import (
 
 func runningArena(t *testing.T, h *harness) *v4Control {
 	t.Helper()
-	c := arenaConfig(0)
+	c := arenaConfig()
 	c.MatchID = "arena"
 	h.store.matches["arena"] = model.Match{MatchID: "arena", OwnerID: arenaOwner, Mode: "arena", EngineVersion: 4, Status: model.MatchRunning, ArenaConfig: mustJSON(c),
 		Robots: []model.RobotSubmission{{RobotID: "bot-000", Bot: true, Team: "bot-000"}}}
@@ -28,29 +28,19 @@ func runningArena(t *testing.T, h *harness) *v4Control {
 	return control
 }
 
-func TestArenaGrowsWithLastSessionPeak(t *testing.T) {
-	small, busy := arenaConfig(0), arenaConfig(100)
-	if small.Capacity != 128 || busy.Capacity != 208 || busy.Width <= small.Width {
-		t.Fatalf("want 128 then 208 slots on a wider map, got %d (%.0f) and %d (%.0f)", small.Capacity, small.Width, busy.Capacity, busy.Width)
-	}
-	if arenaConfig(500).Capacity != 256 {
-		t.Fatal("arena capacity is capped at 256")
-	}
-	if err := busy.Validate(); err != nil {
-		t.Fatal(err)
+func TestArenaConfigKeepsABotFloorAndRoomForPlayers(t *testing.T) {
+	c := arenaConfig()
+	if c.Capacity != 256 || c.Bots == nil || *c.Bots != 128 {
+		t.Fatalf("want 256 slots with a 128-robot floor, got %d / %v", c.Capacity, c.Bots)
 	}
 }
 
 func TestArenaConfigValidates(t *testing.T) {
-	c := arenaConfig(0)
+	c := arenaConfig()
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	c.DurationSeconds = 21601
-	if c.Validate() == nil {
-		t.Fatal("arena sessions are capped at six hours")
-	}
-	c.Mode, c.DurationSeconds = "br-solo", 3600
+	c.Mode, c.Bots, c.DurationSeconds = "br-solo", nil, 3600
 	if c.Validate() == nil {
 		t.Fatal("other modes keep the short duration cap")
 	}

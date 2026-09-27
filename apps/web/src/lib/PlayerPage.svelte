@@ -44,7 +44,7 @@
   {:else}
     <Card><CardContent class="grid justify-items-start gap-2 p-6">
       <strong>{loading ? 'Loading player…' : 'No stats yet'}</strong>
-      <p class="m-0 text-sm text-muted-foreground">{loading ? '' : handle === myHandle ? 'Your stats appear after your first match with a result. Play the Arena: sessions finish every 30 minutes.' : error}</p>
+      <p class="m-0 text-sm text-muted-foreground">{loading ? '' : handle === myHandle ? 'Your stats appear after your first match with a result. Arena stats are saved every minute while you play.' : error}</p>
       {#if !loading}<a href="#/play">Play now →</a>{/if}
     </CardContent></Card>
   {/if}

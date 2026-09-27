@@ -24,6 +24,9 @@ pub struct Arena {
     /// Arena site loot as generated, restocked every 30 seconds.
     #[serde(default)]
     pub restock: Vec<Container>,
+    /// Arena drifting safe zone; None outside arena mode.
+    #[serde(default)]
+    pub drift: Option<Drift>,
     #[serde(skip)]
     pub robot_grid: Grid,
 }
@@ -207,6 +210,19 @@ pub const HILL_POINTS: u32 = 5;
 pub const SPAWN_PROTECT_TICKS: u32 = 40;
 pub const SALVAGE_TICKS: u32 = 600;
 pub const RESTOCK_TICKS: u32 = 600;
+/// Drifting zone: each leg lasts 90 seconds and moves 60% of the radius, so
+/// consecutive zones always overlap. Outside it robots take 4 HP a second.
+pub const DRIFT_LEG_TICKS: u32 = 1800;
+pub const DRIFT_STEP: f64 = 0.6;
+pub const DRIFT_DAMAGE: f64 = 4.;
+
+/// A value in [0, 1) from the seed and a counter.
+fn unit(seed: u64, n: u64) -> f64 {
+    let mut z = seed ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+}
 
 impl Arena {
     pub fn new(mut config: Config) -> Result<Self, String> {
@@ -299,10 +315,12 @@ impl Arena {
             bot_intents: BTreeMap::new(),
             bot_memory: BTreeMap::new(),
             restock: vec![],
+            drift: None,
             robot_grid: Grid::default(),
         };
         if a.config.mode == "arena" {
             a.restock = a.world.containers.clone();
+            a.start_drift();
         }
         a.reindex();
         Ok(a)
@@ -348,6 +366,14 @@ impl Arena {
     /// Arena housekeeping at the start of a tick: drop robots whose players
     /// left, and respawn destroyed robots whose timer has run out.
     fn arena_upkeep(&mut self) {
+        if self
+            .drift
+            .as_ref()
+            .is_some_and(|d| self.tick >= d.leg_start + DRIFT_LEG_TICKS)
+        {
+            self.plan_leg();
+            self.event("zone_moved", None, None, None, None);
+        }
         let before = self.robots.len();
         let gone: Vec<String> = self
             .robots
@@ -392,10 +418,11 @@ impl Arena {
         }
         // Keep a full arena: when players leave and bots fill empty slots,
         // new bots take their place.
-        if self.config.bots.is_none() {
+        {
+            let target = self.population_target();
             let mut live = self.robots.iter().filter(|r| !r.left).count();
             let mut n = 0u64;
-            while live < self.config.capacity {
+            while live < target {
                 let id = format!("bot-r{}-{}", self.tick, n);
                 let reg = Registration {
                     robot_id: id.clone(),
@@ -426,14 +453,141 @@ impl Arena {
         let pick = (self.tick as u64)
             .wrapping_mul(0x9E37_79B9)
             .wrapping_add(salt.wrapping_mul(7919));
-        let site = &self.world.sites[(pick % self.world.sites.len() as u64) as usize];
+        // Arena arrivals land inside the drifting zone: at one of its sites,
+        // or near its centre when no site is inside.
+        let origin = match &self.drift {
+            Some(d) => {
+                let inside = self.sites_in_zone(self.tick);
+                if inside.is_empty() {
+                    let (x, y, _) = self.drift_zone(d, self.tick);
+                    (x, y)
+                } else {
+                    let site = &self.world.sites[inside[(pick % inside.len() as u64) as usize]];
+                    (site.x, site.y)
+                }
+            }
+            None => {
+                let site = &self.world.sites[(pick % self.world.sites.len() as u64) as usize];
+                (site.x, site.y)
+            }
+        };
         find_spawn(
             &self.config,
             &self.world,
             &self.robots,
-            (site.x, site.y),
+            origin,
             (pick % 360) as f64,
         )
+    }
+
+    /// Zone radius for the current population: more robots, more room.
+    fn drift_radius(&self) -> f64 {
+        let live = self.robots.iter().filter(|r| !r.left).count().max(1) as f64;
+        let limit = (self.config.width.min(self.config.height) / 2. - 150.).max(600.);
+        (1500. + 300. * live.sqrt()).clamp(1800_f64.min(limit), limit)
+    }
+
+    /// Opens the arena zone on a seeded site and sets it moving.
+    fn start_drift(&mut self) {
+        let r = self.drift_radius();
+        let (cx, cy) = if self.world.sites.is_empty() {
+            (self.config.width / 2., self.config.height / 2.)
+        } else {
+            let i = (unit(self.config.seed, 7) * self.world.sites.len() as f64) as usize;
+            (self.world.sites[i].x, self.world.sites[i].y)
+        };
+        let cx = cx.clamp(r + 100., (self.config.width - r - 100.).max(r + 100.));
+        let cy = cy.clamp(r + 100., (self.config.height - r - 100.).max(r + 100.));
+        self.drift = Some(Drift {
+            from_x: cx,
+            from_y: cy,
+            from_r: r,
+            to_x: cx,
+            to_y: cy,
+            to_r: r,
+            leg_start: 0,
+            leg: 0,
+            heading: unit(self.config.seed, 11) * std::f64::consts::TAU,
+        });
+        self.plan_leg();
+        // Everyone starts inside the zone.
+        for i in 0..self.robots.len() {
+            if let Some((x, y)) = self.arena_spawn(i as u64 + 1) {
+                self.robots[i].x = x;
+                self.robots[i].y = y;
+            }
+        }
+    }
+
+    /// Starts the next leg: the zone keeps its heading with a seeded wobble,
+    /// turns away from the world edge, and resizes for the population.
+    fn plan_leg(&mut self) {
+        let Some(mut d) = self.drift.clone() else {
+            return;
+        };
+        d.from_x = d.to_x;
+        d.from_y = d.to_y;
+        d.from_r = d.to_r;
+        d.leg += 1;
+        d.leg_start = self.tick;
+        let r = self.drift_radius();
+        let step = d.from_r * DRIFT_STEP;
+        let (w, h) = (self.config.width, self.config.height);
+        let fits = |x: f64, y: f64| {
+            x >= r + 100. && x <= w - r - 100. && y >= r + 100. && y <= h - r - 100.
+        };
+        let wobble = (unit(self.config.seed, u64::from(d.leg) + 101) - 0.5) * 1.4;
+        let mut chosen = None;
+        for k in 0..8 {
+            let turn = [0., 1., -1., 2., -2., 3., -3., 4.][k] * std::f64::consts::FRAC_PI_4;
+            let a = d.heading + wobble + turn;
+            let (x, y) = (d.from_x + a.cos() * step, d.from_y + a.sin() * step);
+            if fits(x, y) {
+                chosen = Some((a, x, y));
+                break;
+            }
+        }
+        let (a, x, y) = chosen.unwrap_or_else(|| {
+            // Cornered: head for the middle of the world.
+            let a = (h / 2. - d.from_y).atan2(w / 2. - d.from_x);
+            let x = (d.from_x + a.cos() * step).clamp(r + 100., (w - r - 100.).max(r + 100.));
+            let y = (d.from_y + a.sin() * step).clamp(r + 100., (h - r - 100.).max(r + 100.));
+            (a, x, y)
+        });
+        d.heading = a;
+        d.to_x = x;
+        d.to_y = y;
+        d.to_r = r;
+        self.drift = Some(d);
+    }
+
+    /// The drifting zone at tick `t` of the current leg (smoothstep glide).
+    fn drift_zone(&self, d: &Drift, t: u32) -> (f64, f64, f64) {
+        let f =
+            (f64::from(t.saturating_sub(d.leg_start)) / f64::from(DRIFT_LEG_TICKS)).clamp(0., 1.);
+        let f = f * f * (3. - 2. * f);
+        (
+            d.from_x + (d.to_x - d.from_x) * f,
+            d.from_y + (d.to_y - d.from_y) * f,
+            d.from_r + (d.to_r - d.from_r) * f,
+        )
+    }
+
+    /// Sites inside the zone at tick `t`, nearest first.
+    fn sites_in_zone(&self, t: u32) -> Vec<usize> {
+        let Some(d) = &self.drift else {
+            return (0..self.world.sites.len()).collect();
+        };
+        let (x, y, r) = self.drift_zone(d, t);
+        let mut inside: Vec<usize> = (0..self.world.sites.len())
+            .filter(|&i| distance(self.world.sites[i].x, self.world.sites[i].y, x, y) < r * 0.75)
+            .collect();
+        inside.sort_by(|&a, &b| {
+            let da = distance(self.world.sites[a].x, self.world.sites[a].y, x, y);
+            let db = distance(self.world.sites[b].x, self.world.sites[b].y, x, y);
+            da.total_cmp(&db).then(a.cmp(&b))
+        });
+        inside
     }
 
     /// Expiry for dropped containers: arena salvage fades, others persist.
@@ -450,7 +604,19 @@ impl Arena {
         let pick = (self.config.seed ^ round.wrapping_mul(0x9E37_79B9_7F4A_7C15))
             .wrapping_mul(0xBF58_476D_1CE4_E5B9)
             >> 33;
-        Some((pick % self.world.sites.len() as u64) as usize)
+        // Chosen among sites inside the zone as it stood when the round
+        // began, so the Uplink stays put for its minute and inside play.
+        let inside = self.sites_in_zone((self.tick / HILL_TICKS) * HILL_TICKS);
+        if inside.is_empty() {
+            let d = self.drift.as_ref()?;
+            let (x, y, _) = self.drift_zone(d, self.tick);
+            return (0..self.world.sites.len()).min_by(|&a, &b| {
+                let da = distance(self.world.sites[a].x, self.world.sites[a].y, x, y);
+                let db = distance(self.world.sites[b].x, self.world.sites[b].y, x, y);
+                da.total_cmp(&db)
+            });
+        }
+        Some(inside[(pick % inside.len() as u64) as usize])
     }
 
     /// Uplink state for snapshots and observations: where it is, when it
@@ -530,6 +696,17 @@ impl Arena {
 
     /// Arena mode: add a player's robot mid-match. When the arena is full a
     /// bot makes room; a full arena of players rejects the join.
+    /// Arena population: at least `bots` robots (bots fill the gap), more
+    /// when more players are in, never above capacity.
+    fn population_target(&self) -> usize {
+        let humans = self.robots.iter().filter(|r| !r.bot && !r.left).count();
+        self.config
+            .bots
+            .unwrap_or(self.config.capacity)
+            .max(humans)
+            .min(self.config.capacity)
+    }
+
     pub fn join(&mut self, reg: Registration) -> Result<(), String> {
         if self.config.mode != "arena" {
             return Err("only arena matches accept players mid-match".into());
@@ -539,7 +716,10 @@ impl Arena {
         }
         crate::catalog::validate(&reg.loadout)?;
         let live = self.robots.iter().filter(|r| !r.left).count();
-        if live >= self.config.capacity {
+        let has_bot = self.robots.iter().any(|r| r.bot);
+        // Players replace bots while the arena is at its population target;
+        // once no bots are left the arena grows up to capacity.
+        if live >= self.population_target().max(1) && (has_bot || live >= self.config.capacity) {
             let bot = self
                 .robots
                 .iter()
@@ -572,7 +752,25 @@ impl Arena {
             radius: self.config.width.hypot(self.config.height) / 2.,
             damage: 0.,
             stage: 0,
+            next: None,
         };
+        if let Some(d) = &self.drift {
+            let (x, y, r) = self.drift_zone(d, self.tick);
+            return Zone {
+                active: true,
+                x,
+                y,
+                radius: r,
+                damage: DRIFT_DAMAGE,
+                stage: d.leg as usize,
+                next: Some(ZoneNext {
+                    x: d.to_x,
+                    y: d.to_y,
+                    radius: d.to_r,
+                    arrives_at: d.leg_start + DRIFT_LEG_TICKS,
+                }),
+            };
+        }
         for (i, p) in self.world.zones.iter().enumerate() {
             if self.tick < p.start_tick {
                 break;
@@ -1487,22 +1685,7 @@ impl Arena {
     }
     fn finish(&mut self) {
         if self.config.mode == "arena" {
-            // Arena sessions only end on time; the top scorer wins.
-            if self.tick >= self.config.duration_seconds * 20 {
-                self.finished = true;
-                self.winner_team = self
-                    .robots
-                    .iter()
-                    .max_by(|a, b| {
-                        a.score
-                            .cmp(&b.score)
-                            .then(a.kills.cmp(&b.kills))
-                            .then(b.deaths.cmp(&a.deaths))
-                            .then(b.robot_id.cmp(&a.robot_id))
-                    })
-                    .map(|r| r.team.clone())
-                    .unwrap_or_else(|| "draw".into());
-            }
+            // The arena is endless: it stops only with its worker.
             return;
         }
         if self.config.mode == "sandbox" && self.tick < self.config.duration_seconds * 20 {
@@ -1582,7 +1765,7 @@ impl Arena {
             .filter(|c| !c.contents.is_empty())
             .map(|c| json!({"itemId":c.item_id,"x":c.x,"y":c.y,"type":"container","active":true,"contents":c.contents}))
             .collect();
-        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"hill":self.hill(),"events":self.events,"feed":self.recent_events.iter().filter(|e|matches!(e.r#type.as_str(),"kill"|"bounty_claimed"|"hill_moved"|"robot_joined")).collect::<Vec<_>>()})
+        json!({"type":"snapshot","version":4,"matchId":self.config.match_id,"sequence":self.tick,"tick":self.tick,"tickRate":20,"status":if self.finished{"finished"}else{"running"},"winnerTeam":self.winner_team,"width":self.config.width,"height":self.config.height,"mapId":"world-v4","mode":self.config.mode,"endTick":self.config.duration_seconds*20,"revision":self.world.revision,"robots":robots,"projectiles":self.projectiles,"items":items,"obstacles":self.world.obstacles,"mines":self.mines,"fields":self.fields,"transit":self.world.transit,"hazards":self.world.hazards,"sites":self.world.sites,"zone":self.zone(),"hill":self.hill(),"events":self.events,"feed":self.recent_events.iter().filter(|e|matches!(e.r#type.as_str(),"kill"|"bounty_claimed"|"hill_moved"|"robot_joined"|"zone_moved")).collect::<Vec<_>>()})
     }
     /// Status effects a spectator could see on the robot's body.
     fn visible_effects(&self, r: &Robot) -> Vec<&'static str> {

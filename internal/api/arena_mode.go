@@ -16,21 +16,18 @@ import (
 // arenaOwner marks the always-on arena session the server keeps alive.
 const arenaOwner = "system:arena"
 
-// arenaConfig is the persistent arena: free-for-all, respawns, no zone, and
-// long sessions that rotate to a fresh seed when they end. ARENA_CAPACITY
-// (default 128) is the smallest session and bots fill every empty slot from
-// the first tick; a busy previous session (peak players) grows the next one
-// to twice its peak plus room for bots, up to 256 slots.
-func arenaConfig(peak int) enginev4.Config {
-	capacity := envInt("ARENA_CAPACITY", 128, 2, 256)
-	capacity = min(256, max(capacity, (peak*2+8+7)/8*8))
-	// Map area grows with capacity so density stays similar.
-	width := min(47000, 4000+float64(capacity)*220)
+// arenaConfig is the endless arena: free-for-all with respawns on a large
+// world whose safe zone keeps drifting (see the engine's Drift). Bots keep
+// at least ARENA_ROBOTS robots in play (default 128) and step aside for
+// players; players can join until the engine's 256-robot limit. The engine
+// sizes the zone from the live population. DurationSeconds is required by
+// validation but the arena never ends on time.
+func arenaConfig() enginev4.Config {
+	robots := envInt("ARENA_ROBOTS", 128, 2, 256)
 	return enginev4.Config{
-		MatchID: uuid.NewString(), Mode: "arena", Capacity: capacity,
-		Width: width, Height: width * 0.625,
-		DurationSeconds: envInt("ARENA_SESSION_SECONDS", 1800, 60, 21600),
-		SiteCount:       max(6, capacity/2), CoverPerSite: 8, LootPerSite: 16,
+		MatchID: uuid.NewString(), Mode: "arena", Capacity: 256, Bots: &robots,
+		Width: 42000, Height: 26250, DurationSeconds: 21600,
+		SiteCount: 64, CoverPerSite: 8, LootPerSite: 16,
 		Seed: uint64(time.Now().UnixNano()) & ((1 << 53) - 1),
 	}
 }
@@ -66,8 +63,7 @@ func (s *Server) ensureArena(ctx context.Context) {
 	if _, ok := s.currentArena(ctx); ok {
 		return
 	}
-	c := arenaConfig(s.arenaPeak)
-	s.arenaPeak = 0
+	c := arenaConfig()
 	if err := c.Validate(); err != nil {
 		slog.Error("arena config", "error", err)
 		return

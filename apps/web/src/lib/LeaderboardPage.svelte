@@ -66,7 +66,7 @@
       {:else}
         <div class="grid justify-items-start gap-2 p-6">
           <strong>{loading ? 'Loading standings…' : error ? 'Standings could not be loaded' : 'No finished matches yet'}</strong>
-          <p class="m-0 text-sm text-muted-foreground">{error || 'Standings fill in when matches with players finish. Arena sessions finish every 30 minutes.'}</p>
+          <p class="m-0 text-sm text-muted-foreground">{error || 'Standings fill in as players score. Arena stats are saved every minute.'}</p>
           {#if !loading && !error}<a class="inline-flex" href="#/play"><Button>Play now</Button></a>{/if}
         </div>
       {/each}

@@ -2,7 +2,7 @@ use arena_engine::{
     catalog::{self, Loadout},
     edit::Edit,
     model::*,
-    simulation::{Arena, KILL_POINTS, RESTOCK_TICKS, SPAWN_PROTECT_TICKS},
+    simulation::{Arena, DRIFT_LEG_TICKS, KILL_POINTS, RESTOCK_TICKS, SPAWN_PROTECT_TICKS},
     world::*,
 };
 use serde_json::json;
@@ -1086,7 +1086,7 @@ fn arena_mode_respawns_and_never_closes() {
     let mut respawned = false;
     for _ in 0..3000 {
         a.step(BTreeMap::new(), &[]).unwrap();
-        assert!(!a.zone().active, "arena has no closing zone");
+        assert!(a.zone().next.is_some(), "arena zone drifts instead of closing");
         assert!(!a.finished, "arena only ends on time");
         respawned |= a.events.iter().any(|e| e.r#type == "robot_respawned");
     }
@@ -1130,13 +1130,84 @@ fn arena_join_displaces_a_bot_and_leave_refills() {
 }
 
 #[test]
-fn arena_session_ends_on_time_with_a_winner() {
-    let mut a = Arena::new(arena_config(4, 10)).unwrap();
-    while !a.finished {
-        a.step(BTreeMap::new(), &[]).unwrap();
+fn arena_zone_drifts_with_overlap_and_never_ends() {
+    let c: Config = serde_json::from_value(json!({"matchId":"drift","mode":"arena","capacity":12,"width":24000,"height":15000,"durationSeconds":10,"seed":5,"siteCount":16,"robots":[]})).unwrap();
+    let mut a = Arena::new(c).unwrap();
+    let start = a.zone();
+    assert!(
+        start.active && start.next.is_some(),
+        "arena zone is live and heading somewhere"
+    );
+    for r in &a.robots {
+        assert!(
+            distance(r.x, r.y, start.x, start.y) <= start.radius,
+            "{} spawned outside the zone",
+            r.robot_id
+        );
     }
-    assert_eq!(a.tick, 200);
-    assert!(!a.winner_team.is_empty());
+    let mut previous = (start.x, start.y, start.radius);
+    let mut travelled = 0.;
+    for leg in 0..4 {
+        for _ in 0..DRIFT_LEG_TICKS {
+            a.step(BTreeMap::new(), &[]).unwrap();
+            let z = a.zone();
+            assert!(
+                z.x - z.radius >= 0. && z.x + z.radius <= 24000.,
+                "zone stays in the world"
+            );
+        }
+        let z = a.zone();
+        let moved = distance(previous.0, previous.1, z.x, z.y);
+        assert!(
+            moved < previous.2 + z.radius,
+            "leg {leg}: new zone overlaps the old one"
+        );
+        travelled += moved;
+        previous = (z.x, z.y, z.radius);
+    }
+    assert!(travelled > 2000., "the zone keeps moving: {travelled}");
+    assert!(!a.finished, "the arena never ends");
+    // Respawns land in the current zone.
+    let z = a.zone();
+    for r in a.robots.iter().filter(|r| r.alive && r.deaths > 0) {
+        assert!(
+            distance(r.x, r.y, z.x, z.y) <= z.radius + 600.,
+            "respawned far outside the zone"
+        );
+    }
+}
+
+#[test]
+fn arena_grows_past_the_bot_target_for_players() {
+    let c: Config = serde_json::from_value(json!({"matchId":"grow","mode":"arena","capacity":6,"bots":2,"width":6000,"height":3750,"durationSeconds":10,"seed":3,"robots":[]})).unwrap();
+    let mut a = Arena::new(c).unwrap();
+    assert_eq!(a.robots.len(), 2, "bots fill to the target");
+    for n in 0..4 {
+        let reg = serde_json::from_value(json!({"robotId":format!("p{n}"),"name":"P","loadout":{"chassis":"generalist","weapon":"plasma"}})).unwrap();
+        a.join(reg).unwrap();
+    }
+    a.step(BTreeMap::new(), &[]).unwrap();
+    let humans = a.robots.iter().filter(|r| !r.bot).count();
+    assert_eq!(humans, 4, "players join beyond the bot target");
+    assert!(
+        a.robots.iter().all(|r| !r.bot),
+        "bots stepped aside for players"
+    );
+    let extra = serde_json::from_value(
+        json!({"robotId":"p9","name":"P","loadout":{"chassis":"generalist","weapon":"plasma"}}),
+    )
+    .unwrap();
+    a.join(extra).unwrap();
+    let full = serde_json::from_value(
+        json!({"robotId":"p10","name":"P","loadout":{"chassis":"generalist","weapon":"plasma"}}),
+    )
+    .unwrap();
+    a.join(full).unwrap();
+    let over = serde_json::from_value(
+        json!({"robotId":"p11","name":"P","loadout":{"chassis":"generalist","weapon":"plasma"}}),
+    )
+    .unwrap();
+    assert!(a.join(over).is_err(), "capacity is the hard limit");
 }
 
 #[test]

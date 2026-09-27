@@ -96,17 +96,20 @@ in that browser; it does not erase the container log.
 
 ## What the arena does
 
-- **The Arena:** an always-on free-for-all the server keeps running. Players
-  join and leave at any time from **Play → The Arena**; destroyed robots
-  respawn after 5 seconds with 2 seconds of spawn protection and keep their
-  score; there is no zone. Score: +100 per kill, +5 per second for holding
-  the Uplink objective alone (it moves to another site every minute), and a
-  bounty of 50 per streak kill for ending a robot's 3+ kill streak. Salvage
-  fades after 30 seconds and site loot restocks every 30 seconds. The viewer
-  has a kill feed, Uplink and bounty markers, and camera modes (selected
-  robot, leader, my robot, free). Bots fill
-  empty slots and give way when a player joins. Sessions last
-  `ARENA_SESSION_SECONDS` (default 30 minutes), then a fresh map starts.
+- **The Arena:** one endless free-for-all the server keeps running. Players
+  join and leave at any time from **Play → The Arena**. The safe zone drifts
+  across a 42000×26250 world: every 90 seconds it glides to a new circle
+  that overlaps the old one, so the fight keeps moving; outside it robots
+  take 4 HP a second. The zone's radius follows the live population. Bots
+  keep at least `ARENA_ROBOTS` (128) robots in play and step aside for
+  players; players can join until the engine limit of 256 robots. Destroyed
+  robots respawn inside the zone after 5 seconds with 2 seconds of spawn
+  protection and keep their score. Score: +100 per kill, +5 per second for
+  holding the Uplink objective alone (a site inside the zone, moving every
+  minute), and a bounty of 50 per streak kill for ending a 3+ kill streak.
+  Salvage fades after 30 seconds and site loot restocks every 30 seconds.
+  The viewer shows the zone, where it goes next, a kill feed, Uplink and
+  bounty markers, and camera modes (selected robot, leader, my robot, free).
 - **Modes:** solo and duo/trio/squad battle royale (up to 256 slots, optional
   bot count), quick duel, and sandbox with pause and single-tick stepping.
   Lobbies have invite links. Players can leave any match to free their box.
@@ -191,9 +194,8 @@ All endpoints, credentials, ports, and limits come from environment variables (s
 | `QUEUE_BOT_FILL_SECONDS` | Wait before filling a duel with a bot | `45` |
 | `ADMIN_USER_IDS` | Comma-separated WorkOS IDs allowed on admin status | unset |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Admin console login; empty password disables it | `admin` / `local-admin-change-me` |
-| `ARENA_ENABLED` | Keep the always-on arena running | `true` |
-| `ARENA_CAPACITY` | Minimum arena robots (2..256); bots fill every empty slot from the start. A session grows to twice the previous session's player peak plus 8, up to 256, and the map widens with it | `128` |
-| `ARENA_SESSION_SECONDS` | Arena session length before a new map (60..21600) | `1800` |
+| `ARENA_ENABLED` | Keep the endless arena running | `true` |
+| `ARENA_ROBOTS` | Minimum arena population; bots fill up to it and step aside for players (2..256) | `128` |
 | `ADMIN_SESSION_SECRET` | HMAC key for admin sessions (16+ chars); random per start when unset | unset |
 | `MAINTENANCE_MODE` | Refuse new matches while current matches finish | `false` |
 

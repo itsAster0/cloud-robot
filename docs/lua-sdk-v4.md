@@ -136,8 +136,9 @@ and registration are separate operations.
 
 ## Arena mode
 
-In the always-on arena (`mode = "arena"`) there is no zone (`obs.zone.active`
-is false). When your robot is destroyed, `obs.self.alive` is false for five
+In the endless arena (`mode = "arena"`) the zone drifts: `obs.zone.next` is
+`{ x, y, radius, arrivesAt }`, the circle the zone is gliding towards. Stay
+inside `obs.zone` (4 HP a second outside). When your robot is destroyed, `obs.self.alive` is false for five
 seconds and actions are ignored; it then respawns at full health somewhere
 away from enemies and observations continue. `obs.self.deaths` counts lives
 lost and `obs.self.respawnAt` is the tick it returns (compare with `obs.tick`). Kills and

@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"sort"
 	"strings"
@@ -43,6 +45,7 @@ func (s *Server) v4PlayerLines(r *http.Request, mode string) (map[string]*player
 	if err != nil {
 		return nil, nil, err
 	}
+	matches = append(matches, s.arenaStatMatches(r.Context())...)
 	lines := map[string]*playerLine{}
 	kept := []model.Match{}
 	for _, m := range matches {
@@ -147,4 +150,35 @@ func (s *Server) v4Player(w http.ResponseWriter, r *http.Request) {
 // v4Me tells a signed-in player their public handle.
 func (s *Server) v4Me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"handle": playerHandle(robotauth.UserID(r.Context()))})
+}
+
+func arenaStatsKey(matchID string) string { return "replays/" + matchID + "/v4/arena-stats.json" }
+
+// arenaStatMatches returns endless arena sessions (running, or stopped by a
+// restart) with the player stats their worker last saved, so the leaderboard
+// counts arena play without waiting for an end that never comes.
+func (s *Server) arenaStatMatches(ctx context.Context) []model.Match {
+	out := []model.Match{}
+	for _, status := range []model.MatchStatus{model.MatchRunning, model.MatchFailed} {
+		matches, err := s.store.ListMatches(ctx, status, 100)
+		if err != nil {
+			continue
+		}
+		for _, m := range matches {
+			if m.Mode != "arena" || m.EngineVersion != 4 {
+				continue
+			}
+			raw, err := s.store.GetReplayObject(ctx, arenaStatsKey(m.MatchID))
+			if err != nil {
+				continue
+			}
+			var stats []model.RobotSummary
+			if json.Unmarshal([]byte(raw), &stats) != nil {
+				continue
+			}
+			m.RobotSummaries = stats
+			out = append(out, m)
+		}
+	}
+	return out
 }

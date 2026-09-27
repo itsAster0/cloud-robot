@@ -37,10 +37,9 @@ services:
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-local-admin-change-me}"
       ADMIN_SESSION_SECRET: "${ADMIN_SESSION_SECRET:-}"
-      # Always-on arena: players drop in and out; sessions rotate maps.
+      # Endless arena: players drop in and out; the safe zone drifts.
       ARENA_ENABLED: "${ARENA_ENABLED:-true}"
-      ARENA_CAPACITY: "${ARENA_CAPACITY:-128}"
-      ARENA_SESSION_SECONDS: "${ARENA_SESSION_SECONDS:-1800}"
+      ARENA_ROBOTS: "${ARENA_ROBOTS:-128}"
       MATCH_WORKERS: "${MATCH_WORKERS:-4}"
       QUEUE_CONNECT_GRACE_SECONDS: "${QUEUE_CONNECT_GRACE_SECONDS:-30}"
       QUEUE_BOT_FILL_SECONDS: "${QUEUE_BOT_FILL_SECONDS:-45}"

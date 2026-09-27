@@ -243,10 +243,12 @@ Join with the normal `POST /api/matches/{id}/robots` while the arena is
 withdraws it and frees the box immediately. Arena snapshots add `mode`,
 `endTick`, and per-robot `deaths` and `respawnIn` (ticks, or null).
 
-Sizing: each new session has max(`ARENA_CAPACITY` (default 128), 2 × last
-session's peak players + 8) slots, capped at 256, all filled with bots until
-players take them, and the map area grows with slots. The
-map does not resize during a session.
+Sizing: the arena has 256 slots (the engine limit) on a 42000×26250 world.
+Bots keep at least `ARENA_ROBOTS` robots in play. It never ends; its safe
+zone drifts instead (snapshot `zone.next` = `{x, y, radius, arrivesAt}`), and
+its radius is 1500 + 300 × √(live robots), clamped to the world. Player
+stats are saved every minute to `replays/{id}/v4/arena-stats.json` and the
+leaderboard reads them for running and restarted arena sessions.
 
 Limits: the arena holds one match worker slot for its whole session. The
 join queue is in memory; a server restart fails the running session and a

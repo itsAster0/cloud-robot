@@ -410,7 +410,7 @@
           {:else if match.status === 'queued'}<p class="notice" role="status">Your match is queued. The simulation will appear when the worker starts it.</p>{/if}
           {#if match.mode === 'arena' && match.status === 'running' && !registered}
             <div class="arena-join">
-              <div><strong>The Arena is live.</strong> <span class="hint">Drop in any time, respawn when destroyed, leave whenever you like. Your robot runs your saved main.lua with your saved build.</span></div>
+              <div><strong>The Arena is live.</strong> <span class="hint">It never ends: drop in any time, stay inside the drifting safe zone, respawn when destroyed, leave whenever you like. Your robot runs your saved main.lua with your saved build.</span></div>
               {#if signedIn}
                 <label class="arena-name">Robot name<input bind:value={name} maxlength="32"/></label>
                 <button class="primary" onclick={register} disabled={busy || !canRegister}>{busy ? 'Joining…' : 'Join the Arena ▶'}</button>
@@ -449,7 +449,7 @@
               </div>
               <aside class="world-side" aria-label="Robot details">
                 {#if picked && !selected}<ThingInspector {picked} sites={snapshot?.sites ?? matchPreview?.sites ?? []} onclose={() => picked = null}/>{:else}<RobotInspector robot={inspected} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} youId={privateView ? selected : ''} {leaderId} onclose={() => selected = ''} onfollow={id => { selected = ''; queueMicrotask(() => selected = id); }}/>{/if}
-                {#if match.mode === 'arena'}<ArenaScoreboard robots={overview.length ? overview : snapshot?.robots ?? []} youId={myRobotId} endTick={snapshot?.endTick ?? 0} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} onselect={id => selected = id}/>{/if}
+                {#if match.mode === 'arena'}<ArenaScoreboard robots={overview.length ? overview : snapshot?.robots ?? []} youId={myRobotId} endTick={snapshot?.zone?.next?.arrivesAt ?? 0} tick={snapshot?.tick ?? 0} tickRate={snapshot?.tickRate ?? 20} onselect={id => selected = id}/>{/if}
                 <VirtualRoster robots={privateView || replayEnd > 0 ? snapshot?.robots ?? [] : overview} {selected} youId={privateView ? selected : ''} onselect={id => selected = id}/>
               </aside>
             </div>

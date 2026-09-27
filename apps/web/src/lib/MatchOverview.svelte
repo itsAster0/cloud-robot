@@ -33,8 +33,8 @@
     <div class="card">
       <span>{snapshot.mode === 'arena' ? 'Session' : 'Zone'} · {elapsedLabel(snapshot.tick, snapshot.tickRate ?? 20)}</span>
       {#if snapshot.mode === 'arena'}
-        <strong>Open arena</strong>
-        <small>No zone · robots respawn</small>
+        <strong>Drifting zone{zone?.stage ? ` · leg ${zone.stage}` : ''}</strong>
+        <small>{zone?.next ? `Moves in ${Math.max(0, Math.ceil((zone.next.arrivesAt - snapshot.tick) / (snapshot.tickRate ?? 20)))}s · ${zone.damage}/s outside · ` : ''}respawns on</small>
       {:else if zone}
         <strong>{zone.active ? `Stage ${zone.stage || 1}` : 'Stable'}</strong>
         <small>{zone.active ? `◉ ${Math.round(zone.radius)}u · ${zone.damage}/s` : 'Collapse pending'}</small>
