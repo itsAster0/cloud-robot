@@ -108,6 +108,13 @@
     const timer = setInterval(() => void refreshBox(), 5000);
     return () => clearInterval(timer);
   });
+  // Winner teams are IDs; show the robots on that team instead.
+  function winnerName(m: Match) {
+    if (!m.winnerTeam || m.winnerTeam === 'draw') return m.winnerTeam === 'draw' ? 'Nobody (draw)' : '';
+    const names = [...new Set((m.robotSummaries ?? []).filter(r => r.team === m.winnerTeam).map(r => r.name))];
+    if (!names.length) names.push(...(m.robots ?? []).filter(r => r.team === m.winnerTeam).map(r => r.displayName));
+    return names.length ? names.slice(0, 3).join(', ') : m.winnerTeam;
+  }
   let welcome = $state('');
   // A finished arena session hands viewers to the next one.
   let nextArenaWaiting = $state(false);
@@ -367,7 +374,7 @@
                 <a class="grid gap-1 rounded-xl border border-border bg-background p-4 text-foreground no-underline transition-colors hover:border-primary/60 hover:bg-muted/40 grid-cols-1" href={`#/v2/${item.matchId}`}>
                   <span class="flex items-center justify-between gap-2"><strong class="text-sm">{matchTitle(item)}</strong><span class="font-mono text-[11px] text-muted-foreground">{item.matchId.slice(0, 8)}</span></span>
                   <span class="text-xs text-muted-foreground">{new Date(item.createdAt).toLocaleString()}</span>
-                  <span class="text-sm">{item.winnerTeam ? `Winner: ${item.winnerTeam}` : 'Finished'}</span>
+                  <span class="text-sm">{item.winnerTeam ? `Winner: ${winnerName(item)}` : 'Finished'}</span>
                   <span class="text-xs text-primary">Open replay →</span>
                 </a>
               {:else}
@@ -430,7 +437,7 @@
               <ol>{#each podium as p, i}<li><span>{['🥇', '🥈', '🥉'][i]}</span><strong>{p.name}</strong><em>{p.score ?? 0} pts · {p.kills} K · {p.deaths ?? 0} D</em>{#if p.playerId}<a href={`#/profile/${p.playerId}`}>profile</a>{/if}</li>{/each}</ol>
               <div class="actions"><button class="primary" onclick={nextArena} disabled={busy}>{nextArenaWaiting ? 'Finding the next session…' : 'Go to the next session →'}</button><a href="#/leaderboard">Leaderboard</a></div>
             </div>
-          {:else if match.status === 'finished'}<div class="result-heading"><div><p class="eyebrow">MATCH COMPLETE</p><h2>{match.winnerTeam ? `${match.winnerTeam} wins` : 'Final results'}</h2></div><button onclick={() => showPanel('code')}>Revise your script →</button></div>{/if}
+          {:else if match.status === 'finished'}<div class="result-heading"><div><p class="eyebrow">MATCH COMPLETE</p><h2>{match.winnerTeam ? `${winnerName(match)} wins` : 'Final results'}</h2></div><button onclick={() => showPanel('code')}>Revise your script →</button></div>{/if}
           {#if replayEnd > 0}<div class="replay"><label>Replay <strong>{(replayTick / (snapshot?.tickRate ?? 20)).toFixed(1)}s / {(replayEnd / (snapshot?.tickRate ?? 20)).toFixed(1)}s</strong><input aria-label="Replay tick" type="range" min="0" max={replayEnd} step="10" bind:value={replayTick} onchange={seekReplay}/></label><button onclick={inspectTrace} disabled={busy || !signedIn}>Inspect my decision at this tick</button>{#if trace}<pre>{trace}</pre>{/if}</div>{/if}
           {#if snapshot || match.status === 'running' || match.status === 'finished'}
             <div class="world-split">

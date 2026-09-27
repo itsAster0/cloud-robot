@@ -17,14 +17,15 @@ import (
 const arenaOwner = "system:arena"
 
 // arenaConfig is the persistent arena: free-for-all, respawns, no zone, and
-// long sessions that rotate to a fresh seed when they end. ARENA_CAPACITY is
-// the smallest session; a busy previous session (peak players) grows the next
-// one to twice its peak plus room for bots, up to 128 slots.
+// long sessions that rotate to a fresh seed when they end. ARENA_CAPACITY
+// (default 128) is the smallest session and bots fill every empty slot from
+// the first tick; a busy previous session (peak players) grows the next one
+// to twice its peak plus room for bots, up to 256 slots.
 func arenaConfig(peak int) enginev4.Config {
-	capacity := envInt("ARENA_CAPACITY", 24, 2, 128)
-	capacity = min(128, max(capacity, (peak*2+8+7)/8*8))
+	capacity := envInt("ARENA_CAPACITY", 128, 2, 256)
+	capacity = min(256, max(capacity, (peak*2+8+7)/8*8))
 	// Map area grows with capacity so density stays similar.
-	width := 4000 + float64(capacity)*220
+	width := min(47000, 4000+float64(capacity)*220)
 	return enginev4.Config{
 		MatchID: uuid.NewString(), Mode: "arena", Capacity: capacity,
 		Width: width, Height: width * 0.625,
