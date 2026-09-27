@@ -3,6 +3,7 @@
   import { SnapshotBuffer, angleBetween } from './interpolation';
   import { hpFraction, siteColor, teamColor, weaponGlyph } from './matchStats';
   import { pickRobot, screenToWorld } from './picking';
+  import { drawRobot, loadRobotSprites } from './robotSprites';
   import { hash2, loadTerrain, paintChunk, roadsFor, type Road } from './terrain';
   import type { Snapshot, RobotState, WorldHazard, WorldSite } from './types';
   export type SiteMark = WorldSite;
@@ -31,7 +32,7 @@
   let layoutKey = '';
   const chunks = new Map<string, NonNullable<Snapshot['obstacles']>>();
   let worldSites: WorldSite[] = [], roads: Road[] = [], hazards: WorldHazard[] = [];
-  onMount(() => loadTerrain(clearTiles));
+  onMount(() => { loadTerrain(clearTiles); loadRobotSprites(() => {}); });
   $effect(() => {
     if (!snapshot) return;
     received = performance.now(); buffer.push(snapshot, received);
@@ -172,15 +173,23 @@
           const color = teamColor(r.team);
           const isFocus = r.robotId === focus?.robotId;
           const isLeader = r.robotId === leaderId;
-          c.save(); c.translate(r.x, r.y); c.rotate(r.heading * Math.PI / 180);
-          c.fillStyle = !r.alive ? '#38483e' : isFocus ? '#ffffff' : color;
-          c.beginPath(); c.moveTo(18, 0); c.lineTo(-12, -13); c.lineTo(-8, 0); c.lineTo(-12, 13); c.closePath(); c.fill(); c.restore();
+          const turret = r.turretHeading ?? r.heading;
+          // Team disc under the hull keeps colours readable on textured ground.
+          if (r.alive) { c.globalAlpha = 0.35; c.fillStyle = color; c.beginPath(); c.arc(r.x, r.y, 22, 0, Math.PI * 2); c.fill(); c.globalAlpha = 1; }
+          if (!r.alive) c.globalAlpha = 0.7;
+          const sprite = drawRobot(c, r.x, r.y, r.heading, turret, r.alive ? color : '#4a5550');
+          c.globalAlpha = 1;
+          if (!sprite) {
+            c.save(); c.translate(r.x, r.y); c.rotate(r.heading * Math.PI / 180);
+            c.fillStyle = !r.alive ? '#38483e' : isFocus ? '#ffffff' : color;
+            c.beginPath(); c.moveTo(18, 0); c.lineTo(-12, -13); c.lineTo(-8, 0); c.lineTo(-12, 13); c.closePath(); c.fill(); c.restore();
+          }
           if (!r.alive) {
             c.strokeStyle = '#5a6a61'; c.lineWidth = 2;
             c.beginPath(); c.moveTo(r.x - 8, r.y - 8); c.lineTo(r.x + 8, r.y + 8); c.moveTo(r.x + 8, r.y - 8); c.lineTo(r.x - 8, r.y + 8); c.stroke();
             continue;
           }
-          c.strokeStyle = '#f4f5df'; c.lineWidth = 4; c.beginPath(); c.moveTo(r.x, r.y); const a = (r.turretHeading ?? r.heading) * Math.PI / 180; c.lineTo(r.x + Math.cos(a) * 24, r.y + Math.sin(a) * 24); c.stroke();
+          if (!sprite) { c.strokeStyle = '#f4f5df'; c.lineWidth = 4; c.beginPath(); c.moveTo(r.x, r.y); const a = turret * Math.PI / 180; c.lineTo(r.x + Math.cos(a) * 24, r.y + Math.sin(a) * 24); c.stroke(); }
           // Shield over hull: every living robot reads at a glance.
           const shieldMax = r.maxShield ?? 50, shieldFrac = Math.max(0, Math.min(1, (r.shield ?? 0) / shieldMax));
           if (shieldFrac > 0) { c.fillStyle = '#1d3a44'; c.fillRect(r.x - 20, r.y - 33, 40, 3); c.fillStyle = '#54d8ff'; c.fillRect(r.x - 20, r.y - 33, 40 * shieldFrac, 3); }

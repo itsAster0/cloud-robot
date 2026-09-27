@@ -7,12 +7,12 @@ export function screenToWorld(camera: Camera, px: number, py: number) {
 }
 
 /**
- * Nearest robot to a world point within a reach that never shrinks below
- * 14 screen pixels, so small robots stay clickable when zoomed out.
- * Returns '' when nothing is close enough.
+ * Nearest robot to a world point. The reach covers the whole 36-unit tank
+ * sprite and never shrinks below 16 screen pixels, so moving or zoomed-out
+ * robots stay clickable. Returns '' when nothing is close enough.
  */
 export function pickRobot(robots: Placed[], x: number, y: number, zoom: number) {
-  const reach = Math.max(26, 14 / zoom);
+  const reach = Math.max(32, 16 / zoom);
   let best = '', bestDistance = reach;
   for (const r of robots) {
     const d = Math.hypot(r.x - x, r.y - y);
