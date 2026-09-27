@@ -322,3 +322,17 @@ travelling 1,500-2,800 units and firing.
 - Arrivals go to the zone site farthest from living robots and to a point
   at least 400 units from any living robot, falling back to any clear point
   when crowded.
+
+## Endless land (2026-09-27)
+
+- At each zone leg, site regions whose centre is more than 2500 units
+  beyond both the current and next zone, with no robot inside, and not
+  rebuilt in the last 3 legs, are replaced with the same region from a world
+  generated with seed `seed ^ leg × φ` (about 4 ms at 42000×26250): biome,
+  cover, buildings, landforms, loot (also restocked), and hazards. Renewed
+  ids are prefixed `l{leg}:`. The layout revision bumps, so viewers, robot
+  agents, and replays pick up the new geometry (about 600 KB per layout).
+- Coordinates stay fixed: the zone wanders a bounded world whose far side
+  keeps changing, rather than streaming chunks into unbounded space.
+- Test: renewal happens, never inside or near play or on a robot, and is
+  deterministic for a seed.

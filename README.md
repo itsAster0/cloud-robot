@@ -100,7 +100,9 @@ in that browser; it does not erase the container log.
   join and leave at any time from **Play → The Arena**. The safe zone drifts
   across a 42000×26250 world: every 90 seconds it glides to a new circle
   that overlaps the old one, so the fight keeps moving; outside it robots
-  take 4 HP a second. The zone's radius follows the live population. Bots
+  take 4 HP a second. The zone's radius follows the live population.
+  Land far from play is rebuilt with new terrain as the zone moves, so
+  wherever it wanders next is new ground. Bots
   keep at least `ARENA_ROBOTS` (128) robots in play and step aside for
   players; missing bots return together in a wave every 90 seconds;
   players can join until the engine limit of 256 robots. Destroyed robots
