@@ -1086,8 +1086,11 @@ fn arena_mode_respawns_and_never_closes() {
     let mut respawned = false;
     for _ in 0..3000 {
         a.step(BTreeMap::new(), &[]).unwrap();
-        assert!(a.zone().next.is_some(), "arena zone drifts instead of closing");
-        assert!(!a.finished, "arena only ends on time");
+        assert!(
+            a.zone().next.is_some(),
+            "arena zone drifts instead of closing"
+        );
+        assert!(!a.finished, "arena never ends");
         respawned |= a.events.iter().any(|e| e.r#type == "robot_respawned");
     }
     assert!(respawned, "destroyed robots come back");
