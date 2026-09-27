@@ -1,4 +1,6 @@
-# Lua Robot SDK
+# Lua Robot SDK 0.3 (classic arena)
+
+> Legacy protocol for the hidden Review 1 Go arena. Arena V2 robots use [SDK 0.4](lua-sdk-v4.md).
 
 Robot code runs continuously inside player-owned boxes. The box opens one outbound WebSocket to arena control plane. Server sends observations at 10 Hz using protocol version 3. SDK 0.3.2 calls player `decide` function and returns latest action. There are no player-facing turns.
 
