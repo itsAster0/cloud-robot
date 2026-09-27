@@ -88,7 +88,11 @@ tokens that last 8 hours. Five failed logins in a minute pause login.
 - **Boxes:** every robot box container and its recent supervisor and Lua
   agent output, read through the provisioner.
 
-Players see their own box output on **More → SSH & runtime**.
+Players manage their box on **More → SSH & runtime**: live CPU, memory,
+process, and network graphs; container details; the process list; a
+read-only `/workspace` file browser; and box output with filter, errors
+only, follow, tail size, clear, copy, and download. Clear hides older lines
+in that browser; it does not erase the container log.
 
 ## What the arena does
 

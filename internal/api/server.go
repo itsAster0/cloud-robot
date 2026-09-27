@@ -13,7 +13,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -127,6 +129,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/me/box", s.requireUser(http.HandlerFunc(s.ensureBox)))
 	mux.Handle("GET /api/me/box", s.requireUser(http.HandlerFunc(s.getBox)))
 	mux.Handle("GET /api/me/box/logs", s.requireUser(http.HandlerFunc(s.getBoxLogs)))
+	for _, view := range []string{"stats", "processes", "files", "file"} {
+		mux.Handle("GET /api/me/box/"+view, s.requireUser(s.exploreBox(view)))
+	}
 	mux.Handle("GET /api/me/box/main.lua", s.requireUser(http.HandlerFunc(s.getBoxMain)))
 	mux.Handle("PUT /api/me/box/main.lua", s.requireUser(http.HandlerFunc(s.deployBoxMain)))
 	mux.Handle("GET /api/me/box/scripts", s.requireUser(http.HandlerFunc(s.listScriptVersions)))
@@ -772,6 +777,7 @@ func (s *Server) releaseBox(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			box.ActiveRobotID, box.ActiveMatchID = "", ""
 			_ = s.store.PutBox(r.Context(), userID, box)
+			s.clearAgent(r.Context(), boxID)
 			writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
 			return
 		}
@@ -832,6 +838,14 @@ func (s *Server) getBox(w http.ResponseWriter, r *http.Request) {
 // Markers referencing a match that vanished or already ended are cleared so a
 // stale binding can never block queueing or offer a doomed withdraw button.
 func (s *Server) overlayBoxMatchState(ctx context.Context, userID string, box *model.BoxRecord) {
+	// The supervisor still running an agent for a match the store no longer
+	// binds (it ended, or the box was recreated) means a stale agent: stop it.
+	supervisorMatch := box.ActiveMatchID
+	defer func() {
+		if supervisorMatch != "" && box.ActiveMatchID == "" && box.BoxID != "" {
+			s.clearAgent(ctx, box.BoxID)
+		}
+	}()
 	stored, err := s.store.GetBox(ctx, userID)
 	if err != nil {
 		// No stored record means the store no longer knows about any active
@@ -870,7 +884,18 @@ func (s *Server) getBoxLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "box logs are unavailable")
 		return
 	}
-	logs, err := admin.Logs(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), 200)
+	boxID := boxes.IDForUser(robotauth.UserID(r.Context()))
+	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
+	if tail <= 0 || tail > 5000 {
+		tail = 200
+	}
+	var logs string
+	var err error
+	if explorer, ok := s.boxes.(boxExplorer); ok {
+		logs, err = explorer.LogsSince(r.Context(), boxID, tail, r.URL.Query().Get("since"))
+	} else {
+		logs, err = admin.Logs(r.Context(), boxID, tail)
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "read box output: "+err.Error())
 		return
@@ -1113,13 +1138,17 @@ func (s *Server) connectAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		active := agentMatch.Status == model.MatchLobby || agentMatch.Status == model.MatchQueued || agentMatch.Status == model.MatchRunning
 		if !active || !enrolled {
-			// Tell the agent it is done instead of failing the handshake, so
-			// SDK 0.4 exits cleanly rather than retrying a dead match forever.
 			reason := "match is over"
 			if active {
 				reason = "robot left the match"
 			}
-			retireAgent(w, r, reason)
+			// SDKs that understand retirement exit cleanly on this message;
+			// older ones get an error and back off between retries.
+			if strings.Contains(r.Header.Get("X-Robot-SDK-Features"), "retire") {
+				retireAgent(w, r, reason)
+			} else {
+				writeError(w, http.StatusConflict, reason)
+			}
 			return
 		}
 		if r.Header.Get("X-Robot-SDK-Version") != "0.4.0" {
@@ -1347,4 +1376,47 @@ func retireAgent(w http.ResponseWriter, r *http.Request, reason string) {
 	defer cancel()
 	_ = wsjson.Write(ctx, connection, map[string]string{"type": "retired", "reason": reason})
 	_ = connection.Close(websocket.StatusNormalClosure, reason)
+}
+
+// agentClearer stops a box agent once its robot has no match to play.
+type agentClearer interface {
+	ClearAgent(ctx context.Context, boxID string) error
+}
+
+// clearAgent stops the agent in the given box; boxes on an older image do
+// not support it, which only means their agent keeps backing off.
+func (s *Server) clearAgent(ctx context.Context, boxID string) {
+	if clearer, ok := s.boxes.(agentClearer); ok {
+		if err := clearer.ClearAgent(ctx, boxID); err != nil {
+			slog.Debug("clear box agent", "box", boxID, "error", err)
+		}
+	}
+}
+
+// boxExplorer is the provisioner client's read-only view into a box.
+type boxExplorer interface {
+	LogsSince(ctx context.Context, boxID string, tail int, since string) (string, error)
+	Explore(ctx context.Context, boxID, view string, query url.Values) (json.RawMessage, error)
+}
+
+// exploreBox serves the caller's own box stats, processes, file list, or one
+// workspace file. Box IDs derive from the user, so nobody reads another box.
+func (s *Server) exploreBox(view string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		explorer, ok := s.boxes.(boxExplorer)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "box explorer is unavailable")
+			return
+		}
+		query := url.Values{}
+		if view == "file" {
+			query.Set("path", r.URL.Query().Get("path"))
+		}
+		raw, err := explorer.Explore(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), view, query)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "box "+view+": "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, raw)
+	}
 }

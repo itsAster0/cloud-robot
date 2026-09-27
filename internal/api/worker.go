@@ -361,5 +361,8 @@ func (s *Server) releaseBoxes(ctx context.Context, match model.Match) {
 		if err := s.store.PutBox(ctx, robot.PlayerID, box); err != nil {
 			slog.Error("release box after match end", "matchId", match.MatchID, "error", err)
 		}
+		if robot.OwnerBoxID != "" {
+			s.clearAgent(ctx, robot.OwnerBoxID)
+		}
 	}
 }

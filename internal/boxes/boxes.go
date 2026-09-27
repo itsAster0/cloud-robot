@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -280,6 +281,40 @@ func (c *Client) Logs(ctx context.Context, boxID string, tail int) (string, erro
 		return "", err
 	}
 	return result.Logs, nil
+}
+
+// ClearAgent stops a box's agent and forgets its match configuration.
+func (c *Client) ClearAgent(ctx context.Context, boxID string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/boxes/"+boxID+"/agent", nil, nil)
+}
+
+// LogsSince is Logs limited to output after an RFC 3339 time ("" for all).
+func (c *Client) LogsSince(ctx context.Context, boxID string, tail int, since string) (string, error) {
+	var result struct {
+		Logs string `json:"logs"`
+	}
+	query := url.Values{"tail": {strconv.Itoa(tail)}}
+	if since != "" {
+		query.Set("since", since)
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/boxes/"+boxID+"/logs?"+query.Encode(), nil, &result); err != nil {
+		return "", err
+	}
+	return result.Logs, nil
+}
+
+// Explore fetches one explorer view (stats, processes, files, or a file)
+// as raw JSON for the API to pass through.
+func (c *Client) Explore(ctx context.Context, boxID, view string, query url.Values) (json.RawMessage, error) {
+	var result json.RawMessage
+	path := "/v1/boxes/" + boxID + "/" + view
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, input, output any) error {

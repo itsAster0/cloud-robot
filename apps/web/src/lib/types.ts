@@ -441,3 +441,25 @@ export interface RobotEnrollmentResponse {
 export function isNewerSnapshot(current: Snapshot | null, incoming: Snapshot): boolean {
   return current === null || incoming.matchId !== current.matchId || incoming.sequence > current.sequence;
 }
+
+// Box explorer (read-only views of the caller's own box).
+export interface BoxStats {
+  at: string;
+  cpuPercent: number;
+  memoryPercent: number;
+  memoryBytes: number;
+  memoryLimitBytes: number;
+  netRxBytes: number;
+  netTxBytes: number;
+  blockReadBytes: number;
+  blockWriteBytes: number;
+  pids: number;
+  image: string;
+  createdAt: string;
+  startedAt: string;
+  restarts: number;
+  state: string;
+  containerId: string;
+}
+export interface BoxProcess { pid: string; user: string; rssKb: string; elapsed: string; cpuTime: string; command: string }
+export interface BoxFile { path: string; dir: boolean; size: number; modified: number }
