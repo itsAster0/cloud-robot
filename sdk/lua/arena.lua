@@ -1073,6 +1073,9 @@ end
 --   loot_reach      { early, late } detour distances for loot (300, 120)
 --   scan            "idle" (default), "always", or "never"
 --   pickup          pickupPriorities sent on the first decision
+--   first(obs, ctx)             runs before everything else; may return an
+--                               action or a goal point (travelled with
+--                               label FIRST), or nil to continue
 --   on_enemy(obs, target, ctx)  may return an action to override fighting
 --   idle(obs, ctx)              may return an action or a goal point
 --   decorate(obs, action, ctx)  adjusts every action (utilities, messages)
@@ -1130,6 +1133,9 @@ function arena.tactics(options)
   local function choose(obs)
     local self = obs.self
     state.target = nil
+    local early = options.first and options.first(obs, ctx)
+    if early and early.x and not early.label then return ctx.travel(obs, early, "FIRST") end
+    if early then return early end
     local contacts = arena.update_contacts(state.contacts, obs)
     local target = arena.best_target(obs, { range = options.range or 900 })
     if target then

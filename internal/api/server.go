@@ -518,6 +518,21 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "read /workspace/main.lua: "+err.Error())
 		return
 	}
+	// Other .lua modules in the workspace are snapshotted with main.lua so
+	// require() loads the registered code. Boxes on an older image cannot
+	// list modules; their robot keeps loading modules from the workspace.
+	var modules map[string]string
+	if reader, ok := s.boxes.(bundleReader); ok && match.EngineVersion == 4 {
+		bundle, bundleErr := reader.ReadBundle(r.Context(), boxID)
+		switch {
+		case bundleErr == nil:
+			modules = bundle
+		case strings.Contains(bundleErr.Error(), "unknown supervisor action"):
+		default:
+			writeError(w, http.StatusBadRequest, "workspace modules: "+bundleErr.Error())
+			return
+		}
+	}
 
 	robotID := uuid.NewString()
 	token, err := randomToken()
@@ -555,7 +570,13 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 	if match.EngineVersion == 4 {
 		immutableSource = source
 	}
-	configured, err := s.boxes.ConfigureAgent(r.Context(), boxID, boxes.AgentConfig{ImmutableSource: immutableSource, RobotID: robotID, MatchID: match.MatchID, URL: strings.TrimRight(agentBaseURL, "/") + "/agent/connect/" + robotID, Token: token, StartCommand: input.StartCommand})
+	for path, module := range modules {
+		if err := s.store.PutScript(r.Context(), fmt.Sprintf("scripts/%s/%s/%s/%s", boxID, match.MatchID, robotID, path), module); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
+	configured, err := s.boxes.ConfigureAgent(r.Context(), boxID, boxes.AgentConfig{ImmutableSource: immutableSource, ImmutableFiles: modules, RobotID: robotID, MatchID: match.MatchID, URL: strings.TrimRight(agentBaseURL, "/") + "/agent/connect/" + robotID, Token: token, StartCommand: input.StartCommand})
 	if err != nil {
 		// Roll the roster back so a broken provisioner never leaves a phantom
 		// robot in a match that agents cannot join. A squad join also returns
@@ -917,12 +938,24 @@ func (s *Server) deployBoxMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(input.Template)
-	source, err := scripts.Get(name)
+	template, err := scripts.GetTemplate(name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	written, err := s.boxes.WriteMain(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), source)
+	// Modules go first so main.lua never requires a file that is missing.
+	if len(template.Files) > 0 {
+		writer, ok := s.boxes.(fileWriter)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "this box cannot receive multi-file templates")
+			return
+		}
+		if err := writer.WriteFiles(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), template.Files); err != nil {
+			writeError(w, http.StatusBadGateway, "write template modules (restart your box to update it): "+err.Error())
+			return
+		}
+	}
+	written, err := s.boxes.WriteMain(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), template.Source)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "write /workspace/main.lua: "+err.Error())
 		return
@@ -1373,6 +1406,14 @@ func retireAgent(w http.ResponseWriter, r *http.Request, reason string) {
 	defer cancel()
 	_ = wsjson.Write(ctx, connection, map[string]string{"type": "retired", "reason": reason})
 	_ = connection.Close(websocket.StatusNormalClosure, reason)
+}
+
+// bundleReader lists a box's Lua modules; fileWriter writes template modules.
+type bundleReader interface {
+	ReadBundle(ctx context.Context, boxID string) (map[string]string, error)
+}
+type fileWriter interface {
+	WriteFiles(ctx context.Context, boxID string, files map[string]string) error
 }
 
 // agentClearer stops a box agent once its robot has no match to play.

@@ -130,7 +130,9 @@ in that browser; it does not erase the container log.
 - **Lua SDK 0.4:** observations at 10 Hz, intent-only actions, geometry
   helpers backed by a spatial index, cover finding, contact memory, target
   choice, pathing with recovery, and `arena.tactics`, the decision loop every
-  shipped strategy builds on. See [SDK 0.4](docs/lua-sdk-v4.md).
+  shipped strategy builds on. Robots can span several files; registration
+  snapshots every module. Two multi-file templates (Zone Runner, Bounty
+  Hunter) show the layout. See [SDK 0.4](docs/lua-sdk-v4.md).
 - **Browser:** textured renderer with regional streaming, interpolation,
   follow, zoom, minimap, robot inspector, guided match setup, replays, and
   owner decision traces. Clicking a loot crate shows what it holds (crates are

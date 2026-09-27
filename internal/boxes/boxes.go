@@ -86,17 +86,23 @@ func optionalPositiveInt(value string, fallback int) (int, error) {
 
 type AgentConfig struct {
 	ImmutableSource string `json:"immutableSource,omitempty"`
-	RobotID         string `json:"robotId"`
-	MatchID         string `json:"matchId"`
-	URL             string `json:"url"`
-	Token           string `json:"token"`
-	StartCommand    string `json:"startCommand"`
+	// ImmutableFiles are the workspace's other .lua modules, snapshotted at
+	// registration next to main.lua so require() loads the registered code.
+	ImmutableFiles map[string]string `json:"immutableFiles,omitempty"`
+	RobotID        string            `json:"robotId"`
+	MatchID        string            `json:"matchId"`
+	URL            string            `json:"url"`
+	Token          string            `json:"token"`
+	StartCommand   string            `json:"startCommand"`
 }
 
 // ValidateAgentConfig rejects incomplete supervisor payloads before they reach
 // a box. The provisioner validates once more, but the root-owned supervisor is
 // the enforcement point.
 func ValidateAgentConfig(config AgentConfig) error {
+	if err := ValidateModules(config.ImmutableFiles); err != nil {
+		return err
+	}
 	switch {
 	case len(config.ImmutableSource) > 16*1024:
 		return errors.New("immutable source exceeds 16 KiB")
@@ -285,7 +291,8 @@ func (c *Client) Logs(ctx context.Context, boxID string, tail int) (string, erro
 
 // ClearAgent stops a box's agent and forgets its match configuration.
 func (c *Client) ClearAgent(ctx context.Context, boxID string) error {
-	return c.do(ctx, http.MethodDelete, "/v1/boxes/"+boxID+"/agent", nil, nil)
+	var record model.BoxRecord
+	return c.do(ctx, http.MethodDelete, "/v1/boxes/"+boxID+"/agent", nil, &record)
 }
 
 // LogsSince is Logs limited to output after an RFC 3339 time ("" for all).
@@ -353,4 +360,59 @@ func (c *Client) WriteMainRevision(ctx context.Context, boxID, source, revision 
 }
 func (c *Client) ValidateMain(ctx context.Context, boxID, source string) error {
 	return c.do(ctx, http.MethodPost, "/v1/boxes/"+boxID+"/validate-main", map[string]string{"source": source}, nil)
+}
+
+// Limits for a multi-file robot: modules besides main.lua, their combined
+// size, and each file's size (the same 16 KiB as main.lua).
+const (
+	MaxModules     = 32
+	MaxModuleBytes = 16 * 1024
+	MaxBundleBytes = 128 * 1024
+)
+
+var modulePathPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]*(/[A-Za-z0-9_][A-Za-z0-9_-]*){0,2}\.lua$`)
+
+// ValidModulePath accepts workspace-relative module paths such as
+// "brain/plan.lua": up to three levels, no dots besides ".lua", never
+// main.lua (which travels separately).
+func ValidModulePath(path string) bool {
+	return modulePathPattern.MatchString(path) && path != "main.lua"
+}
+
+// ValidateModules checks a module bundle against the path and size limits.
+func ValidateModules(files map[string]string) error {
+	if len(files) > MaxModules {
+		return fmt.Errorf("at most %d Lua modules besides main.lua", MaxModules)
+	}
+	total := 0
+	for path, source := range files {
+		if !ValidModulePath(path) {
+			return fmt.Errorf("invalid module path %q", path)
+		}
+		if len(source) > MaxModuleBytes {
+			return fmt.Errorf("%s exceeds 16 KiB", path)
+		}
+		total += len(source)
+	}
+	if total > MaxBundleBytes {
+		return fmt.Errorf("Lua modules exceed %d KiB in total", MaxBundleBytes/1024)
+	}
+	return nil
+}
+
+// ReadBundle returns the box's .lua modules other than main.lua.
+func (c *Client) ReadBundle(ctx context.Context, boxID string) (map[string]string, error) {
+	var result struct {
+		Files map[string]string `json:"files"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/boxes/"+boxID+"/bundle", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Files, nil
+}
+
+// WriteFiles writes Lua modules into the box workspace (templates).
+func (c *Client) WriteFiles(ctx context.Context, boxID string, files map[string]string) error {
+	var record model.BoxRecord
+	return c.do(ctx, http.MethodPut, "/v1/boxes/"+boxID+"/files", map[string]any{"files": files}, &record)
 }

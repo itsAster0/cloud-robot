@@ -245,7 +245,11 @@
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 grid-cols-1">
           {#each scripts as script (script.name)}
             <div class="flex flex-col justify-between gap-3 rounded-lg border border-border bg-background p-3">
-              <div><p class="m-0 text-sm font-semibold capitalize">{script.name === 'v4' ? 'balanced' : script.name}</p><p class="m-0 mt-1 text-xs text-muted-foreground">{script.description}</p></div>
+              <div>
+                <p class="m-0 flex items-center gap-2 text-sm font-semibold capitalize">{script.name === 'v4' ? 'balanced' : script.name.replace('-', ' ')}{#if script.files}<Badge variant="muted">{Object.keys(script.files).length + 1} files</Badge>{/if}</p>
+                <p class="m-0 mt-1 text-xs text-muted-foreground">{script.description}</p>
+                {#if script.files}<p class="m-0 mt-2 font-mono text-[11px] text-muted-foreground">main.lua · {Object.keys(script.files).sort().join(' · ')}</p>{/if}
+              </div>
               <Button size="sm" variant="secondary" onclick={() => deployScript(script)} disabled={!!deploying || box.status !== 'running'}>{deploying === script.name ? 'Deploying…' : 'Deploy'}</Button>
             </div>
           {:else}<p class="m-0 text-sm text-muted-foreground">{scriptsLoaded ? 'No templates available.' : 'Loading templates…'}</p>{/each}

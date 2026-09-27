@@ -405,6 +405,8 @@ export interface ScriptTemplate {
   name: string;
   description: string;
   source: string;
+  // Multi-file templates: module path -> source, deployed next to main.lua.
+  files?: Record<string, string>;
 }
 
 export interface ScriptVersion {
