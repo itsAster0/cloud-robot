@@ -57,3 +57,25 @@ func TestV4BuildBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTeamSizeAndBotsValidation(t *testing.T) {
+	bots := 4
+	ok := Config{Mode: "br-squad", Width: 2400, Height: 1500, Capacity: 6, DurationSeconds: 60, TeamSize: 3, Bots: &bots}
+	if err := ok.Validate(); err != nil || ok.SquadSize() != 3 {
+		t.Fatalf("trio config rejected: %v", err)
+	}
+	uneven := ok
+	uneven.Capacity = 7
+	if uneven.Validate() == nil {
+		t.Fatal("capacity not divisible by team size accepted")
+	}
+	tooMany := 9
+	over := ok
+	over.Bots = &tooMany
+	if over.Validate() == nil {
+		t.Fatal("more bots than capacity accepted")
+	}
+	if (Config{Mode: "br-squad"}).SquadSize() != 4 {
+		t.Fatal("unset team size must default to squads of four")
+	}
+}

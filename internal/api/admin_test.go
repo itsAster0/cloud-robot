@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -100,5 +101,34 @@ func TestPublicMatchEncodesBotOnlyRobotsAsArray(t *testing.T) {
 		if !strings.Contains(string(raw), `"robots":[]`) {
 			t.Fatalf("engine %d bot-only match encoded as %s", version, raw)
 		}
+	}
+}
+
+func TestOpenTeamFillsPlayerTeamsBeforeCreatingNew(t *testing.T) {
+	robots := []model.RobotSubmission{{Team: "red"}, {Team: "red"}, {Team: "blue"}, {Team: "bots-00", Bot: true}}
+	if got := openTeam(robots, 2); got != "blue" {
+		t.Fatalf("expected the open player team, got %q", got)
+	}
+	if got := openTeam(robots[:2], 2); got != "team-02" {
+		t.Fatalf("expected a new team when all are full, got %q", got)
+	}
+}
+
+func TestRegistrationRecordsBoxBindingEvenBeforeSupervisorReports(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.PutMatch(context.Background(), model.Match{MatchID: "m1", OwnerID: testUserID, Status: model.MatchLobby}); err != nil {
+		t.Fatal(err)
+	}
+	h.provisioner.box = readyBox()
+	h.provisioner.readMain = "-- player main.lua"
+	h.provisioner.lateMarkers = true
+	if response, payload := h.request(t, http.MethodPost, "/api/matches/m1/robots", `{"displayName":"Ada","team":"red","startCommand":"lua main.lua"}`); response.StatusCode != http.StatusCreated {
+		t.Fatalf("register: %d %v", response.StatusCode, payload)
+	}
+	// The supervisor has not reported the binding yet; the API must still
+	// report the match so the browser can offer "Leave match".
+	response, box := h.request(t, http.MethodGet, "/api/me/box", "")
+	if response.StatusCode != http.StatusOK || box["activeMatchId"] != "m1" || box["activeRobotId"] == "" {
+		t.Fatalf("binding lost: %d %v", response.StatusCode, box)
 	}
 }

@@ -420,6 +420,10 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rosterCap = config.Capacity
+		if config.Bots != nil {
+			// Slots reserved for bots are not open to players.
+			rosterCap = config.Capacity - *config.Bots
+		}
 		input.Loadout.Defaults()
 		if err := input.Loadout.Validate(); err != nil {
 			writeError(w, 400, err.Error())
@@ -430,8 +434,12 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if match.Mode == "br-squad" {
-			if len(input.Team) < 1 || len(input.Team) > 32 || countTeamRobots(match.Robots, input.Team) >= 4 {
-				writeError(w, 400, "squad name required; maximum four robots")
+			size := config.SquadSize()
+			if input.Team == "" {
+				input.Team = openTeam(match.Robots, size)
+			}
+			if len(input.Team) > 32 || countTeamRobots(match.Robots, input.Team) >= size {
+				writeError(w, 400, fmt.Sprintf("that team is full (%d robots per team)", size))
 				return
 			}
 		} else {
@@ -536,6 +544,9 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "configure box agent: "+err.Error())
 		return
 	}
+	// The supervisor applies the new binding asynchronously, so its status
+	// reply can still be empty; record the binding the API just created.
+	configured.ActiveRobotID, configured.ActiveMatchID = robotID, match.MatchID
 	_ = s.store.PutBox(r.Context(), userID, configured)
 	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	writeJSON(w, http.StatusCreated, robotResponse{Match: match, Agent: agentEnrollment{RobotID: robotID, Status: configured.AgentStatus}})
@@ -1252,4 +1263,26 @@ func withRequestLogging(next http.Handler) http.Handler {
 		}
 		slog.Info("http request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
 	})
+}
+
+// openTeam returns the first player team with room, or a new team name, so
+// friends who join by link without naming a team end up together.
+func openTeam(robots []model.RobotSubmission, size int) string {
+	counts := map[string]int{}
+	order := []string{}
+	for _, r := range robots {
+		if r.Bot {
+			continue
+		}
+		if counts[r.Team] == 0 {
+			order = append(order, r.Team)
+		}
+		counts[r.Team]++
+	}
+	for _, team := range order {
+		if counts[team] < size {
+			return team
+		}
+	}
+	return fmt.Sprintf("team-%02d", len(order)+1)
 }

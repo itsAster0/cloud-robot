@@ -9,6 +9,7 @@ export interface RobotSubmission {
   robotId: string;
   ownerBoxId?: string;
   displayName: string;
+  bot?: boolean;
   team: ArenaTeam;
   startCommand: string;
   runtime: string;
@@ -34,6 +35,8 @@ export interface Match {
  engineVersion?: number;
   matchId: string;
   status: MatchStatus;
+  // Engine v4 lobby configuration (capacity, teamSize, bots, map).
+  arenaConfig?: Record<string, unknown>;
   mode: string;
   seed: number;
   tickRate: number;

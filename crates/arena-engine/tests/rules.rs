@@ -1036,3 +1036,23 @@ fn district_layout_is_byte_stable() {
     });
     assert_eq!(format!("{hash:016x}"), "505cdac4ea22f50b");
 }
+
+#[test]
+fn team_size_and_bot_cap_shape_the_roster() {
+    let duo: Config = serde_json::from_value(json!({"matchId":"duo","mode":"br-squad","capacity":8,"teamSize":2,"width":2400,"height":1500,"durationSeconds":60,"seed":3,"robots":[]})).unwrap();
+    let arena = Arena::new(duo).unwrap();
+    let mut teams: BTreeMap<String, usize> = BTreeMap::new();
+    for r in &arena.robots {
+        *teams.entry(r.team.clone()).or_default() += 1;
+    }
+    assert_eq!(teams.len(), 4, "8 robots in duos make 4 teams: {teams:?}");
+    assert!(teams.values().all(|n| *n == 2));
+
+    let bad: Config = serde_json::from_value(json!({"matchId":"bad","mode":"br-squad","capacity":7,"teamSize":2,"width":2400,"height":1500,"durationSeconds":60,"robots":[]})).unwrap();
+    assert!(bad.validate().is_err(), "capacity must divide into teams");
+
+    let capped: Config = serde_json::from_value(json!({"matchId":"cap","mode":"br-solo","capacity":16,"bots":4,"width":2400,"height":1500,"durationSeconds":60,"seed":3,"robots":(0..2).map(|i|json!({"robotId":format!("human-{i}"),"name":"h","team":format!("t{i}"),"bot":false})).collect::<Vec<_>>()})).unwrap();
+    let arena = Arena::new(capped).unwrap();
+    assert_eq!(arena.robots.len(), 6, "2 humans plus a 4-bot cap");
+    assert_eq!(arena.robots.iter().filter(|r| r.bot).count(), 4);
+}

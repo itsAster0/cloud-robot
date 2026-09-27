@@ -13,23 +13,33 @@
   import Separator from './components/ui/separator.svelte';
 
   let {
-    mode = $bindable(), capacity = $bindable(), size = $bindable(), duration = $bindable(),
+    mode = $bindable(), teamSize = $bindable(4), botFill = $bindable(true), botCount = $bindable(0), capacity = $bindable(), size = $bindable(), duration = $bindable(),
     siteCount = $bindable(), coverPerSite = $bindable(), lootPerSite = $bindable(), seed = $bindable(), liveEdit = $bindable(),
     signedIn, busy, preview, previewLoading, testing = false,
     onmodechange, oncreate, onrandomize, onSignIn,
   }: {
-    mode: string; capacity: number; size: number; duration: number;
+    mode: string; teamSize: number; botFill: boolean; botCount: number; capacity: number; size: number; duration: number;
     siteCount: number; coverPerSite: number; lootPerSite: number; seed: number; liveEdit: boolean;
     signedIn: boolean; busy: boolean; preview: MapPreviewData | null; previewLoading: boolean; testing?: boolean;
     onmodechange: () => void; oncreate: () => void; onrandomize: () => void; onSignIn?: () => void;
   } = $props();
 
   const modes = [
-    { value: 'sandbox', label: 'Sandbox', icon: '⧉', meta: 'PRACTICE', description: 'Pause, step, and inspect every tick. Best for testing a new script.' },
-    { value: 'quick-duel', label: 'Quick duel', icon: '⇄', meta: '1 V 1', description: 'One opponent on a compact map. A server bot fills the empty side.' },
-    { value: 'br-solo', label: 'Solo battle royale', icon: '◎', meta: 'FFA', description: 'Every robot for itself on a large world. Last one standing wins.' },
-    { value: 'br-squad', label: 'Squad battle royale', icon: '◈', meta: 'TEAMS OF 4', description: 'Squads coordinate with messages. The last squad alive wins.' },
+    { value: 'br-solo', label: 'Solo', icon: '◎', meta: 'FREE FOR ALL', description: 'Battle royale: last robot standing wins.' },
+    { value: 'br-duo', label: 'Duo', icon: '⚇', meta: 'TEAMS OF 2', description: 'Battle royale with a partner. Last team standing wins.' },
+    { value: 'br-trio', label: 'Trio', icon: '⛬', meta: 'TEAMS OF 3', description: 'Three robots per team, sharing squad messages.' },
+    { value: 'br-squad', label: 'Squad', icon: '◈', meta: 'TEAMS OF 4', description: 'Four-robot squads. Stay together: there are no revives.' },
+    { value: 'quick-duel', label: 'Quick duel', icon: '⇄', meta: '1 V 1', description: 'One opponent on a compact map. A bot fills the empty side.' },
+    { value: 'sandbox', label: 'Sandbox', icon: '⧉', meta: 'PRACTICE', description: 'Pause, step, and inspect every tick. Best for testing a script.' },
   ];
+  // Duo/trio/squad are br-squad with a team size; the card value encodes both.
+  let style = $derived(mode === 'br-squad' ? ({ 2: 'br-duo', 3: 'br-trio' } as Record<number, string>)[teamSize] ?? 'br-squad' : mode);
+  function pickStyle(value: string) {
+    const sizes: Record<string, number> = { 'br-duo': 2, 'br-trio': 3, 'br-squad': 4 };
+    if (sizes[value]) { mode = 'br-squad'; teamSize = sizes[value]; } else { mode = value; }
+    onmodechange();
+    if (mode === 'br-squad') capacity = Math.max(teamSize, Math.round(capacity / teamSize) * teamSize);
+  }
   const sizes = [
     { value: 20, label: 'Skirmish', detail: '24k × 15k', robots: 32 },
     { value: 30, label: 'Standard', detail: '36k × 22.5k', robots: 64 },
@@ -40,8 +50,8 @@
   const loot = [{ value: 8, label: 'Scarce' }, { value: 16, label: 'Normal' }, { value: 28, label: 'Rich' }];
 
   let large = $derived(mode === 'br-solo' || mode === 'br-squad');
-  let squadStep = $derived(mode === 'br-squad' ? 4 : 1);
-  let robotPicks = $derived(mode === 'sandbox' ? [1, 2, 4, 8] : mode === 'br-squad' ? [8, 16, 32, 64, 128] : [8, 16, 32, 64, 128, 256]);
+  let squadStep = $derived(mode === 'br-squad' ? teamSize : 1);
+  let robotPicks = $derived(mode === 'sandbox' ? [1, 2, 4, 8] : mode === 'br-squad' ? [8, 16, 32, 64, 128].map(n => Math.max(teamSize, Math.round(n / teamSize) * teamSize)) : [8, 16, 32, 64, 128, 256]);
   let lengths = $derived(large ? [{ value: 300, label: '5 min' }, { value: 600, label: '10 min' }, { value: 1080, label: '18 min' }, { value: 1800, label: '30 min' }]
     : [{ value: 120, label: '2 min' }, { value: 180, label: '3 min' }, { value: 300, label: '5 min' }, { value: 600, label: '10 min' }]);
   let sizeInfo = $derived(sizes.find(entry => entry.value === size));
@@ -54,7 +64,7 @@
   <div class="grid content-start gap-5 grid-cols-1">
     <Card>
       <CardHeader><CardTitle>1 · Choose a mode</CardTitle><CardDescription>{testing ? 'Sandbox is recommended for debugging: you can pause and step the simulation.' : 'All Arena V2 modes are unranked practice while the platform is in review.'}</CardDescription></CardHeader>
-      <CardContent><ChoiceGroup ariaLabel="Game mode" class="sm:grid-cols-2" bind:value={mode} choices={modes} onchange={onmodechange}/></CardContent>
+      <CardContent><ChoiceGroup ariaLabel="Game mode" class="sm:grid-cols-2 xl:grid-cols-3" value={style} choices={modes} onchange={pickStyle}/></CardContent>
     </Card>
 
     <Card>
@@ -65,9 +75,19 @@
         {:else}
           <div class="grid gap-2 grid-cols-1">
             <div class="flex items-baseline justify-between"><span class="text-sm font-medium">Robot slots</span><span class="font-mono text-lg text-primary">{capacity}</span></div>
-            <Slider ariaLabel="Robot slots" bind:value={capacity} min={mode === 'br-squad' ? 4 : 1} max={mode === 'sandbox' ? 16 : 256} step={squadStep}/>
+            <Slider ariaLabel="Robot slots" bind:value={capacity} min={mode === 'br-squad' ? teamSize : 1} max={mode === 'sandbox' ? 16 : 256} step={squadStep}/>
             <div class="flex flex-wrap gap-1.5">{#each robotPicks as pick}<Button size="sm" variant={capacity === pick ? 'default' : 'outline'} onclick={() => capacity = pick}>{pick}</Button>{/each}</div>
-            {#if mode === 'br-squad'}<p class="m-0 text-xs text-muted-foreground">{capacity / 4} squads of 4.</p>{/if}
+            {#if mode === 'br-squad'}<p class="m-0 text-xs text-muted-foreground">{capacity / teamSize} teams of {teamSize}.</p>{/if}
+          </div>
+        {/if}
+        {#if mode !== 'quick-duel'}
+          <div class="grid grid-cols-1 gap-2 rounded-lg border border-border p-3">
+            <label class="m-0 flex items-center justify-between gap-3 font-sans text-sm normal-case tracking-normal text-foreground"><span><span class="block font-medium">Fill empty slots with bots</span><span class="block text-xs text-muted-foreground">Turn off to choose how many bots join and keep the rest open for friends.</span></span><input type="checkbox" class="size-5 accent-primary" bind:checked={botFill}/></label>
+            {#if !botFill}
+              <div class="flex items-baseline justify-between text-sm"><span>Bots</span><span class="font-mono text-primary">{Math.min(botCount, capacity)}</span></div>
+              <Slider ariaLabel="Bots" bind:value={botCount} min={0} max={capacity} step={1}/>
+              <p class="m-0 text-xs text-muted-foreground"><strong class="text-foreground">{capacity - Math.min(botCount, capacity)}</strong> slots open for players. Share the lobby link after creating it.</p>
+            {/if}
           </div>
         {/if}
         {#if large}
@@ -116,8 +136,9 @@
       <CardHeader><CardTitle>Summary</CardTitle></CardHeader>
       <CardContent class="grid gap-3 grid-cols-1">
         <dl class="m-0 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-          <dt class="text-muted-foreground">Mode</dt><dd class="m-0 text-right">{modes.find(entry => entry.value === mode)?.label}</dd>
+          <dt class="text-muted-foreground">Mode</dt><dd class="m-0 text-right">{modes.find(entry => entry.value === style)?.label}</dd>
           <dt class="text-muted-foreground">Robots</dt><dd class="m-0 text-right font-mono">{mode === 'quick-duel' ? 2 : capacity}</dd>
+          <dt class="text-muted-foreground">Bots</dt><dd class="m-0 text-right font-mono">{mode === 'quick-duel' || botFill ? 'fill empty' : `${Math.min(botCount, capacity)} · ${capacity - Math.min(botCount, capacity)} open`}</dd>
           <dt class="text-muted-foreground">World</dt><dd class="m-0 text-right font-mono">{world}</dd>
           <dt class="text-muted-foreground">Length</dt><dd class="m-0 text-right font-mono">{Number.isInteger(minutes) ? `${minutes} min` : `${duration} s`}</dd>
           <dt class="text-muted-foreground">Seed</dt><dd class="m-0 text-right font-mono">{seed || 'random'}</dd>

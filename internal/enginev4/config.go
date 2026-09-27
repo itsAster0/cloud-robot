@@ -21,19 +21,31 @@ type Registration struct {
 	Loadout Loadout `json:"loadout"`
 }
 type Config struct {
-	MatchID         string         `json:"matchId"`
-	Mode            string         `json:"mode"`
-	Width           float64        `json:"width"`
-	Height          float64        `json:"height"`
-	Capacity        int            `json:"capacity"`
-	DurationSeconds int            `json:"durationSeconds"`
-	Seed            uint64         `json:"seed"`
-	FriendlyFire    bool           `json:"friendlyFire"`
-	LiveEdit        bool           `json:"liveEdit"`
-	SiteCount       int            `json:"siteCount"`
-	CoverPerSite    int            `json:"coverPerSite"`
-	LootPerSite     int            `json:"lootPerSite"`
-	Robots          []Registration `json:"robots,omitempty"`
+	MatchID         string  `json:"matchId"`
+	Mode            string  `json:"mode"`
+	Width           float64 `json:"width"`
+	Height          float64 `json:"height"`
+	Capacity        int     `json:"capacity"`
+	DurationSeconds int     `json:"durationSeconds"`
+	Seed            uint64  `json:"seed"`
+	FriendlyFire    bool    `json:"friendlyFire"`
+	LiveEdit        bool    `json:"liveEdit"`
+	SiteCount       int     `json:"siteCount"`
+	CoverPerSite    int     `json:"coverPerSite"`
+	LootPerSite     int     `json:"lootPerSite"`
+	// TeamSize is robots per team in br-squad: 2 duo, 3 trio, 4 squad.
+	TeamSize int `json:"teamSize,omitempty"`
+	// Bots caps the bots added at start; nil fills every empty slot.
+	Bots   *int           `json:"bots,omitempty"`
+	Robots []Registration `json:"robots,omitempty"`
+}
+
+// SquadSize is the effective team size for br-squad (4 when unset).
+func (c Config) SquadSize() int {
+	if c.TeamSize <= 0 {
+		return 4
+	}
+	return c.TeamSize
 }
 
 func IsMode(mode string) bool {
@@ -66,8 +78,14 @@ func (c Config) Validate() error {
 	if c.Capacity < 1 || c.Capacity > 256 || len(c.Robots) > c.Capacity {
 		return errors.New("capacity must be 1..256")
 	}
-	if c.Mode == "br-squad" && c.Capacity%4 != 0 {
-		return errors.New("squad capacity must be divisible by four")
+	if c.TeamSize < 0 || c.TeamSize > 8 {
+		return errors.New("team size must be 1..8")
+	}
+	if c.Mode == "br-squad" && c.Capacity%c.SquadSize() != 0 {
+		return errors.New("capacity must be a multiple of the team size")
+	}
+	if c.Bots != nil && (*c.Bots < 0 || *c.Bots > c.Capacity) {
+		return errors.New("bots must be 0..capacity")
 	}
 	if c.DurationSeconds < 10 || c.DurationSeconds > 2700 {
 		return errors.New("duration must be 10..2700 seconds")
