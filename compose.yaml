@@ -33,6 +33,9 @@ services:
       WORKOS_ISSUER: "${WORKOS_ISSUER:-}"
       WORKOS_API_KEY: "${WORKOS_API_KEY}"
       AUTH_REQUIRED: "${AUTH_REQUIRED:-true}"
+      # Username/password accounts stored in the artifact bucket; turn off when WorkOS is the only sign-in.
+      LOCAL_AUTH_ENABLED: "${LOCAL_AUTH_ENABLED:-true}"
+      LOCAL_AUTH_SECRET: "${LOCAL_AUTH_SECRET:-local-session-secret-change-me}"
       # Operations console login. Change ADMIN_PASSWORD before exposing the stack.
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-local-admin-change-me}"

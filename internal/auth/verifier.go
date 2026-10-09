@@ -36,6 +36,7 @@ func NewVerifier() *Verifier {
 		clientID: clientID,
 		issuer:   issuer,
 		required: strings.EqualFold(os.Getenv("AUTH_REQUIRED"), "true"),
+		local:    NewLocalAuth(),
 	}
 }
 
@@ -43,9 +44,13 @@ type Verifier struct {
 	clientID string
 	issuer   string
 	required bool
+	local    *LocalAuth
 	mu       sync.Mutex
 	keys     keyfunc.Keyfunc
 }
+
+// Local returns the local-account issuer that shares this verifier's secret.
+func (v *Verifier) Local() *LocalAuth { return v.local }
 
 func (v *Verifier) Verify(ctx context.Context, authorization string) (context.Context, error) {
 	token := strings.TrimPrefix(authorization, "Bearer ")
@@ -54,6 +59,9 @@ func (v *Verifier) Verify(ctx context.Context, authorization string) (context.Co
 			return ctx, errors.New("sign in required")
 		}
 		return WithUserID(ctx, "guest"), nil
+	}
+	if userID, ok := v.local.parse(token); ok {
+		return WithUserID(ctx, userID), nil
 	}
 	if v.clientID == "" {
 		return ctx, errors.New("WORKOS_CLIENT_ID is not configured")
