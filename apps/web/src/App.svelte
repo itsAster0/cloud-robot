@@ -10,7 +10,8 @@
   import QuickPlay from './lib/QuickPlay.svelte';
   import { parseRoute, type Route } from './lib/router';
   import { api, setTokenProvider } from './lib/api';
-  import { accessToken, authConfigured, clearRedirectCallback, initializeAuth, redirectCallbackPending, signIn, signOut } from './lib/auth';
+  import { accessToken, authConfigured, authProviders, clearRedirectCallback, initializeAuth, redirectCallbackPending, signIn, signOut } from './lib/auth';
+  import SignInDialog from './lib/SignInDialog.svelte';
   import { isNewerSnapshot, type AgentEnrollment, type ArenaEvent, type CloudStatus, type Match, type RobotBox, type RobotState, type Snapshot, type Team } from './lib/types';
 
   function routeFromLocation() { return parseRoute(window.location.hash); }
@@ -46,6 +47,8 @@
   // prompts for a signed-in user. A timeout keeps public pages usable if
   // WorkOS is unreachable.
   let authReady = $state(false);
+  let providers = $state({ local: false, workos: authConfigured() });
+  let showSignIn = $state(false);
   let signingIn = $state(redirectCallbackPending());
   let robotBox = $state<RobotBox | null>(null);
   // True once the first box lookup finished, so the box page never flashes
@@ -288,6 +291,7 @@
     // detect the callback ourselves before initializeAuth cleans the URL.
     const pendingCallback = redirectCallbackPending();
     const authTimeout = setTimeout(() => authReady = true, 4000);
+    void authProviders().then(p => providers = p);
     try {
       user = await initializeAuth();
       authReady = true;
@@ -353,6 +357,14 @@
   }
 
   async function handleSignIn() {
+    const available = await authProviders();
+    providers = available;
+    if (available.local) { showSignIn = true; return; }
+    await signInWithWorkos();
+  }
+
+  async function signInWithWorkos() {
+    showSignIn = false;
     signingIn = true;
     try {
       await signIn();
@@ -709,3 +721,4 @@
   {/if}
   </main>
 </div>
+{#if showSignIn}<SignInDialog workos={providers.workos} onWorkos={signInWithWorkos} onClose={() => showSignIn = false} />{/if}
