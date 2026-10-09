@@ -9,6 +9,7 @@ export interface RobotSubmission {
   robotId: string;
   ownerBoxId?: string;
   displayName: string;
+  bot?: boolean;
   team: ArenaTeam;
   startCommand: string;
   runtime: string;
@@ -28,11 +29,31 @@ export interface RobotSummary {
   damageTaken?: number;
   kills?: number;
   itemsPickedUp?: number;
+  // Arena V2: public player handle, bot flag, deaths, and arena score.
+  playerId?: string;
+  bot?: boolean;
+  deaths?: number;
+  score?: number;
+}
+
+export interface PlayerLine {
+  handle: string;
+  name: string;
+  matches: number;
+  wins: number;
+  kills: number;
+  deaths: number;
+  score: number;
+  damageDealt: number;
+  bestScore: number;
 }
 
 export interface Match {
+ engineVersion?: number;
   matchId: string;
   status: MatchStatus;
+  // Engine v4 lobby configuration (capacity, teamSize, bots, map).
+  arenaConfig?: Record<string, unknown>;
   mode: string;
   seed: number;
   tickRate: number;
@@ -92,7 +113,44 @@ export interface AdminStatus {
   cloud: Record<string, string>;
 }
 
+export interface WeaponSlotState { kind: string; heat: number; readyAt: number; overheated: boolean }
+export interface InventoryStack { kind: string; count: number }
+
 export interface RobotState {
+  // Engine v4 public fields.
+  bot?: boolean;
+  effects?: string[];
+  // Engine v4 owner-only fields, present in your robot's private observation.
+  loadout?: { chassis: string; weapon: string; modules: string[]; utilities: string[] };
+  weapons?: WeaponSlotState[];
+  activeWeapon?: number;
+  inventory?: InventoryStack[];
+  charges?: Record<string, number>;
+  cooldowns?: Record<string, number>;
+  actionResults?: string[];
+  maxHp?: number;
+  turretHeading?: number;
+  energy?: number;
+  maxEnergy?: number;
+  shield?: number;
+  maxShield?: number;
+  // Active weapon kind from v4 snapshots (plasma, railgun, …).
+  weapon?: string;
+  vx?: number;
+  vy?: number;
+  placement?: number;
+  damageDealt?: number;
+  damageTaken?: number;
+  kills?: number;
+  // Arena mode: deaths so far and ticks until the robot respawns.
+  deaths?: number;
+  respawnIn?: number | null;
+  // Arena scoring: points, current kill streak, bounty on this robot, and
+  // spawn protection after a respawn.
+  score?: number;
+  streak?: number;
+  bounty?: number;
+  protected?: boolean;
   robotId: string;
   name: string;
   team: ArenaTeam;
@@ -152,6 +210,8 @@ export interface ZoneState {
   radius: number;
   damage: number;
   stage?: number;
+  // Arena: where the drifting zone is heading and the tick it arrives.
+  next?: { x: number; y: number; radius: number; arrivesAt: number };
 }
 
 export interface ScannedItem {
@@ -223,6 +283,10 @@ export interface ArenaObstacle {
   radius?: number;
   width?: number;
   height?: number;
+  // Visual theme from the Rust generator: wall, hedge, glass, rock, brick,
+  // metal, container, crate, barrel, tree, or sandbag. Collision and vision
+  // treat every material identically.
+  material?: string;
 }
 
 export interface ArenaItem {
@@ -236,6 +300,8 @@ export interface ArenaItem {
   respawnTick?: number;
   source?: string;
   rarity?: string;
+  // Engine v4 loot containers list what they hold.
+  contents?: { kind: string; count: number; charges?: number }[];
 }
 
 export interface Projectile {
@@ -251,21 +317,56 @@ export interface Projectile {
   ttl: number;
 }
 
+export interface WorldSite {
+  id?: string;
+  kind: string;
+  x: number;
+  y: number;
+  // District theme: urban, industrial, forest, or desert. Visual only.
+  biome?: string;
+}
+
+export interface WorldHazard {
+  id?: string;
+  kind: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  damagePerSecond?: number;
+}
+
+// Owner-only drawings from a robot script (arena.draw); never simulated.
+export interface DebugMark { kind: 'point' | 'line' | 'circle' | 'text'; x: number; y: number; x2?: number; y2?: number; r?: number; text?: string; color?: string }
+
 export interface Snapshot {
+  debug?: DebugMark[];
+ revision?: number;
+ transit?: {id:string; x:number; y:number; targetX:number; targetY:number}[];
+  // Engine v4 static layout: sent on first delivery and on revision changes.
+  hazards?: WorldHazard[];
+  sites?: WorldSite[];
   type: 'snapshot';
   // Protocol version 3: adds mines, turrets (empty for now), dash/scan state.
   version: number;
   matchId: string;
   sequence: number;
   tick: number;
+  tickRate?: number;
   status: 'running' | 'finished';
   winnerTeam?: string;
   robots: RobotState[];
   projectiles: Projectile[];
   events?: ArenaEvent[];
+  // Recent kills, bounties, joins, and Uplink moves (last 10 ticks).
+  feed?: ArenaEvent[];
   width?: number;
   height?: number;
   mapId?: string;
+  mode?: string;
+  endTick?: number;
+  // Arena Uplink objective; null outside arena mode.
+  hill?: { siteId: string; x: number; y: number; radius: number; movesAt: number; holder: string; contested: boolean; pointsPerSecond: number } | null;
   obstacles?: ArenaObstacle[];
   items?: ArenaItem[];
   mines?: MineState[];
@@ -304,6 +405,8 @@ export interface ScriptTemplate {
   name: string;
   description: string;
   source: string;
+  // Multi-file templates: module path -> source, deployed next to main.lua.
+  files?: Record<string, string>;
 }
 
 export interface ScriptVersion {
@@ -342,3 +445,25 @@ export interface RobotEnrollmentResponse {
 export function isNewerSnapshot(current: Snapshot | null, incoming: Snapshot): boolean {
   return current === null || incoming.matchId !== current.matchId || incoming.sequence > current.sequence;
 }
+
+// Box explorer (read-only views of the caller's own box).
+export interface BoxStats {
+  at: string;
+  cpuPercent: number;
+  memoryPercent: number;
+  memoryBytes: number;
+  memoryLimitBytes: number;
+  netRxBytes: number;
+  netTxBytes: number;
+  blockReadBytes: number;
+  blockWriteBytes: number;
+  pids: number;
+  image: string;
+  createdAt: string;
+  startedAt: string;
+  restarts: number;
+  state: string;
+  containerId: string;
+}
+export interface BoxProcess { pid: string; user: string; rssKb: string; elapsed: string; cpuTime: string; command: string }
+export interface BoxFile { path: string; dir: boolean; size: number; modified: number }

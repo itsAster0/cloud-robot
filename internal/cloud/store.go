@@ -138,6 +138,33 @@ func (s *Store) GetScript(ctx context.Context, key string) (string, error) {
 	return string(data), nil
 }
 
+// Replay objects have a separate bound from executable Lua source.
+const maxReplayBytes = 16 * 1024 * 1024
+
+func (s *Store) PutReplayObject(ctx context.Context, key, source string) error {
+	if len(source) > maxReplayBytes {
+		return fmt.Errorf("replay exceeds %d bytes", maxReplayBytes)
+	}
+	_, err := s.s3.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.config.Bucket), Key: aws.String(key), Body: bytesReader(source), ContentType: aws.String("application/octet-stream")})
+	if err != nil {
+		return fmt.Errorf("store replay: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetReplayObject(ctx context.Context, key string) (string, error) {
+	result, err := s.s3.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.config.Bucket), Key: aws.String(key)})
+	if err != nil {
+		return "", fmt.Errorf("read replay: %w", err)
+	}
+	defer result.Body.Close()
+	data, err := readAllLimited(result.Body, maxReplayBytes)
+	if err != nil {
+		return "", fmt.Errorf("read replay body: %w", err)
+	}
+	return string(data), nil
+}
+
 func (s *Store) ListScriptVersions(ctx context.Context, boxID string, limit int) ([]model.ScriptVersion, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50

@@ -2,8 +2,12 @@
   import { onMount } from 'svelte';
   import type { User } from '@workos-inc/authkit-js';
   import Arena from './lib/Arena.svelte';
+  import ArenaV2 from './lib/ArenaV2.svelte';
   import BoxConsole from './lib/BoxConsole.svelte';
   import PortalPage from './lib/PortalPage.svelte';
+  import AdminPage from './lib/AdminPage.svelte';
+  import HomePage from './lib/HomePage.svelte';
+  import QuickPlay from './lib/QuickPlay.svelte';
   import { parseRoute, type Route } from './lib/router';
   import { api, setTokenProvider } from './lib/api';
   import { accessToken, authConfigured, clearRedirectCallback, initializeAuth, redirectCallbackPending, signIn, signOut } from './lib/auth';
@@ -13,6 +17,15 @@
   function go(path: string) { window.location.hash = path; }
 
   let view = $state<Route>(routeFromLocation());
+  let menuOpen = $state(false);
+  // Public handle for the signed-in player's profile link.
+  let myHandle = $state('');
+  $effect(() => { if (user) api.myPlayer().then(r => myHandle = r.handle).catch(() => myHandle = ''); else myHandle = ''; });
+  let workspaceRoute = $derived(view.name === 'workspace' || view.name === 'v2');
+  let workspacePanel = $derived(view.panel ?? (view.name === 'v2' && view.parameter ? 'match' : 'code'));
+  let matchesActive = $derived((workspaceRoute && (workspacePanel === 'match' || workspacePanel === 'results')) || ['matches', 'spectate', 'match', 'match-detail'].includes(view.name));
+  let docsActive = $derived(view.name === 'sdk' || view.name === 'api-docs');
+  let pageTitle = $derived(matchesActive ? 'Matches' : docsActive ? 'Documentation' : view.name === 'box' ? 'SSH & runtime' : view.name === 'admin' ? 'Admin console' : view.name === 'play' ? 'Play' : view.name === 'home' ? 'Program a robot, watch it fight' : workspaceRoute ? 'My robot' : 'Robot Arena');
   let team = $state<Team>('red');
   let displayName = $state('Ada');
   let startCommand = $state('lua main.lua');
@@ -26,9 +39,18 @@
   let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
   let lastSnapshotRender = 0;
   let cloud = $state<CloudStatus | null>(null);
+  let checkingServices = $state(true);
+  let servicesError = $state('');
   let user = $state<User | null>(null);
+  // False until WorkOS restores the session, so pages do not flash sign-in
+  // prompts for a signed-in user. A timeout keeps public pages usable if
+  // WorkOS is unreachable.
+  let authReady = $state(false);
   let signingIn = $state(redirectCallbackPending());
   let robotBox = $state<RobotBox | null>(null);
+  // True once the first box lookup finished, so the box page never flashes
+  // "Create your box" for a user who already has one.
+  let boxChecked = $state(false);
   let sshKey = $state('');
   let mainSource = $state<string | null>(null);
   let joinCode = $state('');
@@ -245,11 +267,15 @@
   }
 
   onMount(() => {
-    const onHash = () => { view = routeFromLocation(); void loadRouteMatch(); };
+    const onHash = () => { view = routeFromLocation(); menuOpen = false; error = ''; void loadRouteMatch(); };
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') menuOpen = false; };
     window.addEventListener('hashchange', onHash);
+    window.addEventListener('keydown', onKey);
+    void refreshServices();
     void initialize();
     return () => {
       window.removeEventListener('hashchange', onHash);
+      window.removeEventListener('keydown', onKey);
       socket?.close();
       clearStreakBanner();
       if (snapshotTimer) clearTimeout(snapshotTimer);
@@ -261,16 +287,21 @@
     // authkit-js swallows a failed code exchange internally (console only), so
     // detect the callback ourselves before initializeAuth cleans the URL.
     const pendingCallback = redirectCallbackPending();
+    const authTimeout = setTimeout(() => authReady = true, 4000);
     try {
       user = await initializeAuth();
+      authReady = true;
+      clearTimeout(authTimeout);
       setTokenProvider(accessToken);
       if (user?.firstName) displayName = user.firstName;
       if (user) {
-        robotBox = await api.ensureBox();
+        try { robotBox = await api.ensureBox(); } finally { boxChecked = true; }
         boxPoll = setInterval(() => void refreshBox(), 5000);
         void loadMain(true);
       }
     } catch (failure) {
+      authReady = true;
+      clearTimeout(authTimeout);
       setError(failure);
       // A consumed or abandoned ?code= retry-loop breaks every reload until removed.
       if (redirectCallbackPending()) clearRedirectCallback();
@@ -279,11 +310,11 @@
       setError(`Sign-in callback failed: WorkOS rejected the token exchange. Confirm ${window.location.origin} is listed under WorkOS Dashboard → Authentication → Sessions → CORS, then try again.`);
     }
     signingIn = redirectCallbackPending();
-    try { cloud = await api.cloudStatus(); } catch (failure) { setError(failure); }
     const matchId = view.parameter && (view.name === 'match' || view.name === 'match-detail') ? view.parameter : new URL(window.location.href).searchParams.get('match');
     if (matchId) {
       try {
         match = await api.getMatch(matchId);
+        if (match.engineVersion === 4) { go(`/v2/${matchId}`); return; }
         hydrateMatchView(match);
         connect(matchId);
         // Joining a shared match should suggest whichever side is still open.
@@ -300,9 +331,24 @@
     }
   }
 
+  async function refreshServices() {
+    checkingServices = true;
+    try {
+      cloud = await api.cloudStatus();
+      if (error === servicesError) error = '';
+      servicesError = '';
+    } catch (failure) {
+      cloud = null;
+      setError(failure);
+      servicesError = error;
+    } finally {
+      checkingServices = false;
+    }
+  }
+
   async function loadRouteMatch() {
     if (!view.parameter || (view.name !== 'match' && view.name !== 'match-detail') || view.parameter === match?.matchId) return;
-    try { match = await api.getMatch(view.parameter); hydrateMatchView(match); if (view.name === 'match') connect(view.parameter); }
+    try { match = await api.getMatch(view.parameter); if (match.engineVersion === 4) { go(`/v2/${match.matchId}`); return; } hydrateMatchView(match); if (view.name === 'match') connect(view.parameter); }
     catch (failure) { setError(failure); }
   }
 
@@ -500,29 +546,55 @@
   }
 </script>
 
-<svelte:head><title>Robot Arena // Control Room</title></svelte:head>
+<svelte:head><title>{pageTitle} · Robot Arena</title></svelte:head>
 
-<main class="shell">
+<div class="shell">
+  <a class="skip-link" href="#main-content" onclick={(event) => { event.preventDefault(); document.getElementById('main-content')?.focus(); }}>Skip to content</a>
   <header class="topbar">
-    <button class="brand" onclick={() => go('/')} aria-label="Go home"><span class="brand-mark" aria-hidden="true">RA</span><div><strong>ROBOT ARENA</strong><small>CONTINUOUS AGENT COMBAT</small></div></button>
+    <a class="brand" href="#/" aria-label="Robot Arena home"><span class="brand-mark" aria-hidden="true">&gt;_</span><span><strong>Robot Arena</strong><small>Code. Run. Compete.</small></span></a>
     <nav class="main-nav" aria-label="Primary">
-      <button class:active={view.name === 'play' || view.name === 'match'} aria-current={view.name === 'play' || view.name === 'match' ? 'page' : undefined} onclick={() => go('/play')}><i class="nav-dot" class:ok={socketState === 'live'} aria-hidden="true"></i>PLAY</button>
-      <button class:active={view.name === 'spectate' || view.name === 'matches'} onclick={() => go('/spectate')}>WATCH</button>
-      <button class:active={view.name === 'leaderboard'} onclick={() => go('/leaderboard')}>RANKS</button>
-      <button class:active={view.name === 'box'} onclick={() => go('/box')}><i class="nav-dot" class:ok={robotBox?.status === 'running'} class:bad={robotBox?.status === 'failed' || !!robotBox?.error} aria-hidden="true"></i>MY BOX</button>
-      <button class:active={view.name === 'sdk'} onclick={() => go('/docs/sdk')}>DOCS</button>
+      <a class:active={view.name === 'play'} aria-current={view.name === 'play' ? 'page' : undefined} href="#/play">Play</a>
+      <a class:active={workspaceRoute && !matchesActive} aria-current={workspaceRoute && !matchesActive ? 'page' : undefined} href="#/workspace">My robot</a>
+      <a class:active={matchesActive} aria-current={matchesActive ? 'page' : undefined} href="#/workspace/matches">Matches</a>
+      <a class:active={view.name === 'leaderboard' || view.name === 'profile'} aria-current={view.name === 'leaderboard' ? 'page' : undefined} href="#/leaderboard">Leaderboard</a>
+      <a class:active={docsActive} aria-current={docsActive ? 'page' : undefined} href="#/docs/sdk">Docs</a>
     </nav>
     <div class="account">
-      <div class="system-state" class:bad={cloud?.status !== 'ready'}><span></span>{cloud?.status === 'ready' ? 'FLOCI READY' : 'CLOUD CHECK'}</div>
-      {#if user}<button class="auth-button" onclick={signOut}>{user.firstName ?? user.email} · SIGN OUT</button>{:else}<button class="auth-button" disabled={signingIn} onclick={handleSignIn}>{signingIn ? 'SIGNING IN…' : 'SIGN IN'}</button>{/if}
+      <div class="system-state" class:bad={!checkingServices && cloud?.status !== 'ready'} class:checking={checkingServices} title="Local services"><span aria-hidden="true"></span><span class="service-label" role="status">{checkingServices ? 'Checking services' : cloud?.status === 'ready' ? 'Services ready' : 'Services unavailable'}</span>{#if !checkingServices && cloud?.status !== 'ready'}<button class="retry-services" onclick={refreshServices} aria-label="Retry service connection">Retry</button>{/if}</div>
+      <details class="more-nav" bind:open={menuOpen}>
+        <summary aria-label="More navigation">More <span aria-hidden="true">⌄</span></summary>
+        <nav class="more-menu" aria-label="Additional navigation">
+          <span class="menu-label">Explore</span>
+          <a href="#/matches">Match history</a>
+          {#if myHandle}<a href={`#/profile/${myHandle}`}>My profile &amp; stats</a>{/if}
+          <a href="#/spectate">Watch live</a>
+          <span class="menu-label">Advanced</span>
+          <a href="#/box" aria-current={view.name === 'box' ? 'page' : undefined}>SSH &amp; runtime <i class="nav-dot" class:ok={robotBox?.status === 'running'} class:bad={robotBox?.status === 'failed' || !!robotBox?.error} aria-hidden="true"></i></a>
+          <a href="#/settings" aria-current={view.name === 'settings' ? 'page' : undefined}>Account settings</a>
+          <a href="#/docs/api">API reference</a>
+          <a href="#/admin" aria-current={view.name === 'admin' ? 'page' : undefined}>Admin console</a>
+          {#if cloud?.status !== 'ready'}<button onclick={refreshServices} disabled={checkingServices}>{checkingServices ? 'Checking services…' : 'Retry service connection'}</button>{/if}
+        </nav>
+      </details>
+      {#if !authReady}<span class="auth-button" aria-hidden="true" style="opacity:.45">…</span>{:else if user}<button class="auth-button" onclick={signOut} title={`Sign out of ${user.email}`}>{user.firstName ?? 'Account'} <span>· Sign out</span></button>{:else}<button class="auth-button sign-in" disabled={signingIn} onclick={handleSignIn}>{signingIn ? 'Signing in…' : 'Sign in'}</button>{/if}
     </div>
   </header>
 
   {#if error}<div class="error-banner" role="alert"><span>FAULT</span>{error}{#if error.includes('box already has an active robot')}<button onclick={exitActiveMatch} disabled={pending['exit-active']}>{pending['exit-active'] ? 'RELEASING…' : 'EXIT ACTIVE MATCH'}</button>{/if}<button onclick={() => (error = '')}>DISMISS</button></div>{/if}
 
-  {#if view.name === 'box'}
+  <main id="main-content" tabindex="-1">
+  {#if !authReady && (workspaceRoute || view.name === 'box' || view.name === 'settings')}
+    <div class="grid min-h-[50vh] place-items-center text-sm text-muted-foreground" role="status"><span class="flex items-center gap-2"><span class="size-2 animate-pulse rounded-full bg-primary"></span>Restoring your session…</span></div>
+  {:else if view.name === 'home'}
+    <HomePage signedIn={!!user} onSignIn={handleSignIn}/>
+  {:else if view.name === 'play'}
+    {#if !authReady}<div class="grid min-h-[50vh] place-items-center text-sm text-muted-foreground" role="status">Restoring your session…</div>{:else}<QuickPlay signedIn={!!user} onSignIn={handleSignIn}/>{/if}
+  {:else if workspaceRoute}
+ <ArenaV2 signedIn={!!user} matchId={view.parameter ?? ''} initialPanel={workspacePanel} onSignIn={handleSignIn}/>
+ {:else if view.name === 'box'}
     <BoxConsole
       {user}
+      checking={!!user && !boxChecked}
       box={robotBox}
       bind:sshKey
       {pending}
@@ -630,7 +702,10 @@
         <div class="cloud-stack"><div class="eyebrow">CONTROL PLANE</div><div class="cloud-row"><span>WS</span><strong>Agent gateway</strong><i>{socketState === 'live' ? 'LIVE' : '--'}</i></div><div class="cloud-row"><span>SQS</span><strong>Match jobs</strong><i>{cloud?.status === 'ready' ? 'READY' : '--'}</i></div><div class="cloud-row"><span>DDB</span><strong>State + results</strong><i>{cloud?.status === 'ready' ? 'READY' : '--'}</i></div><p>{cloud?.provider ?? 'Connecting to Floci…'} · WorkOS AuthKit login.</p></div>
       </aside>
     </section>
+  {:else if view.name === 'admin'}
+    <AdminPage />
   {:else}
     <PortalPage route={view} {user} {match} {cloud} box={robotBox} onSignIn={handleSignIn} onCreateMatch={createMatch} onReleaseBox={exitActiveMatch} />
   {/if}
-</main>
+  </main>
+</div>

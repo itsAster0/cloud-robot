@@ -142,7 +142,7 @@ func (s *Server) joinQueue(w http.ResponseWriter, r *http.Request) {
 	first.MatchID, second.MatchID = match.MatchID, match.MatchID
 	s.queue.mu.Unlock()
 	go s.enforceConnectGrace(match.MatchID, []string{first.UserID, second.UserID})
-	writeJSON(w, http.StatusCreated, map[string]any{"status": "matched", "match": match})
+	writeJSON(w, http.StatusCreated, map[string]any{"status": "matched", "match": publicMatch(match)})
 }
 
 func (s *Server) fillQueueWithBotAfterWait(userID, mode string) {
@@ -190,7 +190,7 @@ func (s *Server) fillQueueWithBotAfterWait(userID, mode string) {
 	s.queue.mu.Lock()
 	entry.Status, entry.MatchID = "matched", match.MatchID
 	s.queue.mu.Unlock()
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	go s.autoStartIfReady(match.MatchID)
 	go s.enforceConnectGrace(match.MatchID, []string{userID})
 }
@@ -229,7 +229,7 @@ func (s *Server) createQueuedMatch(ctx context.Context, entries ...*queueEntry) 
 	if err := s.store.PutMatch(ctx, match); err != nil {
 		return model.Match{}, err
 	}
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	return match, nil
 }
 
@@ -316,7 +316,7 @@ func (s *Server) cancelQueuedMatch(ctx context.Context, matchID, reason string, 
 	_ = s.store.PutMatch(ctx, match)
 	s.releaseBoxes(ctx, match)
 	s.mu.Unlock()
-	s.hub.Publish(matchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(matchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	skip := make(map[string]bool, len(skipRequeue))
 	for _, userID := range skipRequeue {
 		skip[userID] = true

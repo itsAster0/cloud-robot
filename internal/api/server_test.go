@@ -161,6 +161,7 @@ func (f *fakeStore) ReceiveJob(context.Context) (cloud.Job, bool, error) {
 func (f *fakeStore) DeleteJob(context.Context, string) error { return nil }
 
 type fakeProvisioner struct {
+	lateMarkers  bool
 	box          model.BoxRecord
 	ensureErr    error
 	statusErr    error
@@ -200,6 +201,11 @@ func (f *fakeProvisioner) ConfigureAgent(_ context.Context, _ string, config box
 	}
 	f.configured = append(f.configured, config)
 	f.box.AgentStatus = "starting"
+	if f.lateMarkers {
+		// The real supervisor applies markers asynchronously; its first
+		// status reply after configuring can still be empty.
+		return f.box, nil
+	}
 	// Mirror box-supervisor: configuring an agent sets the active markers.
 	f.box.ActiveRobotID, f.box.ActiveMatchID = config.RobotID, config.MatchID
 	return f.box, nil
@@ -503,7 +509,7 @@ func TestDeployScriptRejectsUnknownTemplate(t *testing.T) {
 func TestDeployScriptReportsProvisionerFailure(t *testing.T) {
 	h := newHarness(t)
 	h.provisioner.writeMainErr = errors.New("docker unavailable")
-	response, payload := h.request(t, http.MethodPut, "/api/me/box/main.lua", `{"template":"evasive"}`)
+	response, payload := h.request(t, http.MethodPut, "/api/me/box/main.lua", `{"template":"scout"}`)
 	if response.StatusCode != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d %v", response.StatusCode, payload)
 	}
@@ -1608,4 +1614,11 @@ func TestHubReleasesEmptySubscriptionsAndForgottenEvents(t *testing.T) {
 		t.Fatalf("forgotten event was retained: %s", event.payload)
 	default:
 	}
+}
+
+func (f *fakeStore) PutReplayObject(ctx context.Context, key, source string) error {
+	return f.PutScript(ctx, key, source)
+}
+func (f *fakeStore) GetReplayObject(ctx context.Context, key string) (string, error) {
+	return f.GetScript(ctx, key)
 }
