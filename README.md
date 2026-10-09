@@ -5,6 +5,11 @@ Docker SSH box, write a Lua 5.4 robot, and send it into a server-authoritative
 arena. Anyone can watch live or replay finished matches in the browser. Local
 development uses Floci for AWS-compatible S3, DynamoDB, and SQS.
 
+**Demo video:** [robot-arena-review2-demo.mp4](https://github.com/itsAster0/cloud-robot/releases/download/review2-demo/robot-arena-review2-demo.mp4)
+(7:45, 1080p, captions only, no voice) walks through the architecture, each
+module running, the cloud tools, and the production design on AWS. It is
+attached to the [Review 2 demo release](https://github.com/itsAster0/cloud-robot/releases/tag/review2-demo).
+
 This is a trusted-reviewer prototype: Docker boxes are not a security boundary
 for hostile code. Firecracker isolation is future work.
 
