@@ -1,5 +1,3 @@
-
-https://github.com/user-attachments/assets/1e158afa-d809-4b35-a3bc-58c260eda6a9
 # Cloud Robot Arena
 
 Programmable robot combat as a cloud service. Players sign in, get a persistent
