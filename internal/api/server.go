@@ -76,6 +76,8 @@ type Server struct {
 	hub       *Hub
 	agents    *AgentManager
 	auth      IdentityVerifier
+	local     *robotauth.LocalAuth
+	accounts  localAccounts
 	boxes     boxes.Provisioner
 	mu        sync.Mutex
 	queue     *matchQueue
@@ -90,7 +92,8 @@ type Server struct {
 func (s *Server) SetLogs(buffer *logbuf.Buffer) { s.logs = buffer }
 
 func NewServer(store Store, provisioner boxes.Provisioner) *Server {
-	return &Server{admin: newAdminAuth(), startedAt: time.Now(), v4: map[string]*v4Control{}, store: store, boxes: provisioner, hub: NewHub(), agents: NewAgentManager(), auth: robotauth.NewVerifier(), queue: newMatchQueue(), arenas: map[string]*engine.Arena{}, rates: map[string]time.Time{}}
+	verifier := robotauth.NewVerifier()
+	return &Server{admin: newAdminAuth(), startedAt: time.Now(), v4: map[string]*v4Control{}, store: store, boxes: provisioner, hub: NewHub(), agents: NewAgentManager(), auth: verifier, local: verifier.Local(), accounts: localAccounts{failures: map[string][]time.Time{}}, queue: newMatchQueue(), arenas: map[string]*engine.Arena{}, rates: map[string]time.Time{}}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -117,6 +120,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/cloud/status", s.cloudStatus)
 	mux.HandleFunc("POST /api/admin/login", s.adminLogin)
+	mux.HandleFunc("GET /api/auth/providers", s.authProviders)
+	mux.HandleFunc("POST /api/auth/local/register", s.localRegister)
+	mux.HandleFunc("POST /api/auth/local/login", s.localLogin)
 	mux.Handle("GET /api/admin/overview", s.requireAdminSession(http.HandlerFunc(s.adminOverview)))
 	mux.Handle("GET /api/admin/logs", s.requireAdminSession(http.HandlerFunc(s.adminLogs)))
 	mux.Handle("GET /api/admin/matches", s.requireAdminSession(http.HandlerFunc(s.adminMatches)))

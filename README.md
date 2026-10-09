@@ -10,8 +10,8 @@ for hostile code. Firecracker isolation is future work.
 
 ## Setup
 
-Requirements: Docker with Compose, mise, and a WorkOS AuthKit client ID
-(public value).
+Requirements: Docker with Compose and mise. A WorkOS AuthKit client ID
+(public value) is optional: local username/password accounts work without it.
 
 ```sh
 mise install            # Go 1.26.7, Rust 1.98.0, Node 26.8.1, pnpm 11.24.0
@@ -20,7 +20,12 @@ cp .env.example .env    # optional; Compose defaults already match
 mise run demo           # build box image and stack, start everything
 ```
 
-WorkOS dashboard (required before sign-in works):
+Sign-in: **Sign in → Create account** makes a local account (username and
+password) stored as `accounts/<name>.json` in the artifact bucket, with a
+PBKDF2 password hash. Sessions are 30-day HS256 tokens signed with
+`LOCAL_AUTH_SECRET`. Set `LOCAL_AUTH_ENABLED=false` to allow WorkOS only.
+
+WorkOS dashboard (only needed for **Continue with WorkOS**):
 
 1. Enable AuthKit on the project.
 2. **Redirects:** add `http://localhost:3000` (and `http://localhost:5173` for
@@ -42,8 +47,8 @@ mise run demo:start     # boxes are rediscovered on next sign-in
 
 ## Demo
 
-1. `mise run demo`, open `http://localhost:3000` in two browsers, and sign in
-   with two WorkOS accounts.
+1. `mise run demo`, open `http://localhost:3000` in two browsers, and create
+   two local accounts (**Sign in → Create account**) or use two WorkOS accounts.
 2. In each browser open **More → SSH & runtime**, wait for the box, and add an
    SSH public key.
 3. **Code:** deploy a strategy (balanced, scout, assault, sniper, support,
@@ -191,6 +196,8 @@ All endpoints, credentials, ports, and limits come from environment variables (s
 | `BOX_STORAGE_BYTES` | Workspace quota monitored by the supervisor | `1073741824` (1 GiB) |
 | `ROBOT_AGENT_BASE_URL` | WebSocket URL boxes use to reach the API | `ws://host.docker.internal:8080` |
 | `AUTH_REQUIRED` | Reject anonymous API mutations | `true` |
+| `LOCAL_AUTH_ENABLED` | Allow local username/password accounts | `true` in Compose; off when unset |
+| `LOCAL_AUTH_SECRET` | HMAC key for local sessions; unset means sessions end on API restart | `local-session-secret-change-me` |
 | `WORKOS_CLIENT_ID` / `VITE_WORKOS_CLIENT_ID` | AuthKit client (public) | demo client ID |
 | `WORKOS_API_KEY` | Reserved for future server-side WorkOS calls; not used by Phase 1 token validation | unset |
 | `WORKOS_ISSUER` | Expected JWT issuer; when unset the API derives `https://api.workos.com/user_management/<client-id>`, which is what AuthKit browser tokens carry | derived |
