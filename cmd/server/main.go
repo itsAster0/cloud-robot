@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/kryxen/cloud-robot/internal/logbuf"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +20,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Keep recent logs in memory for the admin console as well as stderr.
+	logs := logbuf.New(5000)
+	slog.SetDefault(slog.New(logbuf.NewHandler(slog.NewTextHandler(os.Stderr, nil), logs)))
 	store, err := cloud.New(ctx, cloud.ConfigFromEnv())
 	if err != nil {
 		slog.Error("configure cloud store", "error", err)
@@ -31,8 +35,10 @@ func main() {
 
 	provisioner := boxes.NewClient(envOr("BOX_PROVISIONER_URL", "http://localhost:8090"), os.Getenv("PROVISIONER_TOKEN"))
 	app := api.NewServer(store, provisioner)
+	app.SetLogs(logs)
 	app.RecoverMatches(ctx)
 	go app.RunWorker(ctx)
+	go app.RunArena(ctx)
 	address := os.Getenv("API_ADDR")
 	if address == "" {
 		address = ":8080"

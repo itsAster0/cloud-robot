@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,8 @@ type agentAction struct {
 }
 
 type AgentSession struct {
+	v4               bool
+	mailbox          *v4Mailbox
 	robotID          string
 	matchID          string
 	connection       *websocket.Conn
@@ -133,9 +136,9 @@ func (s *AgentSession) Tick(ctx context.Context, self engine.RobotState, robots 
 		case <-s.closed:
 			return engine.Intent{}, errAgentDisconnected
 		case <-timer.C:
-			fallback := s.last
+			fallback := engine.Intent{}
 			fallback.ResponseMS = 150
-			fallback.Logs = append(fallback.Logs, "response deadline missed; reusing last action")
+			fallback.Logs = append(fallback.Logs, "response deadline missed; controls neutralized")
 			return fallback, nil
 		case action := <-s.responses:
 			if action.RequestID != requestID {
@@ -181,7 +184,9 @@ func (m *AgentManager) Attach(robotID string, session *AgentSession) {
 	defer m.mu.Unlock()
 	if previous := m.sessions[robotID]; previous != nil {
 		_ = previous.connection.Close(websocket.StatusPolicyViolation, "new agent connection replaced this session")
+		slog.Warn("agent session replaced", "source", "agent", "match", session.matchID, "robot", robotID)
 	}
+	slog.Info("agent connected", "source", "agent", "match", session.matchID, "robot", robotID, "v4", session.v4)
 	m.sessions[robotID] = session
 	delete(m.disconnectedAt, robotID)
 }
@@ -195,6 +200,7 @@ func (m *AgentManager) Detach(robotID string, session *AgentSession) {
 		session.requestMu.Unlock()
 		m.disconnectedAt[robotID] = time.Now()
 		delete(m.sessions, robotID)
+		slog.Info("agent disconnected", "source", "agent", "match", session.matchID, "robot", robotID)
 	}
 }
 
@@ -226,7 +232,10 @@ func (m *AgentManager) reconnectIntent(robotID string) (engine.Intent, bool) {
 	if !disconnected || time.Since(disconnectedAt) > 30*time.Second {
 		return engine.Intent{}, false
 	}
-	last.Logs = append(last.Logs, "agent disconnected; reusing last action during reconnect grace")
+	if time.Since(disconnectedAt) > 250*time.Millisecond {
+		last = engine.Intent{}
+	}
+	last.Logs = append(last.Logs, "agent disconnected; reconnect grace active")
 	return last, true
 }
 

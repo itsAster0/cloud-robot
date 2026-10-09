@@ -27,7 +27,13 @@ type supervisor struct {
 	mu         sync.Mutex
 	process    *exec.Cmd
 	configHash [32]byte
-	record     model.BoxRecord
+	// doneHash is the configuration whose agent exited cleanly; it is not
+	// restarted until the configuration changes.
+	doneHash [32]byte
+	// A crashing program restarts after a growing delay, not every sync.
+	failures int
+	retryAt  time.Time
+	record   model.BoxRecord
 }
 
 func main() {
@@ -42,6 +48,27 @@ func main() {
 		setKey()
 	case "configure-agent":
 		configureAgent()
+	case "write-files":
+		writeFiles()
+	case "read-bundle":
+		readBundle()
+	case "clear-agent":
+		// The match is over: remove the configuration; the daemon stops the
+		// agent on its next sync.
+		if err := os.Remove(filepath.Join(controlDir, "agent.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fatal(err)
+		}
+	case "validate-main":
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 16*1024+1))
+		fatal(err)
+		fatal(validateSource(data))
+	case "write-main-if-match":
+		var input struct {
+			Source   string `json:"source"`
+			Revision string `json:"revision"`
+		}
+		fatal(json.NewDecoder(io.LimitReader(os.Stdin, 128*1024)).Decode(&input))
+		fatal(writeMainRevision("/workspace/main.lua", input.Source, input.Revision))
 	case "read-main":
 		readMain()
 	case "write-main":
@@ -92,6 +119,9 @@ func (s *supervisor) sync(ctx context.Context) {
 	}
 	configData, configErr := os.ReadFile(filepath.Join(controlDir, "agent.json"))
 	if boxes.QuotaBreached(usage, quota) {
+		if s.record.AgentStatus != "quota_exceeded" {
+			logf("workspace quota exceeded: %d of %d bytes; agent stopped", usage, quota)
+		}
 		s.stop()
 		s.record.AgentStatus = "quota_exceeded"
 		s.record.Error = fmt.Sprintf("workspace usage %d bytes exceeds %d byte quota; delete files over SSH to resume", usage, quota)
@@ -99,7 +129,17 @@ func (s *supervisor) sync(ctx context.Context) {
 		return
 	}
 	if configErr != nil {
+		s.mu.Lock()
+		running := s.process != nil
+		s.mu.Unlock()
+		if running {
+			logf("agent configuration cleared; agent stopped")
+			s.stop()
+		}
 		s.record.AgentStatus = "idle"
+		s.record.ActiveRobotID, s.record.ActiveMatchID = "", ""
+		s.record.Error = ""
+		s.failures = 0
 		s.writeStatus()
 		return
 	}
@@ -107,7 +147,19 @@ func (s *supervisor) sync(ctx context.Context) {
 	s.mu.Lock()
 	changed := hash != s.configHash
 	running := s.process != nil
+	done := hash == s.doneHash
 	s.mu.Unlock()
+	if done && !changed && !running {
+		s.record.AgentStatus = "stopped"
+		s.writeStatus()
+		return
+	}
+	if changed {
+		s.failures, s.retryAt = 0, time.Time{}
+	} else if !running && time.Now().Before(s.retryAt) {
+		s.writeStatus()
+		return
+	}
 	if running {
 		s.record.AgentStatus = "running"
 	}
@@ -120,10 +172,17 @@ func (s *supervisor) sync(ctx context.Context) {
 			return
 		}
 		s.record.ActiveRobotID, s.record.ActiveMatchID = config.RobotID, config.MatchID
+		logf("starting agent robot=%s match=%s command=%q", config.RobotID, config.MatchID, config.StartCommand)
 		s.stop()
 		s.configHash = hash
 		command := exec.CommandContext(ctx, "su", "-s", "/bin/sh", "developer", "-c", "cd /workspace && exec "+config.StartCommand)
 		command.Env = append(os.Environ(), "ROBOT_ARENA_URL="+config.URL, "ROBOT_TOKEN="+config.Token, "ROBOT_ID="+config.RobotID)
+		if config.ImmutableSource != "" {
+			// Registered robots require() modules from their snapshot, not
+			// the live workspace, so later edits cannot change a running robot.
+			path := strings.Replace(os.Getenv("LUA_PATH"), "/workspace/?.lua", "/opt/robot-arena-run/?.lua;/opt/robot-arena-run/?/init.lua", 1)
+			command.Env = append(command.Env, "LUA_PATH="+path)
+		}
 		command.Stdout, command.Stderr = os.Stdout, os.Stderr
 		if err := command.Start(); err != nil {
 			s.record.AgentStatus = "failed"
@@ -148,8 +207,14 @@ func (s *supervisor) wait(command *exec.Cmd) {
 		if err != nil {
 			s.record.AgentStatus = "failed"
 			s.record.Error = err.Error()
+			s.failures++
+			delay := min(time.Duration(1<<min(s.failures, 6))*time.Second, time.Minute)
+			s.retryAt = time.Now().Add(delay)
+			logf("agent exited: %v; restarting in %s", err, delay)
 		} else {
 			s.record.AgentStatus = "stopped"
+			s.doneHash = s.configHash
+			logf("agent exited cleanly; waiting for the next registration")
 		}
 	}
 	s.mu.Unlock()
@@ -188,7 +253,7 @@ func setKey() {
 	fatal(writeAtomic(filepath.Join(controlDir, "authorized_keys"), []byte(key+"\n"), 0644))
 }
 func configureAgent() {
-	data, err := io.ReadAll(io.LimitReader(os.Stdin, 20*1024))
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, 320*1024))
 	if err != nil {
 		fatal(err)
 	}
@@ -200,6 +265,26 @@ func configureAgent() {
 		fatal(err)
 	}
 	if err := validateLuaSyntax("/workspace/main.lua"); err != nil {
+		fatal(err)
+	}
+	if config.ImmutableSource != "" {
+		fatal(validateSource([]byte(config.ImmutableSource)))
+		for path, source := range config.ImmutableFiles {
+			if err := validateSource([]byte(source)); err != nil {
+				fatal(fmt.Errorf("%s: %w", path, err))
+			}
+		}
+		// A fresh run directory: main.lua plus the snapshotted modules.
+		fatal(os.RemoveAll("/opt/robot-arena-run"))
+		fatal(os.MkdirAll("/opt/robot-arena-run", 0755))
+		fatal(writeAtomic("/opt/robot-arena-run/main.lua", []byte(config.ImmutableSource), 0644))
+		for path, source := range config.ImmutableFiles {
+			target := filepath.Join("/opt/robot-arena-run", path)
+			fatal(os.MkdirAll(filepath.Dir(target), 0755))
+			fatal(os.WriteFile(target, []byte(source), 0644))
+		}
+		config.StartCommand = "lua /opt/robot-arena-run/main.lua"
+		data, err = json.Marshal(config)
 		fatal(err)
 	}
 	fatal(writeAtomic(filepath.Join(controlDir, "agent.json"), data, 0600))
@@ -453,3 +538,93 @@ arena.run({
   decide = decide,
 })
 `
+
+func validateSource(data []byte) error {
+	if len(data) == 0 || len(data) > 16*1024 {
+		return errors.New("source must be 1..16384 bytes")
+	}
+	file, err := os.CreateTemp("", "arena-check-*.lua")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if _, err = file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err = file.Close(); err != nil {
+		return err
+	}
+	return validateLuaSyntax(file.Name())
+}
+func writeMainRevision(path, source, expected string) error {
+	if err := validateSource([]byte(source)); err != nil {
+		return err
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	hash := sha256.Sum256(current)
+	if fmt.Sprintf("%x", hash) != expected {
+		return errors.New("workspace revision changed; reload before saving")
+	}
+	if err = writeAtomic(path, []byte(source), 0644); err != nil {
+		return err
+	}
+	return os.Chown(path, 1000, 1000)
+}
+
+// logf writes a timestamp-free supervisor line to stdout; Docker timestamps
+// container output and the admin console reads it through the provisioner.
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stdout, "[supervisor] "+format+"\n", args...)
+}
+
+// writeFiles writes template modules into /workspace, owned by developer.
+func writeFiles() {
+	var input struct {
+		Files map[string]string `json:"files"`
+	}
+	fatal(json.NewDecoder(io.LimitReader(os.Stdin, 320*1024)).Decode(&input))
+	fatal(boxes.ValidateModules(input.Files))
+	for path, source := range input.Files {
+		target := filepath.Join("/workspace", path)
+		dir := filepath.Dir(target)
+		fatal(os.MkdirAll(dir, 0755))
+		for d := dir; d != "/workspace" && strings.HasPrefix(d, "/workspace/"); d = filepath.Dir(d) {
+			fatal(os.Chown(d, 1000, 1000))
+		}
+		fatal(writeValidatedLua(target, []byte(source)))
+	}
+}
+
+// readBundle prints the workspace's .lua modules other than main.lua as
+// JSON, refusing bundles over the limits so registration can say why.
+func readBundle() {
+	files := map[string]string{}
+	err := filepath.WalkDir("/workspace", func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel := strings.TrimPrefix(path, "/workspace/")
+		if entry.IsDir() {
+			if path != "/workspace" && (strings.HasPrefix(entry.Name(), ".") || strings.Count(rel, "/") >= 2) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(rel, ".lua") || !boxes.ValidModulePath(rel) {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		files[rel] = string(data)
+		return nil
+	})
+	fatal(err)
+	fatal(boxes.ValidateModules(files))
+	fatal(json.NewEncoder(os.Stdout).Encode(map[string]any{"files": files}))
+}

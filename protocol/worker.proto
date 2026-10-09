@@ -1,0 +1,9 @@
+syntax = "proto3";
+package arena.v4;
+// Each protobuf envelope is preceded by a four-byte big-endian byte length.
+// Payload is versioned UTF-8 JSON shared with browser and Lua contracts.
+message Envelope {
+  uint32 version = 1;
+  string kind = 2;
+  bytes payload = 3;
+}

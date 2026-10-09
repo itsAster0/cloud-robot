@@ -9,10 +9,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kryxen/cloud-robot/internal/logbuf"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +27,7 @@ import (
 	"github.com/kryxen/cloud-robot/internal/boxes"
 	"github.com/kryxen/cloud-robot/internal/cloud"
 	"github.com/kryxen/cloud-robot/internal/engine"
+	"github.com/kryxen/cloud-robot/internal/enginev4"
 	"github.com/kryxen/cloud-robot/internal/model"
 	"github.com/kryxen/cloud-robot/internal/scripts"
 )
@@ -43,6 +47,8 @@ type Store interface {
 	GetReplay(ctx context.Context, key string) ([]model.MatchEvent, error)
 	PutBox(ctx context.Context, userID string, box model.BoxRecord) error
 	GetBox(ctx context.Context, userID string) (model.BoxRecord, error)
+	PutReplayObject(ctx context.Context, key, source string) error
+	GetReplayObject(ctx context.Context, key string) (string, error)
 	PutScript(ctx context.Context, key, source string) error
 	GetScript(ctx context.Context, key string) (string, error)
 	ListScriptVersions(ctx context.Context, boxID string, limit int) ([]model.ScriptVersion, error)
@@ -60,13 +66,19 @@ type IdentityVerifier interface {
 }
 
 type Server struct {
-	store  Store
-	hub    *Hub
-	agents *AgentManager
-	auth   IdentityVerifier
-	boxes  boxes.Provisioner
-	mu     sync.Mutex
-	queue  *matchQueue
+	// logs holds recent server and worker output for the admin console;
+	// nil disables capture (tests).
+	logs      *logbuf.Buffer
+	admin     *adminAuth
+	startedAt time.Time
+	v4        map[string]*v4Control
+	store     Store
+	hub       *Hub
+	agents    *AgentManager
+	auth      IdentityVerifier
+	boxes     boxes.Provisioner
+	mu        sync.Mutex
+	queue     *matchQueue
 	// arenas maps running matches to their engine so HTTP handlers can request
 	// mid-match actions (withdrawal) without owning tick state.
 	arenas map[string]*engine.Arena
@@ -74,18 +86,49 @@ type Server struct {
 	rates  map[string]time.Time
 }
 
+// SetLogs attaches the admin log buffer.
+func (s *Server) SetLogs(buffer *logbuf.Buffer) { s.logs = buffer }
+
 func NewServer(store Store, provisioner boxes.Provisioner) *Server {
-	return &Server{store: store, boxes: provisioner, hub: NewHub(), agents: NewAgentManager(), auth: robotauth.NewVerifier(), queue: newMatchQueue(), arenas: map[string]*engine.Arena{}, rates: map[string]time.Time{}}
+	return &Server{admin: newAdminAuth(), startedAt: time.Now(), v4: map[string]*v4Control{}, store: store, boxes: provisioner, hub: NewHub(), agents: NewAgentManager(), auth: robotauth.NewVerifier(), queue: newMatchQueue(), arenas: map[string]*engine.Arena{}, rates: map[string]time.Time{}}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /api/v4/me/script", s.requireUser(http.HandlerFunc(s.v4Script)))
+	mux.Handle("PUT /api/v4/me/script", s.requireUser(http.HandlerFunc(s.v4Script)))
+	mux.Handle("POST /api/v4/me/script/validate", s.requireUser(http.HandlerFunc(s.v4ValidateScript)))
+	mux.Handle("GET /api/v4/me/loadout", s.requireUser(http.HandlerFunc(s.v4Loadout)))
+	mux.Handle("PUT /api/v4/me/loadout", s.requireUser(http.HandlerFunc(s.v4Loadout)))
+	mux.Handle("POST /api/v4/matches", s.requireUser(s.rateLimit("create-match", http.HandlerFunc(s.createV4Match))))
+	mux.HandleFunc("GET /api/v4/catalogue", s.v4Catalogue)
+	mux.HandleFunc("GET /api/v4/arena", s.arenaStatus)
+	mux.HandleFunc("GET /api/v4/leaderboard", s.v4Leaderboard)
+	mux.HandleFunc("GET /api/v4/players/{handle}", s.v4Player)
+	mux.Handle("GET /api/v4/me/player", s.requireUser(http.HandlerFunc(s.v4Me)))
+	mux.Handle("POST /api/v4/maps/preview", s.requireUser(s.rateLimit("preview", http.HandlerFunc(s.previewV4Map))))
+	mux.Handle("POST /api/v4/matches/{matchID}/control", s.requireUser(http.HandlerFunc(s.controlV4)))
+	mux.HandleFunc("GET /api/v4/matches/{matchID}/final", s.v4Final)
+	mux.HandleFunc("GET /api/v4/matches/{matchID}/replay", s.v4ReplayPage)
+	mux.Handle("GET /api/v4/matches/{matchID}/trace", s.requireUser(s.rateLimit("trace", http.HandlerFunc(s.v4Trace))))
+	mux.Handle("GET /api/v4/matches/{matchID}/view", s.requireUser(http.HandlerFunc(s.v4View)))
+	mux.Handle("POST /api/v4/matches/{matchID}/edit", s.requireUser(s.requireAdmin(http.HandlerFunc(s.v4Edit))))
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/cloud/status", s.cloudStatus)
+	mux.HandleFunc("POST /api/admin/login", s.adminLogin)
+	mux.Handle("GET /api/admin/overview", s.requireAdminSession(http.HandlerFunc(s.adminOverview)))
+	mux.Handle("GET /api/admin/logs", s.requireAdminSession(http.HandlerFunc(s.adminLogs)))
+	mux.Handle("GET /api/admin/matches", s.requireAdminSession(http.HandlerFunc(s.adminMatches)))
+	mux.Handle("GET /api/admin/boxes", s.requireAdminSession(http.HandlerFunc(s.adminBoxes)))
+	mux.Handle("GET /api/admin/boxes/{boxID}/logs", s.requireAdminSession(http.HandlerFunc(s.adminBoxLogs)))
 	mux.Handle("GET /api/admin/status", s.requireUser(s.requireAdmin(http.HandlerFunc(s.adminStatus))))
 	mux.Handle("POST /api/me/box", s.requireUser(http.HandlerFunc(s.ensureBox)))
 	mux.Handle("GET /api/me/box", s.requireUser(http.HandlerFunc(s.getBox)))
+	mux.Handle("GET /api/me/box/logs", s.requireUser(http.HandlerFunc(s.getBoxLogs)))
+	for _, view := range []string{"stats", "processes", "files", "file"} {
+		mux.Handle("GET /api/me/box/"+view, s.requireUser(s.exploreBox(view)))
+	}
 	mux.Handle("GET /api/me/box/main.lua", s.requireUser(http.HandlerFunc(s.getBoxMain)))
 	mux.Handle("PUT /api/me/box/main.lua", s.requireUser(http.HandlerFunc(s.deployBoxMain)))
 	mux.Handle("GET /api/me/box/scripts", s.requireUser(http.HandlerFunc(s.listScriptVersions)))
@@ -282,7 +325,7 @@ func (s *Server) createMatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, match)
+	writeJSON(w, http.StatusCreated, publicMatch(match))
 }
 
 func (s *Server) getMatch(w http.ResponseWriter, r *http.Request) {
@@ -291,14 +334,16 @@ func (s *Server) getMatch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "match not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, match)
+	writeJSON(w, http.StatusOK, publicMatch(match))
 }
 
 type robotRequest struct {
-	DisplayName  string `json:"displayName"`
-	Team         string `json:"team"`
-	StartCommand string `json:"startCommand"`
-	Runtime      string `json:"runtime"`
+	Loadout      enginev4.Loadout `json:"loadout"`
+	SDKVersion   string           `json:"sdkVersion"`
+	DisplayName  string           `json:"displayName"`
+	Team         string           `json:"team"`
+	StartCommand string           `json:"startCommand"`
+	Runtime      string           `json:"runtime"`
 }
 
 type agentEnrollment struct {
@@ -340,12 +385,11 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 	userID := robotauth.UserID(r.Context())
 	boxID := boxes.IDForUser(userID)
 	box, err := s.boxes.Status(r.Context(), boxID)
+	// An SSH key only grants shell access; the agent runs from the box
+	// supervisor, and code can be edited in the browser, so registration
+	// needs a running box but no key.
 	if err != nil || box.Status != "running" {
-		writeError(w, http.StatusConflict, "provision a running SSH box before registering a robot")
-		return
-	}
-	if box.KeyFingerprint == "" {
-		writeError(w, http.StatusConflict, "add an SSH public key before registering a robot")
+		writeError(w, http.StatusConflict, "your robot box is still starting; try again in a few seconds")
 		return
 	}
 	// The supervisor copy of the markers (agent.json) never clears on its
@@ -367,7 +411,16 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "match not found")
 		return
 	}
-	if match.Status != model.MatchLobby {
+	// The persistent arena takes players while it runs; the robot enters
+	// through the worker's join queue instead of the start roster.
+	var liveArena *v4Control
+	if match.Mode == "arena" && match.Status == model.MatchRunning {
+		liveArena = s.v4[match.MatchID]
+		if liveArena == nil {
+			writeError(w, http.StatusConflict, "the arena is restarting; try again in a few seconds")
+			return
+		}
+	} else if match.Status != model.MatchLobby {
 		writeError(w, http.StatusConflict, "match is not accepting robots")
 		return
 	}
@@ -378,11 +431,52 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rosterCap := 8
+	if match.EngineVersion == 4 {
+		config, err := enginev4.DecodeConfig(match.ArenaConfig)
+		if err != nil {
+			writeError(w, 500, "invalid arena configuration")
+			return
+		}
+		rosterCap = config.Capacity
+		if config.Bots != nil && match.Mode != "arena" {
+			// Slots reserved for bots are not open to players.
+			rosterCap = config.Capacity - *config.Bots
+		}
+		input.Loadout.Defaults()
+		if err := input.Loadout.Validate(); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		if input.SDKVersion != "0.4.0" {
+			writeError(w, 400, "v4 matches require SDK 0.4.0")
+			return
+		}
+		if match.Mode == "br-squad" {
+			size := config.SquadSize()
+			if input.Team == "" {
+				input.Team = openTeam(match.Robots, size)
+			}
+			if len(input.Team) > 32 || countTeamRobots(match.Robots, input.Team) >= size {
+				writeError(w, 400, fmt.Sprintf("that team is full (%d robots per team)", size))
+				return
+			}
+		} else {
+			input.Team = uuid.NewString()
+		}
+	}
 	if match.Mode == "squad" {
 		rosterCap = 10
 	}
 	var displacedBot *model.RobotSubmission
 	switch match.Mode {
+	case "br-solo", "br-squad", "sandbox", "quick-duel":
+	case "arena":
+		// Players displace bots in the engine, so only humans count.
+		if humanRobots(match.Robots) >= rosterCap {
+			writeError(w, http.StatusConflict, "the arena is full; try again soon")
+			return
+		}
+		rosterCap = len(match.Robots) + 1
 	case "squad":
 		if input.Team != "red" && input.Team != "blue" {
 			writeError(w, http.StatusBadRequest, "team must be red or blue")
@@ -424,6 +518,21 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "read /workspace/main.lua: "+err.Error())
 		return
 	}
+	// Other .lua modules in the workspace are snapshotted with main.lua so
+	// require() loads the registered code. Boxes on an older image cannot
+	// list modules; their robot keeps loading modules from the workspace.
+	var modules map[string]string
+	if reader, ok := s.boxes.(bundleReader); ok && match.EngineVersion == 4 {
+		bundle, bundleErr := reader.ReadBundle(r.Context(), boxID)
+		switch {
+		case bundleErr == nil:
+			modules = bundle
+		case strings.Contains(bundleErr.Error(), "unknown supervisor action"):
+		default:
+			writeError(w, http.StatusBadRequest, "workspace modules: "+bundleErr.Error())
+			return
+		}
+	}
 
 	robotID := uuid.NewString()
 	token, err := randomToken()
@@ -446,16 +555,28 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	match.Robots = append(match.Robots, model.RobotSubmission{
+	submission := model.RobotSubmission{
 		RobotID: robotID, DisplayName: input.DisplayName, Team: input.Team,
+		Loadout: mustJSON(input.Loadout), SDKVersion: input.SDKVersion,
 		PlayerID: userID, OwnerBoxID: boxID, ScriptObjectKey: scriptKey, StartCommand: input.StartCommand, Runtime: input.Runtime, SubmittedAt: time.Now().UTC(),
-	})
+	}
+	match.Robots = append(match.Robots, submission)
 	if err := s.store.PutMatch(r.Context(), match); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	agentBaseURL := envOr("ROBOT_AGENT_BASE_URL", "ws://host.docker.internal:8080")
-	configured, err := s.boxes.ConfigureAgent(r.Context(), boxID, boxes.AgentConfig{RobotID: robotID, MatchID: match.MatchID, URL: strings.TrimRight(agentBaseURL, "/") + "/agent/connect/" + robotID, Token: token, StartCommand: input.StartCommand})
+	immutableSource := ""
+	if match.EngineVersion == 4 {
+		immutableSource = source
+	}
+	for path, module := range modules {
+		if err := s.store.PutScript(r.Context(), fmt.Sprintf("scripts/%s/%s/%s/%s", boxID, match.MatchID, robotID, path), module); err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
+	configured, err := s.boxes.ConfigureAgent(r.Context(), boxID, boxes.AgentConfig{ImmutableSource: immutableSource, ImmutableFiles: modules, RobotID: robotID, MatchID: match.MatchID, URL: strings.TrimRight(agentBaseURL, "/") + "/agent/connect/" + robotID, Token: token, StartCommand: input.StartCommand})
 	if err != nil {
 		// Roll the roster back so a broken provisioner never leaves a phantom
 		// robot in a match that agents cannot join. A squad join also returns
@@ -470,8 +591,17 @@ func (s *Server) submitRobot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "configure box agent: "+err.Error())
 		return
 	}
+	// The supervisor applies the new binding asynchronously, so its status
+	// reply can still be empty; record the binding the API just created.
+	configured.ActiveRobotID, configured.ActiveMatchID = robotID, match.MatchID
 	_ = s.store.PutBox(r.Context(), userID, configured)
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	if liveArena != nil {
+		reg := enginev4.Registration{RobotID: robotID, Name: input.DisplayName, Team: input.Team, Loadout: input.Loadout}
+		if !liveArena.RequestJoin(arenaJoin{Registration: reg, Submission: submission}) {
+			slog.Warn("arena join queue full", "match", match.MatchID, "robot", robotID)
+		}
+	}
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	writeJSON(w, http.StatusCreated, robotResponse{Match: match, Agent: agentEnrollment{RobotID: robotID, Status: configured.AgentStatus}})
 }
 
@@ -539,8 +669,8 @@ func (s *Server) withdrawRobot(w http.ResponseWriter, r *http.Request) {
 		box.ActiveRobotID, box.ActiveMatchID = "", ""
 		_ = s.store.PutBox(r.Context(), userID, box)
 	}
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
-	writeJSON(w, http.StatusOK, match)
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
+	writeJSON(w, http.StatusOK, publicMatch(match))
 }
 
 // registerActiveArena exposes the worker's engine to HTTP handlers for the
@@ -586,12 +716,18 @@ func (s *Server) withdrawFromMatch(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	arena := s.arenas[match.MatchID]
+	v4 := s.v4[match.MatchID]
 	s.mu.Unlock()
+	if v4 != nil {
+		v4.RequestWithdraw(robotID)
+		writeJSON(w, 202, map[string]string{"status": "withdrawing", "robotId": robotID})
+		return
+	}
 	if arena == nil || !arena.RequestWithdraw(robotID) {
 		writeError(w, http.StatusConflict, "match is not accepting withdrawals")
 		return
 	}
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "withdrawing", "robotId": robotID})
 }
 
@@ -632,12 +768,38 @@ func (s *Server) releaseBox(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadGateway, err.Error())
 				return
 			}
-			s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+			s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 			break
 		}
 		box.ActiveRobotID, box.ActiveMatchID = "", ""
 		_ = s.store.PutBox(r.Context(), userID, box)
 		writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+		return
+	}
+	if match.EngineVersion == 4 {
+		s.mu.Lock()
+		control := s.v4[match.MatchID]
+		s.mu.Unlock()
+		if control == nil || !control.RequestWithdraw(box.ActiveRobotID) {
+			writeError(w, http.StatusConflict, "match is not accepting withdrawals")
+			return
+		}
+		if match.Mode == "arena" {
+			// The arena keeps running, so the box is free as soon as the
+			// robot is withdrawn rather than when the session ends.
+			s.mu.Lock()
+			if current, err := s.store.GetMatch(r.Context(), match.MatchID); err == nil {
+				current.Robots = withoutRobots(current.Robots, []string{box.ActiveRobotID})
+				_ = s.store.PutMatch(r.Context(), current)
+			}
+			s.mu.Unlock()
+			box.ActiveRobotID, box.ActiveMatchID = "", ""
+			_ = s.store.PutBox(r.Context(), userID, box)
+			s.clearAgent(r.Context(), boxID)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "withdrawing", "matchId": match.MatchID})
 		return
 	}
 	// Running match: the concession applies at the next engine tick and the
@@ -694,6 +856,14 @@ func (s *Server) getBox(w http.ResponseWriter, r *http.Request) {
 // Markers referencing a match that vanished or already ended are cleared so a
 // stale binding can never block queueing or offer a doomed withdraw button.
 func (s *Server) overlayBoxMatchState(ctx context.Context, userID string, box *model.BoxRecord) {
+	// The supervisor still running an agent for a match the store no longer
+	// binds (it ended, or the box was recreated) means a stale agent: stop it.
+	supervisorMatch := box.ActiveMatchID
+	defer func() {
+		if supervisorMatch != "" && box.ActiveMatchID == "" && box.BoxID != "" {
+			s.clearAgent(ctx, box.BoxID)
+		}
+	}()
 	stored, err := s.store.GetBox(ctx, userID)
 	if err != nil {
 		// No stored record means the store no longer knows about any active
@@ -723,6 +893,34 @@ func (s *Server) getBoxMain(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"source": source})
 }
 
+// getBoxLogs returns the caller's own box output (supervisor and Lua agent)
+// so players can debug their scripts. Box IDs derive from the user ID, so a
+// player can only ever read their own box.
+func (s *Server) getBoxLogs(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.boxes.(boxAdmin)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "box logs are unavailable")
+		return
+	}
+	boxID := boxes.IDForUser(robotauth.UserID(r.Context()))
+	tail, _ := strconv.Atoi(r.URL.Query().Get("tail"))
+	if tail <= 0 || tail > 5000 {
+		tail = 200
+	}
+	var logs string
+	var err error
+	if explorer, ok := s.boxes.(boxExplorer); ok {
+		logs, err = explorer.LogsSince(r.Context(), boxID, tail, r.URL.Query().Get("since"))
+	} else {
+		logs, err = admin.Logs(r.Context(), boxID, tail)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "read box output: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
+}
+
 func (s *Server) listScripts(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"scripts": scripts.List()})
 }
@@ -740,12 +938,24 @@ func (s *Server) deployBoxMain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(input.Template)
-	source, err := scripts.Get(name)
+	template, err := scripts.GetTemplate(name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	written, err := s.boxes.WriteMain(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), source)
+	// Modules go first so main.lua never requires a file that is missing.
+	if len(template.Files) > 0 {
+		writer, ok := s.boxes.(fileWriter)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "this box cannot receive multi-file templates")
+			return
+		}
+		if err := writer.WriteFiles(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), template.Files); err != nil {
+			writeError(w, http.StatusBadGateway, "write template modules (restart your box to update it): "+err.Error())
+			return
+		}
+	}
+	written, err := s.boxes.WriteMain(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), template.Source)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "write /workspace/main.lua: "+err.Error())
 		return
@@ -872,7 +1082,7 @@ func (s *Server) beginMatch(ctx context.Context, match model.Match) (model.Match
 	for _, robot := range match.Robots {
 		states = append(states, engine.RobotState{RobotID: robot.RobotID, Name: robot.DisplayName, Team: robot.Team})
 	}
-	if err := engine.ValidateTeamsForMode(match.Mode, states); err != nil {
+	if err := engine.ValidateTeamsForMode(match.Mode, states); err != nil && match.EngineVersion != 4 {
 		return match, err
 	}
 	for _, robot := range match.Robots {
@@ -894,7 +1104,7 @@ func (s *Server) beginMatch(ctx context.Context, match model.Match) (model.Match
 		s.releaseBoxes(ctx, match)
 		return match, err
 	}
-	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": match})
+	s.hub.Publish(match.MatchID, map[string]any{"type": "match_state", "version": 1, "match": publicMatch(match)})
 	return match, nil
 }
 
@@ -910,6 +1120,9 @@ func (s *Server) autoStartIfReady(matchID string) {
 	defer s.mu.Unlock()
 	match, err := s.store.GetMatch(ctx, matchID)
 	if err != nil || match.Status != model.MatchLobby {
+		return
+	}
+	if match.EngineVersion == 4 {
 		return
 	}
 	if match.Mode == "squad" {
@@ -942,14 +1155,50 @@ func (s *Server) connectAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid robot credential")
 		return
 	}
+	agentMatch, matchErr := s.store.GetMatch(r.Context(), credential.MatchID)
+	isV4 := matchErr == nil && agentMatch.EngineVersion == 4
+	protocols := []string{"robot-arena.v1"}
+	if isV4 {
+		enrolled := false
+		for _, robot := range agentMatch.Robots {
+			if robot.RobotID == robotID {
+				enrolled = true
+				break
+			}
+		}
+		active := agentMatch.Status == model.MatchLobby || agentMatch.Status == model.MatchQueued || agentMatch.Status == model.MatchRunning
+		if !active || !enrolled {
+			reason := "match is over"
+			if active {
+				reason = "robot left the match"
+			}
+			// SDKs that understand retirement exit cleanly on this message;
+			// older ones get an error and back off between retries.
+			if strings.Contains(r.Header.Get("X-Robot-SDK-Features"), "retire") {
+				retireAgent(w, r, reason)
+			} else {
+				writeError(w, http.StatusConflict, reason)
+			}
+			return
+		}
+		if r.Header.Get("X-Robot-SDK-Version") != "0.4.0" {
+			writeError(w, http.StatusUpgradeRequired, "v4 matches require SDK 0.4.0")
+			return
+		}
+		protocols = []string{"robot-arena.v4"}
+	}
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
-		Subprotocols:   []string{"robot-arena.v1"},
+		Subprotocols:   protocols,
 	})
 	if err != nil {
 		return
 	}
 	session := newAgentSession(robotID, credential.MatchID, connection)
+	if isV4 {
+		session.v4 = true
+		session.mailbox = &v4Mailbox{out: make(chan json.RawMessage, 1)}
+	}
 	s.agents.Attach(robotID, session)
 	s.hub.Publish(credential.MatchID, map[string]any{"type": "agent_status", "version": 1, "robotId": robotID, "connected": true})
 	go s.autoStartIfReady(credential.MatchID)
@@ -958,7 +1207,11 @@ func (s *Server) connectAgent(w http.ResponseWriter, r *http.Request) {
 		s.hub.Publish(credential.MatchID, map[string]any{"type": "agent_status", "version": 1, "robotId": robotID, "connected": false})
 		connection.CloseNow()
 	}()
-	_ = session.readLoop(r.Context())
+	if session.v4 {
+		_ = session.readV4(r.Context())
+	} else {
+		_ = session.readLoop(r.Context())
+	}
 }
 
 func randomToken() (string, error) {
@@ -980,6 +1233,14 @@ func (s *Server) watchMatch(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = connection.Close(websocket.StatusPolicyViolation, "match not found")
 		return
+	}
+	var viewer *v4Viewer
+	if match.EngineVersion == 4 {
+		viewer = &v4Viewer{}
+		viewerContext, cancelViewer := context.WithCancel(r.Context())
+		defer cancelViewer()
+		r = r.WithContext(viewerContext)
+		go func() { defer cancelViewer(); viewer.read(viewerContext, connection) }()
 	}
 	robotIDs := make([]string, 0, len(match.Robots))
 	for _, robot := range match.Robots {
@@ -1012,7 +1273,11 @@ func (s *Server) watchMatch(w http.ResponseWriter, r *http.Request) {
 				}
 				sentArenaLayout = true
 			}
-			err := connection.Write(ctx, websocket.MessageText, event.payload)
+			payload := event.payload
+			if viewer != nil {
+				payload = viewer.project(payload)
+			}
+			err := connection.Write(ctx, websocket.MessageText, payload)
 			cancel()
 			if err != nil {
 				return
@@ -1097,6 +1362,99 @@ func withRequestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		next.ServeHTTP(w, r)
+		// Polling endpoints would otherwise drown the admin log view.
+		switch r.URL.Path {
+		case "/api/admin/logs", "/api/admin/overview", "/readyz", "/healthz":
+			return
+		}
 		slog.Info("http request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
 	})
+}
+
+// openTeam returns the first player team with room, or a new team name, so
+// friends who join by link without naming a team end up together.
+func openTeam(robots []model.RobotSubmission, size int) string {
+	counts := map[string]int{}
+	order := []string{}
+	for _, r := range robots {
+		if r.Bot {
+			continue
+		}
+		if counts[r.Team] == 0 {
+			order = append(order, r.Team)
+		}
+		counts[r.Team]++
+	}
+	for _, team := range order {
+		if counts[team] < size {
+			return team
+		}
+	}
+	return fmt.Sprintf("team-%02d", len(order)+1)
+}
+
+// retireAgent accepts the socket only to send a final "retired" message.
+func retireAgent(w http.ResponseWriter, r *http.Request, reason string) {
+	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: []string{"localhost:*", "127.0.0.1:*"},
+		Subprotocols:   []string{"robot-arena.v4"},
+	})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	_ = wsjson.Write(ctx, connection, map[string]string{"type": "retired", "reason": reason})
+	_ = connection.Close(websocket.StatusNormalClosure, reason)
+}
+
+// bundleReader lists a box's Lua modules; fileWriter writes template modules.
+type bundleReader interface {
+	ReadBundle(ctx context.Context, boxID string) (map[string]string, error)
+}
+type fileWriter interface {
+	WriteFiles(ctx context.Context, boxID string, files map[string]string) error
+}
+
+// agentClearer stops a box agent once its robot has no match to play.
+type agentClearer interface {
+	ClearAgent(ctx context.Context, boxID string) error
+}
+
+// clearAgent stops the agent in the given box; boxes on an older image do
+// not support it, which only means their agent keeps backing off.
+func (s *Server) clearAgent(ctx context.Context, boxID string) {
+	if clearer, ok := s.boxes.(agentClearer); ok {
+		if err := clearer.ClearAgent(ctx, boxID); err != nil {
+			slog.Debug("clear box agent", "box", boxID, "error", err)
+		}
+	}
+}
+
+// boxExplorer is the provisioner client's read-only view into a box.
+type boxExplorer interface {
+	LogsSince(ctx context.Context, boxID string, tail int, since string) (string, error)
+	Explore(ctx context.Context, boxID, view string, query url.Values) (json.RawMessage, error)
+}
+
+// exploreBox serves the caller's own box stats, processes, file list, or one
+// workspace file. Box IDs derive from the user, so nobody reads another box.
+func (s *Server) exploreBox(view string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		explorer, ok := s.boxes.(boxExplorer)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "box explorer is unavailable")
+			return
+		}
+		query := url.Values{}
+		if view == "file" {
+			query.Set("path", r.URL.Query().Get("path"))
+		}
+		raw, err := explorer.Explore(r.Context(), boxes.IDForUser(robotauth.UserID(r.Context())), view, query)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "box "+view+": "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, raw)
+	}
 }

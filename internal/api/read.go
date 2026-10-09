@@ -30,7 +30,7 @@ func (s *Server) listMatches(w http.ResponseWriter, r *http.Request) {
 	viewers := s.hub.ViewerCounts()
 	entries := make([]matchListEntry, 0, len(matches))
 	for _, match := range matches {
-		entries = append(entries, matchListEntry{Match: match, Viewers: viewers[match.MatchID]})
+		entries = append(entries, matchListEntry{Match: publicMatch(match), Viewers: viewers[match.MatchID]})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"matches": entries})
 }
@@ -74,7 +74,7 @@ func (s *Server) getProfile(w http.ResponseWriter, r *http.Request) {
 	for _, match := range matches {
 		for _, robot := range match.Robots {
 			if robot.PlayerID == stats.PlayerID {
-				recent = append(recent, match)
+				recent = append(recent, publicMatch(match))
 				break
 			}
 		}
@@ -123,4 +123,29 @@ func parseLimit(r *http.Request, fallback int) int {
 		return 100
 	}
 	return limit
+}
+
+// publicMatch never exposes a participant's private build or workspace metadata.
+// Copy the roster before redacting so persistence retains the registration.
+func publicMatch(m model.Match) model.Match {
+	// Always an array: bot-only matches have no registrations, and a JSON
+	// null here broke every client that lists matches.
+	m.Robots = append(make([]model.RobotSubmission, 0, len(m.Robots)), m.Robots...)
+	if m.EngineVersion != 4 {
+		return m
+	}
+	// Summaries name players by public handle, never by account ID.
+	m.RobotSummaries = append([]model.RobotSummary(nil), m.RobotSummaries...)
+	for i := range m.RobotSummaries {
+		if m.RobotSummaries[i].PlayerID != "" {
+			m.RobotSummaries[i].PlayerID = playerHandle(m.RobotSummaries[i].PlayerID)
+		}
+	}
+	for i := range m.Robots {
+		m.Robots[i].Loadout = nil
+		m.Robots[i].ScriptObjectKey = ""
+		m.Robots[i].OwnerBoxID = ""
+		m.Robots[i].StartCommand = ""
+	}
+	return m
 }

@@ -1,6 +1,7 @@
 package boxes
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,5 +157,28 @@ func TestValidateAgentConfig(t *testing.T) {
 	broken.Token = ""
 	if err := ValidateAgentConfig(broken); err == nil {
 		t.Fatal("missing token accepted")
+	}
+}
+
+func TestModuleBundleLimits(t *testing.T) {
+	for _, ok := range []string{"brain/plan.lua", "lib.lua", "a/b/c.lua", "my-lib/x_y.lua"} {
+		if !ValidModulePath(ok) {
+			t.Errorf("%q should be valid", ok)
+		}
+	}
+	for _, bad := range []string{"main.lua", "../x.lua", "/abs.lua", "a/b/c/d.lua", "x.txt", ".hidden.lua", "a/../b.lua", "a.b.lua"} {
+		if ValidModulePath(bad) {
+			t.Errorf("%q should be rejected", bad)
+		}
+	}
+	big := map[string]string{}
+	for i := 0; i < MaxModules+1; i++ {
+		big[fmt.Sprintf("m%d.lua", i)] = "return {}"
+	}
+	if ValidateModules(big) == nil {
+		t.Fatal("too many modules accepted")
+	}
+	if ValidateModules(map[string]string{"x.lua": strings.Repeat("-", MaxModuleBytes+1)}) == nil {
+		t.Fatal("oversized module accepted")
 	}
 }

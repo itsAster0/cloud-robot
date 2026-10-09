@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -84,18 +85,27 @@ func optionalPositiveInt(value string, fallback int) (int, error) {
 }
 
 type AgentConfig struct {
-	RobotID      string `json:"robotId"`
-	MatchID      string `json:"matchId"`
-	URL          string `json:"url"`
-	Token        string `json:"token"`
-	StartCommand string `json:"startCommand"`
+	ImmutableSource string `json:"immutableSource,omitempty"`
+	// ImmutableFiles are the workspace's other .lua modules, snapshotted at
+	// registration next to main.lua so require() loads the registered code.
+	ImmutableFiles map[string]string `json:"immutableFiles,omitempty"`
+	RobotID        string            `json:"robotId"`
+	MatchID        string            `json:"matchId"`
+	URL            string            `json:"url"`
+	Token          string            `json:"token"`
+	StartCommand   string            `json:"startCommand"`
 }
 
 // ValidateAgentConfig rejects incomplete supervisor payloads before they reach
 // a box. The provisioner validates once more, but the root-owned supervisor is
 // the enforcement point.
 func ValidateAgentConfig(config AgentConfig) error {
+	if err := ValidateModules(config.ImmutableFiles); err != nil {
+		return err
+	}
 	switch {
+	case len(config.ImmutableSource) > 16*1024:
+		return errors.New("immutable source exceeds 16 KiB")
 	case config.RobotID == "":
 		return errors.New("agent configuration requires robotId")
 	case config.MatchID == "":
@@ -249,6 +259,71 @@ func (c *Client) WriteMain(ctx context.Context, boxID, source string) (string, e
 	return result.Source, err
 }
 
+// BoxSummary is one robot box container as the admin console lists it.
+type BoxSummary struct {
+	BoxID     string `json:"boxId"`
+	State     string `json:"state"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// List returns every robot box container known to Docker.
+func (c *Client) List(ctx context.Context) ([]BoxSummary, error) {
+	var result struct {
+		Boxes []BoxSummary `json:"boxes"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/boxes", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Boxes, nil
+}
+
+// Logs returns the last `tail` lines of a box's agent and supervisor output.
+func (c *Client) Logs(ctx context.Context, boxID string, tail int) (string, error) {
+	var result struct {
+		Logs string `json:"logs"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/boxes/"+boxID+"/logs?tail="+strconv.Itoa(tail), nil, &result); err != nil {
+		return "", err
+	}
+	return result.Logs, nil
+}
+
+// ClearAgent stops a box's agent and forgets its match configuration.
+func (c *Client) ClearAgent(ctx context.Context, boxID string) error {
+	var record model.BoxRecord
+	return c.do(ctx, http.MethodDelete, "/v1/boxes/"+boxID+"/agent", nil, &record)
+}
+
+// LogsSince is Logs limited to output after an RFC 3339 time ("" for all).
+func (c *Client) LogsSince(ctx context.Context, boxID string, tail int, since string) (string, error) {
+	var result struct {
+		Logs string `json:"logs"`
+	}
+	query := url.Values{"tail": {strconv.Itoa(tail)}}
+	if since != "" {
+		query.Set("since", since)
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/boxes/"+boxID+"/logs?"+query.Encode(), nil, &result); err != nil {
+		return "", err
+	}
+	return result.Logs, nil
+}
+
+// Explore fetches one explorer view (stats, processes, files, or a file)
+// as raw JSON for the API to pass through.
+func (c *Client) Explore(ctx context.Context, boxID, view string, query url.Values) (json.RawMessage, error) {
+	var result json.RawMessage
+	path := "/v1/boxes/" + boxID + "/" + view
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
+	if err := c.do(ctx, http.MethodGet, path, nil, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader
 	if input != nil {
@@ -274,4 +349,70 @@ func (c *Client) do(ctx context.Context, method, path string, input, output any)
 		return fmt.Errorf("box provisioner: %s", strings.TrimSpace(message))
 	}
 	return json.NewDecoder(response.Body).Decode(output)
+}
+
+func (c *Client) WriteMainRevision(ctx context.Context, boxID, source, revision string) (string, error) {
+	var result struct {
+		Source string `json:"source"`
+	}
+	err := c.do(ctx, http.MethodPut, "/v1/boxes/"+boxID+"/main.lua", map[string]string{"source": source, "revision": revision}, &result)
+	return result.Source, err
+}
+func (c *Client) ValidateMain(ctx context.Context, boxID, source string) error {
+	return c.do(ctx, http.MethodPost, "/v1/boxes/"+boxID+"/validate-main", map[string]string{"source": source}, nil)
+}
+
+// Limits for a multi-file robot: modules besides main.lua, their combined
+// size, and each file's size (the same 16 KiB as main.lua).
+const (
+	MaxModules     = 32
+	MaxModuleBytes = 16 * 1024
+	MaxBundleBytes = 128 * 1024
+)
+
+var modulePathPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]*(/[A-Za-z0-9_][A-Za-z0-9_-]*){0,2}\.lua$`)
+
+// ValidModulePath accepts workspace-relative module paths such as
+// "brain/plan.lua": up to three levels, no dots besides ".lua", never
+// main.lua (which travels separately).
+func ValidModulePath(path string) bool {
+	return modulePathPattern.MatchString(path) && path != "main.lua"
+}
+
+// ValidateModules checks a module bundle against the path and size limits.
+func ValidateModules(files map[string]string) error {
+	if len(files) > MaxModules {
+		return fmt.Errorf("at most %d Lua modules besides main.lua", MaxModules)
+	}
+	total := 0
+	for path, source := range files {
+		if !ValidModulePath(path) {
+			return fmt.Errorf("invalid module path %q", path)
+		}
+		if len(source) > MaxModuleBytes {
+			return fmt.Errorf("%s exceeds 16 KiB", path)
+		}
+		total += len(source)
+	}
+	if total > MaxBundleBytes {
+		return fmt.Errorf("Lua modules exceed %d KiB in total", MaxBundleBytes/1024)
+	}
+	return nil
+}
+
+// ReadBundle returns the box's .lua modules other than main.lua.
+func (c *Client) ReadBundle(ctx context.Context, boxID string) (map[string]string, error) {
+	var result struct {
+		Files map[string]string `json:"files"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/boxes/"+boxID+"/bundle", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Files, nil
+}
+
+// WriteFiles writes Lua modules into the box workspace (templates).
+func (c *Client) WriteFiles(ctx context.Context, boxID string, files map[string]string) error {
+	var record model.BoxRecord
+	return c.do(ctx, http.MethodPut, "/v1/boxes/"+boxID+"/files", map[string]any{"files": files}, &record)
 }

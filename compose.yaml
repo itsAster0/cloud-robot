@@ -30,9 +30,17 @@ services:
       PROVISIONER_TOKEN: "${PROVISIONER_TOKEN:-local-review-token-change-me}"
       ROBOT_AGENT_BASE_URL: "ws://host.docker.internal:8080"
       WORKOS_CLIENT_ID: "${WORKOS_CLIENT_ID:-client_01M1EN6565YSSYPRPKA8A5R5MX}"
-      WORKOS_ISSUER: "${WORKOS_ISSUER}"
+      WORKOS_ISSUER: "${WORKOS_ISSUER:-}"
       WORKOS_API_KEY: "${WORKOS_API_KEY}"
       AUTH_REQUIRED: "${AUTH_REQUIRED:-true}"
+      # Operations console login. Change ADMIN_PASSWORD before exposing the stack.
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-local-admin-change-me}"
+      ADMIN_SESSION_SECRET: "${ADMIN_SESSION_SECRET:-}"
+      # Endless arena: players drop in and out; the safe zone drifts.
+      ARENA_ENABLED: "${ARENA_ENABLED:-true}"
+      ARENA_ROBOTS: "${ARENA_ROBOTS:-128}"
+      MATCH_WORKERS: "${MATCH_WORKERS:-4}"
       QUEUE_CONNECT_GRACE_SECONDS: "${QUEUE_CONNECT_GRACE_SECONDS:-30}"
       QUEUE_BOT_FILL_SECONDS: "${QUEUE_BOT_FILL_SECONDS:-45}"
       ADMIN_USER_IDS: "${ADMIN_USER_IDS:-}"
@@ -43,6 +51,11 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   provisioner:
     build:
@@ -75,7 +88,8 @@ services:
       args:
         VITE_WORKOS_CLIENT_ID: "${VITE_WORKOS_CLIENT_ID:-client_01M1EN6565YSSYPRPKA8A5R5MX}"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "3000:80"
     restart: unless-stopped

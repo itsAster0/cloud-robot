@@ -1,4 +1,6 @@
-# Lua Robot SDK
+# Lua Robot SDK 0.3 (classic arena)
+
+> Legacy protocol for the hidden Review 1 Go arena. Arena V2 robots use [SDK 0.4](lua-sdk-v4.md).
 
 Robot code runs continuously inside player-owned boxes. The box opens one outbound WebSocket to arena control plane. Server sends observations at 10 Hz using protocol version 3. SDK 0.3.2 calls player `decide` function and returns latest action. There are no player-facing turns.
 
@@ -9,10 +11,11 @@ network failure.
 
 Edit `/workspace/main.lua` over SSH. Registering a robot snapshots this file to S3-compatible storage, gives box supervisor a short robot configuration, and starts `lua main.lua`. Credentials are not displayed in browser or written into workspace.
 
-`examples/` contains ready-to-copy SDK 0.3.2 robots. Each example exactly
-matches the identically named script available from the box console:
-`lua-aggressive`, `lua-evasive`, `lua-demolisher`, `lua-patroller`,
-`lua-sniper`, and `lua-sentinel`.
+`examples/lua-v4/` contains the Rust-arena SDK 0.4 strategy pack. Each file
+exactly matches the identically named script available from the box console:
+`v4` (balanced `main.lua`), `scout`, `assault`, `sniper`, `support`,
+`sentinel`, and `scavenger`. Legacy SDK 0.3.2 `lua-*` examples were removed;
+all strategies now target protocol version 4.
 
 ## Start
 
@@ -310,3 +313,10 @@ weapons carry the real gameplay effects.
 - Agent token authenticates one robot. Never commit it.
 - Box limit: 1 CPU, 512 MB RAM, 128 PIDs, and monitored 1 GB workspace.
 - Production uses `wss://`; plain `ws://` is local-only.
+
+## SDK 0.4 and Rust matches
+
+SDK 0.4 preserves legacy support and adds protocol v4 controls for Rust-backed
+arenas. Use the [v4 reference](lua-sdk-v4.md) for energy, heat, inventory,
+independent turret control, bounded path search, and observation restrictions.
+The legacy rules described above do not apply to v4 battle royale.
