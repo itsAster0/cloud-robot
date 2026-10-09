@@ -348,6 +348,10 @@ func (c *Client) do(ctx context.Context, method, path string, input, output any)
 		message, _ := bufio.NewReader(io.LimitReader(response.Body, 4096)).ReadString('\n')
 		return fmt.Errorf("box provisioner: %s", strings.TrimSpace(message))
 	}
+	// Callers that only need success (validation) pass a nil output.
+	if output == nil {
+		return nil
+	}
 	return json.NewDecoder(response.Body).Decode(output)
 }
 

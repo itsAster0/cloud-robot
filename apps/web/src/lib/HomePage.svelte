@@ -7,9 +7,9 @@
 
   let { signedIn, onSignIn }: { signedIn: boolean; onSignIn?: () => void } = $props();
   let canvas: HTMLCanvasElement | undefined = $state();
-  let arena = $state<{ id: string; players: number } | null>(null);
+  let arena = $state<{ id: string; players: number; bots: number } | null>(null);
   $effect(() => {
-    const load = () => api.getArena().then(a => arena = a.match.status === 'running' ? { id: a.match.matchId, players: a.players } : null).catch(() => arena = null);
+    const load = () => api.getArena().then(a => arena = a.match.status === 'running' ? { id: a.match.matchId, players: a.players, bots: Math.max(0, (a.match.robots ?? []).length - a.players) } : null).catch(() => arena = null);
     void load();
     const timer = setInterval(load, 15000);
     return () => clearInterval(timer);
@@ -125,7 +125,7 @@
       {#if arena}
         <a class="arena-live flex w-fit items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-sm text-foreground no-underline hover:border-primary/60" href={`#/v2/${arena.id}`}>
           <span class="live-dot size-2.5 rounded-full bg-primary" aria-hidden="true"></span>
-          <span><strong>The Arena is live</strong> · {arena.players} {arena.players === 1 ? 'player' : 'players'} and bots fighting now. Watch or drop in →</span>
+          <span><strong>The Arena is live</strong> · {arena.players} {arena.players === 1 ? 'player' : 'players'} and {arena.bots} bots fighting now. Watch or drop in →</span>
         </a>
       {/if}
     </div>
