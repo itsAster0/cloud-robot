@@ -31,7 +31,7 @@ services:
       ROBOT_AGENT_BASE_URL: "ws://host.docker.internal:8080"
       WORKOS_CLIENT_ID: "${WORKOS_CLIENT_ID:-client_01M1EN6565YSSYPRPKA8A5R5MX}"
       WORKOS_ISSUER: "${WORKOS_ISSUER:-}"
-      WORKOS_API_KEY: "${WORKOS_API_KEY}"
+      WORKOS_API_KEY: "${WORKOS_API_KEY:-}"
       AUTH_REQUIRED: "${AUTH_REQUIRED:-true}"
       # Username/password accounts stored in the artifact bucket; turn off when WorkOS is the only sign-in.
       LOCAL_AUTH_ENABLED: "${LOCAL_AUTH_ENABLED:-true}"
@@ -60,10 +60,24 @@ services:
       timeout: 3s
       retries: 12
 
+  # Build-only service: produces the image the provisioner starts for each
+  # player box, so `docker compose up --build` needs no separate build step.
+  # The container itself exits immediately.
+  robot-box:
+    image: "${ROBOT_BOX_IMAGE:-cloud-robot-box:local}"
+    build:
+      context: .
+      dockerfile: infra/robot-box/Dockerfile
+    entrypoint: ["true"]
+    restart: "no"
+
   provisioner:
     build:
       context: .
       dockerfile: infra/docker/provisioner.Dockerfile
+    depends_on:
+      robot-box:
+        condition: service_completed_successfully
     environment:
       PROVISIONER_ADDR: ":8090"
       PROVISIONER_TOKEN: "${PROVISIONER_TOKEN:-local-review-token-change-me}"

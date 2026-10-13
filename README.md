@@ -14,7 +14,43 @@ https://github.com/user-attachments/assets/3a094938-6a28-476c-8ab3-cacf85e84ab1
 
 
 
-## Setup
+## Quick start (Docker only)
+
+Works on Windows, macOS, and Linux, on x86-64 and ARM. No API keys, `.env`
+file, mise, Go, Rust, or Node are required. Install:
+
+- **Windows 10/11:** [Git for Windows](https://git-scm.com/download/win) and
+  [Docker Desktop](https://www.docker.com/products/docker-desktop/) with the
+  default WSL 2 backend.
+- **macOS:** Docker Desktop or OrbStack; Git via `xcode-select --install`.
+- **Linux:** `git`, Docker Engine, and the Compose plugin.
+
+Start Docker before running the commands. Ports 3000, 8080, and 4566 must be
+free. Give Docker about 4 GB RAM and 10 GB disk (estimate). Without Git, use
+**Code → Download ZIP** on GitHub and run the same command in the folder.
+
+```sh
+git clone https://github.com/itsKryxen/cloud-robot.git
+cd cloud-robot
+docker compose up --build -d     # first build takes several minutes
+```
+
+Open `http://localhost:3000`, choose **Sign in → Create account**, and play.
+Admin console login is `admin` / `local-admin-change-me`.
+
+```sh
+docker compose logs -f api       # follow server logs
+docker compose down              # stop; accounts, scripts, matches are kept
+docker compose down -v           # stop and erase all local data
+```
+
+Robot boxes are separate containers started on demand; stop them with
+`docker stop $(docker ps -q --filter label=robot-arena.box=true)` (Linux,
+macOS) or the Docker Desktop UI. On Windows, clone with Git for Windows; the
+repository's `.gitattributes` keeps Linux line endings so container scripts
+run.
+
+## Development setup
 
 Requirements: Docker with Compose and mise. A WorkOS AuthKit client ID
 (public value) is optional: local username/password accounts work without it.
@@ -23,7 +59,7 @@ Requirements: Docker with Compose and mise. A WorkOS AuthKit client ID
 mise install            # Go 1.26.7, Rust 1.98.0, Node 26.8.1, pnpm 11.24.0
 mise run install        # frontend dependencies
 cp .env.example .env    # optional; Compose defaults already match
-mise run demo           # build box image and stack, start everything
+mise run demo           # build images (including the box image) and start everything
 ```
 
 Sign-in: **Sign in → Create account** makes a local account (username and
@@ -193,7 +229,7 @@ All endpoints, credentials, ports, and limits come from environment variables (s
 | Variable | Purpose | Local default |
 | --- | --- | --- |
 | `PROVISIONER_TOKEN` | Shared secret between API and provisioner | `local-review-token-change-me` |
-| `ROBOT_BOX_IMAGE` | Box image built by `mise run box:build` | `cloud-robot-box:local` |
+| `ROBOT_BOX_IMAGE` | Box image, built by the `robot-box` Compose service | `cloud-robot-box:local` |
 | `SSH_PUBLIC_HOST` | Host shown to users for SSH | `localhost` |
 | `SSH_PORT_MIN` / `SSH_PORT_COUNT` | Box SSH port range base and size | `22000` / `1000` |
 | `SSH_PORT_START` / `SSH_PORT_END` | Optional explicit range overrides | unset |
@@ -245,4 +281,5 @@ crates/arena-engine/target/release/arena-engine benchmark 256 1000 match
 - Two authenticated browser sessions have not been verified end to end by
   automated tests; the reviewer demo covers it.
 - Workspace quota is monitored, not enforced by the filesystem.
-- Authentication needs real WorkOS JWKS access; there is no offline login.
+- WorkOS sign-in needs network access to WorkOS JWKS; local accounts work
+  offline.

@@ -73,10 +73,7 @@ run = [
 
 [tasks.demo]
 description = "Build and start complete review stack"
-run = [
-  "docker build -f infra/robot-box/Dockerfile -t cloud-robot-box:local .",
-  "docker compose up --build",
-]
+run = "docker compose up --build"
 
 [tasks."demo:stop"]
 description = "Stop stack and robot boxes; volumes and workspaces are kept"
